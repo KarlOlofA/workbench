@@ -25,7 +25,7 @@ fn claude_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
+    crate::platform::home_dir().map(|h| h.join(".claude"))
 }
 
 pub fn project_key(cwd: &Path) -> String {

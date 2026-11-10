@@ -65,7 +65,7 @@ const MIN_PCT: f64 = 10.0;
 const MAX_TOTAL: f64 = 85.0;
 
 fn config_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/workbench").join(name))
+    crate::platform::config_dir().map(|d| d.join(name))
 }
 
 pub fn load_json<T: for<'de> Deserialize<'de> + Default>(name: &str) -> T {
@@ -76,7 +76,7 @@ pub fn load_json<T: for<'de> Deserialize<'de> + Default>(name: &str) -> T {
 }
 
 pub fn save_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> {
-    let path = config_path(name).ok_or("config: HOME is not set")?;
+    let path = config_path(name).ok_or("config: no home folder (HOME is not set)")?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{name}: {e}"))?;
     }

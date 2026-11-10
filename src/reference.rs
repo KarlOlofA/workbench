@@ -105,7 +105,7 @@ fn safe_path(path: &str) -> bool {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(PathBuf::from)
+    crate::platform::home_dir()
 }
 
 fn expand(cwd: &Path, s: &str) -> PathBuf {

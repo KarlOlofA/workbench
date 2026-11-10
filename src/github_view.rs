@@ -69,7 +69,7 @@ fn status_line(status: &Status) -> Element {
 
 fn open_url(url: &str) {
     if url.starts_with("https://") {
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        crate::platform::open_url(url);
     }
 }
 

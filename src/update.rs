@@ -6,7 +6,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -38,8 +37,9 @@ pub fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
+/// Self-update rebuilds via `scripts/install.sh`, which only supports macOS and Linux.
 pub fn enabled() -> bool {
-    !BUILD_COMMIT.is_empty() && std::env::var_os("WORKBENCH_NO_UPDATE_CHECK").is_none()
+    cfg!(unix) && !BUILD_COMMIT.is_empty() && std::env::var_os("WORKBENCH_NO_UPDATE_CHECK").is_none()
 }
 
 /// Asks GitHub how this build compares to `main`. `Ok(None)` means up to date,
@@ -97,10 +97,7 @@ fn parse_compare(v: &Value) -> Result<Option<Available>, String> {
 }
 
 fn cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"));
-    base.join("workbench")
+    crate::platform::cache_dir()
 }
 
 pub fn source_dir() -> PathBuf {
@@ -141,8 +138,7 @@ async fn run(log: &mut Option<File>, cwd: &Path, program: &str, args: &[&str]) -
 /// binary there. `progress` gets short status lines while it runs. Returns the
 /// checkout dir, ready for [`install_and_relaunch`].
 pub async fn build_latest(mut progress: impl FnMut(String)) -> Result<PathBuf, String> {
-    let path = augmented_path();
-    let missing: Vec<&str> = ["git", "cargo"].into_iter().filter(|t| !path.split(':').any(|d| Path::new(d).join(t).is_file())).collect();
+    let missing: Vec<&str> = ["git", "cargo"].into_iter().filter(|t| crate::platform::find_program(t).is_none()).collect();
     if !missing.is_empty() {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh");
         return Err(format!(
@@ -204,8 +200,11 @@ pub async fn build_latest(mut progress: impl FnMut(String)) -> Result<PathBuf, S
 /// Runs the checkout's install script in a detached process, then reopens
 /// Workbench on `cwd`. The caller should exit right after this returns Ok, so
 /// the installer can replace the running binary.
+#[cfg(unix)]
 pub fn install_and_relaunch(dir: &Path, cwd: &Path) -> Result<(), String> {
-    let home = std::env::var("HOME").unwrap_or_default();
+    use std::os::unix::process::CommandExt;
+
+    let home = crate::platform::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
     let bin_dir = std::env::var("BIN_DIR").unwrap_or_else(|_| format!("{home}/.local/bin"));
     let launcher = format!("{bin_dir}/wbrs");
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -232,6 +231,11 @@ if [ -x "$2" ]; then "$2" "$3"; else nohup "$4" "$3" >/dev/null 2>&1 & fi"#;
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn install_and_relaunch(_dir: &Path, _cwd: &Path) -> Result<(), String> {
+    Err("Self-update isn't supported on this OS yet; pull the repo and rebuild with `cargo build --release`.".into())
 }
 
 #[cfg(test)]

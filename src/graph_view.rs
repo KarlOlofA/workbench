@@ -118,12 +118,12 @@ fn edit_reference(mut st: AppState, id: &str, f: impl FnOnce(&mut Node)) {
 fn open_source(src: &Source) {
     match src {
         Source::Local(p) if p.exists() => {
-            let _ = std::process::Command::new("open").arg("-R").arg(p).spawn();
+            crate::platform::reveal(p);
         }
         Source::Local(_) => {}
         _ => {
             if let Some(url) = src.url().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
-                let _ = std::process::Command::new("open").arg(url).spawn();
+                crate::platform::open_url(&url);
             }
         }
     }

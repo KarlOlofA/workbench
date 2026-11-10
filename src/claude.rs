@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
+
+use crate::platform;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -176,45 +178,16 @@ pub struct ClaudeProcess {
 }
 
 pub fn find_claude_binary() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        format!("{home}/.local/bin/claude"),
-        format!("{home}/.claude/local/claude"),
-        "/opt/homebrew/bin/claude".to_string(),
-        "/usr/local/bin/claude".to_string(),
-    ];
-    candidates
+    // The native installer's locations win over whatever else is on PATH.
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    platform::home_dir()
         .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("claude"))
+        .flat_map(|h| [h.join(".local").join("bin").join(exe), h.join(".claude").join("local").join(exe)])
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| platform::program("claude"))
 }
 
-pub fn augmented_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let existing = std::env::var("PATH").unwrap_or_default();
-    let extra = [
-        format!("{home}/.local/bin"),
-        format!("{home}/.cargo/bin"),
-        "/opt/homebrew/bin".to_string(),
-        "/usr/local/bin".to_string(),
-        "/usr/bin".to_string(),
-        "/bin".to_string(),
-        "/usr/sbin".to_string(),
-        "/sbin".to_string(),
-    ];
-    let mut parts: Vec<String> = existing
-        .split(':')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    for e in extra {
-        if !parts.contains(&e) {
-            parts.push(e);
-        }
-    }
-    parts.join(":")
-}
+pub use crate::platform::augmented_path;
 
 impl ClaudeProcess {
     pub fn spawn(opts: &SpawnOptions, generation: u64, tx: UnboundedSender<(u64, ClaudeEvent)>) -> Result<Self> {

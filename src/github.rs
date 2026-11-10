@@ -246,16 +246,7 @@ pub struct NewPr {
 }
 
 fn find_gh_binary() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    [
-        "/opt/homebrew/bin/gh".to_string(),
-        "/usr/local/bin/gh".to_string(),
-        format!("{home}/.local/bin/gh"),
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
-    .unwrap_or_else(|| PathBuf::from("gh"))
+    crate::platform::program("gh")
 }
 
 fn run_gh(cwd: &Path, args: &[&str]) -> Result<String, String> {

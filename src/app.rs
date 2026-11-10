@@ -18,9 +18,11 @@ pub fn initial_cwd() -> PathBuf {
             return p.canonicalize().unwrap_or(p);
         }
     }
+    // A launcher-started app often runs from the filesystem root (`/`, or `C:\` on
+    // Windows); the home folder is a better start than that.
     match std::env::current_dir() {
-        Ok(p) if p.as_os_str() != "/" => p,
-        _ => std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/")),
+        Ok(p) if p.parent().is_some() => p,
+        cwd => crate::platform::home_dir().or(cwd.ok()).unwrap_or_else(|| PathBuf::from("/")),
     }
 }
 

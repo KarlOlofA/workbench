@@ -13,6 +13,7 @@ mod highlight;
 mod history;
 mod markdown;
 mod node_history;
+mod platform;
 mod project_view;
 mod projects;
 mod prompts;
