@@ -2108,6 +2108,38 @@ fn ModulePane(id: String) -> Element {
 
 const HISTORY_PAGE: usize = 50;
 
+#[derive(Clone, PartialEq)]
+enum HistoryGroup {
+    /// Not a git repository: one flat list without headers.
+    NoGit,
+    Uncommitted,
+    Commit(git::CommitInfo),
+}
+
+/// Groups newest-first history entries: uncommitted ones first, then one group per commit,
+/// newest commit first. Without git, everything goes in a single `NoGit` group.
+fn group_by_commit(
+    entries: impl Iterator<Item = Entry>,
+    commits: Option<&HashMap<String, git::CommitInfo>>,
+) -> Vec<(HistoryGroup, Vec<Entry>)> {
+    let mut groups: Vec<(HistoryGroup, Vec<Entry>)> = Vec::new();
+    for e in entries {
+        let g = match commits {
+            None => HistoryGroup::NoGit,
+            Some(m) => m.get(&e.uid).cloned().map_or(HistoryGroup::Uncommitted, HistoryGroup::Commit),
+        };
+        match groups.iter_mut().find(|(k, _)| *k == g) {
+            Some((_, items)) => items.push(e),
+            None => groups.push((g, vec![e])),
+        }
+    }
+    groups.sort_by_key(|(g, _)| match g {
+        HistoryGroup::NoGit | HistoryGroup::Uncommitted => (0, 0),
+        HistoryGroup::Commit(c) => (1, u64::MAX - c.at),
+    });
+    groups
+}
+
 #[component]
 fn HistoryPane() -> Element {
     let mut st = use_context::<AppState>();
@@ -2132,6 +2164,18 @@ fn HistoryPane() -> Element {
     drop(history);
     let shown = entries.len().min(*limit.read());
     let more = entries.len() - shown;
+    // Which commit added each entry to the shared log (None outside a git repo).
+    let commits = use_resource(move || async move {
+        let _ = st.repo_version.read();
+        let _ = st.node_history.read().entries.len();
+        let cwd = st.cwd.read().clone();
+        tokio::task::spawn_blocking(move || git::is_repo(&cwd).then(|| git::line_commits(&cwd, node_history::HISTORY_FILE).unwrap_or_default()))
+            .await
+            .ok()
+            .flatten()
+    });
+    let commits = commits.read().clone().flatten();
+    let groups = group_by_commit(entries.into_iter().take(shown), commits.as_ref());
     let me = st.me.read().clone();
     let module_titles: std::collections::HashMap<String, String> =
         st.graph.read().modules.iter().map(|m| (m.id.clone(), m.title.clone())).collect();
@@ -2154,13 +2198,39 @@ fn HistoryPane() -> Element {
                     "Every change to a node's title, kind, links, files or description, by you, teammates, Claude or edits outside Workbench. Shared with the repo in .workbench/node-history.jsonl."
                 }
             }
-            if entries.is_empty() {
+            if groups.is_empty() {
                 div { class: "muted pad",
                     if filtering { "No recorded changes for this node yet." } else { "No recorded changes yet. Edits to nodes show up here as diffs." }
                 }
             }
-            for e in entries.into_iter().take(shown) {
+            for (group, items) in groups {
+                match &group {
+                    HistoryGroup::NoGit => rsx! {},
+                    HistoryGroup::Uncommitted => rsx! {
+                        div { class: "history-group uncommitted",
+                            b { "Uncommitted" }
+                            span { class: "muted small-text", "{items.len()} change{plural(items.len())} not in a commit on this branch yet" }
+                        }
+                    },
+                    HistoryGroup::Commit(c) => {
+                        let when = crate::history::ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(c.at));
+                        rsx! {
+                            div { class: "history-group", title: "{c.sha}",
+                                code { "{c.short}" }
+                                span { class: "history-group-subject", "{c.subject}" }
+                                div { class: "spacer" }
+                                span { class: "muted small-text", "{c.author} · {when}" }
+                            }
+                        }
+                    }
+                }
+                for e in items {
                 {
+                    let tag = match &group {
+                        HistoryGroup::NoGit => None,
+                        HistoryGroup::Uncommitted => Some(("chip modified".to_string(), "uncommitted".to_string(), "Not in a commit on this branch yet".to_string())),
+                        HistoryGroup::Commit(c) => Some(("chip".to_string(), c.short.clone(), format!("Committed in {} · {}", c.short, c.subject))),
+                    };
                     let (sign, cls) = match e.kind() {
                         "added" => ("+", "added"),
                         "removed" => ("−", "removed"),
@@ -2186,6 +2256,9 @@ fn HistoryPane() -> Element {
                                 span { class: "change-title", "{title}" }
                                 span { class: "muted small-text history-detail", "{detail}" }
                                 div { class: "spacer" }
+                                if let Some((chip_cls, chip, chip_title)) = tag {
+                                    span { class: "{chip_cls}", title: "{chip_title}", "{chip}" }
+                                }
                                 span { class: "history-when", "{when}" }
                                 if can_show {
                                     button {
@@ -2237,6 +2310,7 @@ fn HistoryPane() -> Element {
                             }
                         }
                     }
+                }
                 }
             }
             if more > 0 {

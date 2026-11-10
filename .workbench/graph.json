@@ -13,10 +13,6 @@
       ],
       "links": [
         "app-root"
-      ],
-      "pos": [
-        54.0,
-        126.0
       ]
     },
     {
@@ -34,10 +30,6 @@
         "new-node",
         "project-view",
         "self-updater"
-      ],
-      "pos": [
-        281.0,
-        114.0
       ]
     },
     {
@@ -56,10 +48,6 @@
         "external-references",
         "ghost-branches",
         "node-history"
-      ],
-      "pos": [
-        1820.0,
-        168.0
       ]
     },
     {
@@ -75,10 +63,6 @@
         "claude-process",
         "prompt-builder",
         "app-state"
-      ],
-      "pos": [
-        1589.0,
-        47.0
       ]
     },
     {
@@ -91,10 +75,6 @@
       ],
       "links": [
         "claude-code-cli"
-      ],
-      "pos": [
-        1820.0,
-        0.0
       ]
     },
     {
@@ -105,10 +85,6 @@
       "links": [
         "project-files",
         "workbench-files"
-      ],
-      "pos": [
-        2080.0,
-        0.0
       ]
     },
     {
@@ -125,10 +101,6 @@
         "github-context",
         "external-references",
         "project-view"
-      ],
-      "pos": [
-        1820.0,
-        84.0
       ]
     },
     {
@@ -141,10 +113,6 @@
       ],
       "links": [
         "workbench-files"
-      ],
-      "pos": [
-        2340.0,
-        0.0
       ]
     },
     {
@@ -158,10 +126,6 @@
       "links": [
         "graph-model",
         "workbench-files"
-      ],
-      "pos": [
-        2080.0,
-        84.0
       ]
     },
     {
@@ -175,21 +139,13 @@
         ".workbench/rules.json",
         ".workbench/node-history.jsonl",
         ".workbench/.gitattributes"
-      ],
-      "pos": [
-        2600.0,
-        0.0
       ]
     },
     {
       "id": "project-files",
       "title": "Project working tree",
       "kind": "db",
-      "description": "The opened folder's source files and git repository. The editor and Claude both read and write files here, and git commands run against it.",
-      "pos": [
-        2340.0,
-        84.0
-      ]
+      "description": "The opened folder's source files and git repository. The editor and Claude both read and write files here, and git commands run against it."
     },
     {
       "id": "left-panel",
@@ -203,10 +159,6 @@
         "graph-tab",
         "rules-view",
         "project-view"
-      ],
-      "pos": [
-        780.0,
-        0.0
       ]
     },
     {
@@ -231,10 +183,6 @@
         "session-loop",
         "project-view",
         "history-pane"
-      ],
-      "pos": [
-        1040.0,
-        0.0
       ]
     },
     {
@@ -252,10 +200,6 @@
         "run-mode",
         "prompt-builder",
         "session-loop"
-      ],
-      "pos": [
-        1300.0,
-        336.0
       ]
     },
     {
@@ -272,10 +216,6 @@
       "links": [
         "app-state",
         "session-loop"
-      ],
-      "pos": [
-        1560.0,
-        336.0
       ]
     },
     {
@@ -290,10 +230,6 @@
         "app-state",
         "graph-model",
         "ghost-branches"
-      ],
-      "pos": [
-        1312.0,
-        3.0
       ]
     },
     {
@@ -311,10 +247,6 @@
         "session-loop",
         "external-references",
         "history-pane"
-      ],
-      "pos": [
-        1300.0,
-        84.0
       ]
     },
     {
@@ -329,10 +261,6 @@
         "app-state",
         "prompt-builder",
         "session-loop"
-      ],
-      "pos": [
-        1300.0,
-        168.0
       ]
     },
     {
@@ -347,10 +275,6 @@
         "app-state",
         "prompt-builder",
         "session-loop"
-      ],
-      "pos": [
-        1300.0,
-        252.0
       ]
     },
     {
@@ -366,10 +290,6 @@
         "rules-model",
         "prompt-builder",
         "session-loop"
-      ],
-      "pos": [
-        1040.0,
-        84.0
       ]
     },
     {
@@ -384,10 +304,6 @@
       "links": [
         "app-state",
         "session-loop"
-      ],
-      "pos": [
-        780.0,
-        84.0
       ]
     },
     {
@@ -404,10 +320,6 @@
         "git-service",
         "code-editor",
         "github-prs"
-      ],
-      "pos": [
-        780.0,
-        168.0
       ]
     },
     {
@@ -423,26 +335,18 @@
       ],
       "links": [
         "app-state"
-      ],
-      "pos": [
-        1040.0,
-        168.0
       ]
     },
     {
       "id": "git-service",
       "title": "Git service",
       "kind": "service",
-      "description": "Thin wrapper over the git CLI: repo detection, current branch, branch listing, switching and creating branches, porcelain status, ls-files, pushing the current branch, and a diff against a base that includes untracked files. It parses the output into FileDiff, Hunk and DiffLine values, and each hunk can be turned back into a patch.",
+      "description": "Thin wrapper over the git CLI: repo detection, current branch, branch listing, switching and creating branches, porcelain status, ls-files, pushing the current branch, and a diff against a base that includes untracked files. It parses the output into FileDiff, Hunk and DiffLine values, and each hunk can be turned back into a patch. For the node history it reads git log -p of the history file and maps each entry's uid to the commit, reachable from HEAD, that first added its line.",
       "files": [
         "src/git.rs"
       ],
       "links": [
         "project-files"
-      ],
-      "pos": [
-        1040.0,
-        252.0
       ]
     },
     {
@@ -457,10 +361,6 @@
       "links": [
         "desktop-entry",
         "code-editor"
-      ],
-      "pos": [
-        -211.0,
-        231.0
       ]
     },
     {
@@ -477,10 +377,6 @@
         "chat-pane",
         "code-pane",
         "left-panel"
-      ],
-      "pos": [
-        529.0,
-        74.0
       ]
     },
     {
@@ -496,11 +392,7 @@
         "app-state",
         "session-loop"
       ],
-      "module": "github",
-      "pos": [
-        1040.0,
-        336.0
-      ]
+      "module": "github"
     },
     {
       "id": "github-context",
@@ -511,11 +403,7 @@
         "src/prompts.rs",
         "src/session.rs"
       ],
-      "module": "github",
-      "pos": [
-        2080.0,
-        168.0
-      ]
+      "module": "github"
     },
     {
       "id": "external-references",
@@ -534,10 +422,6 @@
       "links": [
         "graph-model",
         "project-files"
-      ],
-      "pos": [
-        2080.0,
-        252.0
       ]
     },
     {
@@ -551,10 +435,6 @@
       "links": [
         "app-state",
         "graph-model"
-      ],
-      "pos": [
-        1300.0,
-        420.0
       ]
     },
     {
@@ -573,10 +453,6 @@
       "links": [
         "git-service",
         "graph-model"
-      ],
-      "pos": [
-        2080.0,
-        338.0
       ]
     },
     {
@@ -594,10 +470,6 @@
         "app-root",
         "graph-model",
         "github-prs"
-      ],
-      "pos": [
-        2080.0,
-        -76.0
       ]
     },
     {
@@ -620,14 +492,15 @@
       "id": "history-pane",
       "title": "History pane",
       "kind": "component",
-      "description": "Bottom-panel tab that lists recorded node and module changes newest first as classic line diffs, with who made each change (you, a teammate, Claude, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo.",
+      "description": "Bottom-panel tab that lists recorded node and module changes newest first as classic line diffs, with who made each change (you, a teammate, Claude, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo. In a git repository the list is grouped against the git state: an Uncommitted section first, for entries not yet in a commit on this branch, then one section per commit (short hash, subject, author, time), newest first. Each entry also carries an uncommitted or commit-hash tag.",
       "files": [
         "src/graph_view.rs",
         "src/style.css"
       ],
       "links": [
         "app-state",
-        "node-history"
+        "node-history",
+        "git-service"
       ]
     },
     {

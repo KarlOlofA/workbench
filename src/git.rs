@@ -173,6 +173,57 @@ pub fn show_file(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>, St
     run_git(cwd, &["show", &spec]).map(Some)
 }
 
+/// A commit that added lines to a file, as shown in the node history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short: String,
+    pub author: String,
+    pub at: u64,
+    pub subject: String,
+}
+
+/// For an append-only JSON-lines file whose lines carry a `uid`, maps each uid to the
+/// commit (reachable from HEAD) that first added its line. Uids missing from the map are
+/// not committed on this branch yet.
+pub fn line_commits(cwd: &Path, path: &str) -> Result<std::collections::HashMap<String, CommitInfo>, String> {
+    if run_git(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Ok(Default::default());
+    }
+    let out = run_git(
+        cwd,
+        &["log", "--reverse", "-p", "--no-color", "--no-ext-diff", "--format=%x1e%H%x1f%h%x1f%an%x1f%at%x1f%s", "--", path],
+    )?;
+    Ok(parse_line_commits(&out))
+}
+
+pub fn parse_line_commits(log: &str) -> std::collections::HashMap<String, CommitInfo> {
+    let mut map = std::collections::HashMap::new();
+    for chunk in log.split('\x1e').filter(|c| !c.trim().is_empty()) {
+        let mut lines = chunk.lines();
+        let Some(header) = lines.next() else { continue };
+        let f: Vec<&str> = header.splitn(5, '\x1f').collect();
+        let [sha, short, author, at, subject] = f[..] else { continue };
+        let commit = CommitInfo {
+            sha: sha.into(),
+            short: short.into(),
+            author: author.into(),
+            at: at.trim().parse().unwrap_or(0),
+            subject: subject.into(),
+        };
+        for l in lines {
+            let Some(added) = l.strip_prefix('+').filter(|_| !l.starts_with("+++")) else { continue };
+            let uid = serde_json::from_str::<serde_json::Value>(added)
+                .ok()
+                .and_then(|v| v.get("uid").and_then(|u| u.as_str()).map(String::from));
+            if let Some(uid) = uid {
+                map.entry(uid).or_insert_with(|| commit.clone());
+            }
+        }
+    }
+    map
+}
+
 pub fn status(cwd: &Path) -> Result<Vec<StatusEntry>, String> {
     let out = run_git(cwd, &["status", "--porcelain=v1", "--untracked-files=all"])?;
     Ok(out
@@ -298,6 +349,22 @@ pub fn parse_diff(text: &str) -> Vec<FileDiff> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_history_lines_to_the_commit_that_added_them() {
+        let log = "\x1eaaa111\x1faaa\x1fAda\x1f100\x1fInit\n\n\
+            diff --git a/h.jsonl b/h.jsonl\n--- /dev/null\n+++ b/h.jsonl\n@@ -0,0 +1 @@\n+{\"uid\":\"u1\",\"id\":\"a\"}\n\
+            \x1ebbb222\x1fbbb\x1fBo\x1f200\x1fMore: x\x1fy\n\n\
+            diff --git a/h.jsonl b/h.jsonl\n--- a/h.jsonl\n+++ b/h.jsonl\n@@ -1 +1,2 @@\n {\"uid\":\"u1\",\"id\":\"a\"}\n+{\"uid\":\"u2\",\"id\":\"b\"}\n+not json\n\
+            \x1eccc333\x1fccc\x1fAda\x1f300\x1fRe-add\n\n@@ -1,2 +1,2 @@\n-{\"uid\":\"u1\",\"id\":\"a\"}\n+{\"uid\":\"u1\",\"id\":\"a\"}\n";
+        let m = parse_line_commits(log);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["u1"].short, "aaa");
+        assert_eq!(m["u2"].short, "bbb");
+        assert_eq!(m["u2"].at, 200);
+        assert_eq!(m["u2"].subject, "More: x\x1fy");
+        assert_eq!(m["u2"].author, "Bo");
+    }
 
     #[test]
     fn parses_simple_diff() {
