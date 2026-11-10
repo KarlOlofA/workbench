@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {
+      "id": "r1",
+      "title": "",
+      "body": "- We want to write as little code as possible to makedebugging easier.\n- We want to write explicit code that explains itself.",
+      "enabled": true
+    }
+  ]
+}
