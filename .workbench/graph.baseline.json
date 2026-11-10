@@ -1,0 +1,838 @@
+{
+  "nodes": [
+    {
+      "id": "desktop-entry",
+      "title": "Desktop entry (main)",
+      "kind": "app",
+      "description": "Binary entry point. Builds the 1400x900 Workbench window, injects style.css into the page head and launches the Dioxus desktop runtime with the App root component.",
+      "files": [
+        "src/main.rs",
+        "src/style.css",
+        "Dioxus.toml",
+        "Cargo.toml"
+      ],
+      "links": [
+        "app-root"
+      ],
+      "pos": [
+        54.0,
+        126.0
+      ]
+    },
+    {
+      "id": "app-root",
+      "title": "App root & header",
+      "kind": "ui",
+      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context and starts the Claude session coroutine. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), model and cost badges, permission-mode selector, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it. open_folder switches the working folder (used by the folder picker and the project view), and a project chip in the header jumps to the project that contains the open folder.",
+      "files": [
+        "src/app.rs"
+      ],
+      "links": [
+        "app-state",
+        "session-loop",
+        "git-service",
+        "new-node",
+        "project-view"
+      ],
+      "pos": [
+        281.0,
+        114.0
+      ]
+    },
+    {
+      "id": "app-state",
+      "title": "AppState (signals store)",
+      "kind": "store",
+      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), chat items, session id, model, cost, permission mode, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules and related repos. For plain chat turns it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Claude made into the baseline (the whole graph if it was in sync, otherwise only Claude's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Also defines the Cmd enum sent to the session loop.",
+      "files": [
+        "src/state.rs"
+      ],
+      "links": [
+        "graph-model",
+        "rules-model",
+        "workbench-files",
+        "project-files",
+        "external-references",
+        "ghost-branches",
+        "node-history"
+      ],
+      "pos": [
+        1820.0,
+        168.0
+      ]
+    },
+    {
+      "id": "session-loop",
+      "title": "Claude session loop",
+      "kind": "service",
+      "description": "Long-running coroutine that receives Cmd values (Send, Prompt, Interrupt, Restart) and owns the live Claude process. It spawns the process lazily, respawns it when the rules version changes, and resumes the stored session id. A generation counter drops events from killed processes. Streamed events become chat items; file-touching tool results bump repo_version and reload the open file, and Done finishes the current graph job. Every delivered message outside a job starts a chat turn in app-state, which Done settles against the baseline. Changing a project's repositories or descriptions also restarts Claude with the updated project context.",
+      "files": [
+        "src/session.rs",
+        "src/history.rs"
+      ],
+      "links": [
+        "claude-process",
+        "prompt-builder",
+        "app-state"
+      ],
+      "pos": [
+        1589.0,
+        47.0
+      ]
+    },
+    {
+      "id": "claude-process",
+      "title": "Claude CLI process",
+      "kind": "service",
+      "description": "Finds the claude binary, then spawns it with stream-json input/output, partial messages, a permission mode, an optional --resume and --append-system-prompt. It writes user messages and interrupt control requests to stdin. Stdout lines are parsed into ClaudeEvent values (Init, TextDelta, ToolUse, ToolResult, Done, Stderr, Exited) and tagged with a generation number. Also provides tool summaries and file-path extraction.",
+      "files": [
+        "src/claude.rs"
+      ],
+      "links": [
+        "claude-code-cli"
+      ],
+      "pos": [
+        1820.0,
+        0.0
+      ]
+    },
+    {
+      "id": "claude-code-cli",
+      "title": "Claude Code CLI",
+      "kind": "external",
+      "description": "The external `claude` executable, run as a subprocess in the project directory. It does the actual agent work (reading and editing files, writing .workbench/graph.json) and streams JSON events back.",
+      "links": [
+        "project-files",
+        "workbench-files"
+      ],
+      "pos": [
+        2080.0,
+        0.0
+      ]
+    },
+    {
+      "id": "prompt-builder",
+      "title": "Prompt builder",
+      "kind": "service",
+      "description": "Builds every structured prompt sent to Claude: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Claude may add nodes for new units it had to create), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Claude to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Claude may read, the modules guide, enabled rules and the related GitHub repositories.",
+      "files": [
+        "src/prompts.rs"
+      ],
+      "links": [
+        "graph-model",
+        "rules-model",
+        "github-context",
+        "external-references",
+        "project-view"
+      ],
+      "pos": [
+        1820.0,
+        84.0
+      ]
+    },
+    {
+      "id": "graph-model",
+      "title": "Graph model",
+      "kind": "model",
+      "description": "Serde types Node, Flow, Module and Graph, plus helpers: lookup, unique ids, slugify, node removal, edges, auto-layout into columns, kind colours, and diff(base, current), which produces field-level Change records. A Module is an isolated node network stored in graph.modules; a node whose `module` field names it is an attachment point, and one module can be attached in many places (never inside itself). The diff covers the main network, every module network and module title/description, tagging each change with its scope. absorb applies a set of changes from a current graph onto a baseline. load and save read and write the graph JSON under .workbench.",
+      "files": [
+        "src/graph.rs"
+      ],
+      "links": [
+        "workbench-files"
+      ],
+      "pos": [
+        2340.0,
+        0.0
+      ]
+    },
+    {
+      "id": "rules-model",
+      "title": "Rules model",
+      "kind": "model",
+      "description": "Project rules (id, title, body, enabled, optional node scope) stored in .workbench/rules.json. Provides load and save, id generation, filtering of rules relevant to a set of nodes, and rendering rules as prompt text.",
+      "files": [
+        "src/rules.rs"
+      ],
+      "links": [
+        "graph-model",
+        "workbench-files"
+      ],
+      "pos": [
+        2080.0,
+        84.0
+      ]
+    },
+    {
+      "id": "workbench-files",
+      "title": ".workbench data files",
+      "kind": "db",
+      "description": "On-disk JSON store in the opened project: graph.json (the current, editable graph), graph.baseline.json (the last state in sync with the code) and rules.json. These files are read on load and re-read whenever the repo version changes.",
+      "files": [
+        ".workbench/graph.json",
+        ".workbench/graph.baseline.json",
+        ".workbench/rules.json",
+        ".workbench/node-history.jsonl",
+        ".workbench/.gitattributes"
+      ],
+      "pos": [
+        2600.0,
+        0.0
+      ]
+    },
+    {
+      "id": "project-files",
+      "title": "Project working tree",
+      "kind": "db",
+      "description": "The opened folder's source files and git repository. The editor and Claude both read and write files here, and git commands run against it.",
+      "pos": [
+        2340.0,
+        84.0
+      ]
+    },
+    {
+      "id": "left-panel",
+      "title": "Left panel (Graph / Rules tabs)",
+      "kind": "screen",
+      "description": "Collapsible side panel that switches between the architecture graph tab and the rules tab. It shows workbench load errors and the current job status (Mapping / Processing). When the user goes up from a repository's graph it shows the project view instead of the graph tab.",
+      "files": [
+        "src/graph_view.rs"
+      ],
+      "links": [
+        "graph-tab",
+        "rules-view",
+        "project-view"
+      ],
+      "pos": [
+        780.0,
+        0.0
+      ]
+    },
+    {
+      "id": "graph-tab",
+      "title": "Graph tab & toolbar",
+      "kind": "component",
+      "description": "Hosts the canvas and the side panes for Node, Flows, Changes, History and Prompt. The toolbar adds nodes and starts a Generate job, which sends the mapping prompt to Claude with the graph locked until the job finishes. The nodes have draggable inputs and outputs so they’re easily able to change their links. The breadcrumb row always shows project › repository › modules, and Up from the repository root opens the project view. The bottom panel under the canvas can be minimized to its tab bar and resized by dragging the splitter above it; its collapsed state and height are remembered in ~/.config/workbench/graph-bottom.json.",
+      "files": [
+        "src/graph_view.rs",
+        "src/style.css",
+        "src/state.rs"
+      ],
+      "links": [
+        "graph-canvas",
+        "node-pane",
+        "module-pane",
+        "flows-pane",
+        "changes-pane",
+        "prompt-pane",
+        "run-mode",
+        "prompt-builder",
+        "session-loop",
+        "project-view",
+        "history-pane"
+      ],
+      "pos": [
+        1040.0,
+        0.0
+      ]
+    },
+    {
+      "id": "prompt-pane",
+      "title": "Prompt pane (add nodes from prompt)",
+      "kind": "component",
+      "description": "Graph sub-tab where the user describes behaviour in plain text. Add nodes starts a Draft job that asks Claude to extend graph.json with new nodes, links and flows without touching source code. Because a Draft job never updates the baseline, the new nodes show up as pending changes that are committed into code afterwards.",
+      "files": [
+        "src/graph_view.rs",
+        "src/prompts.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "app-state",
+        "run-mode",
+        "prompt-builder",
+        "session-loop"
+      ],
+      "pos": [
+        1300.0,
+        336.0
+      ]
+    },
+    {
+      "id": "run-mode",
+      "title": "Plan / Auto run mode",
+      "kind": "model",
+      "description": "Toolbar toggle that controls how Claude handles Draft and Process jobs. In Plan mode the prompt tells Claude to ask numbered questions and end its reply with a marker instead of editing. The session loop then pauses the job, keeping the graph locked, until the user answers in the chat or cancels. In Auto mode Claude fills in the gaps itself and lists its assumptions.",
+      "files": [
+        "src/state.rs",
+        "src/prompts.rs",
+        "src/session.rs",
+        "src/graph_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "session-loop"
+      ],
+      "pos": [
+        1560.0,
+        336.0
+      ]
+    },
+    {
+      "id": "graph-canvas",
+      "title": "Graph canvas",
+      "kind": "component",
+      "description": "SVG and HTML node diagram with pan, zoom, fit-to-view, node dragging (saves the position) and link creation by clicking. It highlights the active flow path and colours nodes by kind. It always shows one network: the main graph or the module the user has opened. Module attachment nodes are drawn with a double teal border, the module name and node count, and are marked edited when their module has pending changes; double-clicking one opens the module, and a breadcrumb bar leads back up. The toolbar's + Module… menu creates a new module or attaches an existing one here.",
+      "files": [
+        "src/graph_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "graph-model",
+        "ghost-branches"
+      ],
+      "pos": [
+        1312.0,
+        3.0
+      ]
+    },
+    {
+      "id": "node-pane",
+      "title": "Node inspector",
+      "kind": "component",
+      "description": "Editor for the selected node's title, kind, description, files and links. It shows incoming callers, can revert the node to the baseline, and has an Ask Claude action that sends a node-specific question. Here a node holds a explicit list of links to other nodes. One list of inputs flows and one for output flows. The nodes also hold a list of the files that is related to it and in what manner, like its own dependencies, where its used and such. For reference nodes it shows the source, its detected type, whether it is a Workbench project, and a picker for the referenced project's nodes.",
+      "files": [
+        "src/graph_view.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "app-state",
+        "prompt-builder",
+        "session-loop",
+        "external-references",
+        "history-pane"
+      ],
+      "pos": [
+        1300.0,
+        84.0
+      ]
+    },
+    {
+      "id": "changes-pane",
+      "title": "Changes pane (commit graph)",
+      "kind": "component",
+      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. With an optional note, it sends a Process job that asks Claude to change the code to match the edited graph. When the job succeeds, the baseline is updated.",
+      "files": [
+        "src/graph_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "prompt-builder",
+        "session-loop"
+      ],
+      "pos": [
+        1300.0,
+        168.0
+      ]
+    },
+    {
+      "id": "flows-pane",
+      "title": "Flows pane & debug",
+      "kind": "component",
+      "description": "Lists flows, lets the user draft new ones by clicking nodes in order, and highlights the active flow on the canvas. Runs a debug prompt for a flow in the chosen DebugMode, with an optional symptom description.",
+      "files": [
+        "src/graph_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "prompt-builder",
+        "session-loop"
+      ],
+      "pos": [
+        1300.0,
+        252.0
+      ]
+    },
+    {
+      "id": "rules-view",
+      "title": "Rules view",
+      "kind": "screen",
+      "description": "CRUD list of project rules: add, edit, enable or disable, scope to a node, delete, and filter. An Audit action asks Claude to check the codebase against all enabled rules. Any change bumps rules_version, which restarts the Claude process on the next message.",
+      "files": [
+        "src/rules_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "rules-model",
+        "prompt-builder",
+        "session-loop"
+      ],
+      "pos": [
+        1040.0,
+        84.0
+      ]
+    },
+    {
+      "id": "chat-pane",
+      "title": "Chat pane",
+      "kind": "screen",
+      "description": "Conversation view showing user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy.",
+      "files": [
+        "src/chat.rs",
+        "src/markdown.rs"
+      ],
+      "links": [
+        "app-state",
+        "session-loop"
+      ],
+      "pos": [
+        780.0,
+        84.0
+      ]
+    },
+    {
+      "id": "code-pane",
+      "title": "Code pane (Files / Editor / Diff)",
+      "kind": "screen",
+      "description": "Right-hand tabs. Files lists tracked and untracked files with their git status. Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Claude button that pastes it into the chat input. Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module.",
+      "files": [
+        "src/code.rs",
+        "src/highlight.rs"
+      ],
+      "links": [
+        "app-state",
+        "git-service",
+        "code-editor",
+        "github-prs"
+      ],
+      "pos": [
+        780.0,
+        168.0
+      ]
+    },
+    {
+      "id": "code-editor",
+      "title": "CodeMirror editor bridge",
+      "kind": "component",
+      "description": "Mounts the bundled CodeMirror 6 editor (vim mode, many languages) in the webview through document.eval. Load and focus messages go to JS; Change, Save (:w), Close (:q) and Reload (:e) messages come back and update the open file in AppState.",
+      "files": [
+        "src/editor.rs",
+        "src/editor.bundle.js",
+        "editor-js/src/main.js",
+        "editor-js/package.json"
+      ],
+      "links": [
+        "app-state"
+      ],
+      "pos": [
+        1040.0,
+        168.0
+      ]
+    },
+    {
+      "id": "git-service",
+      "title": "Git service",
+      "kind": "service",
+      "description": "Thin wrapper over the git CLI: repo detection, current branch, branch listing, switching and creating branches, porcelain status, ls-files, pushing the current branch, and a diff against a base that includes untracked files. It parses the output into FileDiff, Hunk and DiffLine values, and each hunk can be turned back into a patch.",
+      "files": [
+        "src/git.rs"
+      ],
+      "links": [
+        "project-files"
+      ],
+      "pos": [
+        1040.0,
+        252.0
+      ]
+    },
+    {
+      "id": "install-tooling",
+      "title": "Build & install tooling",
+      "kind": "job",
+      "description": "Makefile targets for run, test, install, open, uninstall and the editor bundle build. install.sh builds a release binary, packages it as ~/Applications/Workbench.app and installs a `wbrs` launcher in ~/.local/bin. `make editor` uses esbuild to bundle editor-js into src/editor.bundle.js.",
+      "files": [
+        "Makefile",
+        "scripts/install.sh"
+      ],
+      "links": [
+        "desktop-entry",
+        "code-editor"
+      ],
+      "pos": [
+        -211.0,
+        231.0
+      ]
+    },
+    {
+      "id": "new-node",
+      "title": "Screen definition",
+      "kind": "model",
+      "description": "A screen can be minimized and reopened. When a screen is closed its saved to the app state so it persist across sessions.",
+      "files": [
+        "src/screens.rs",
+        "src/state.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "chat-pane",
+        "code-pane",
+        "left-panel"
+      ],
+      "pos": [
+        529.0,
+        74.0
+      ]
+    },
+    {
+      "id": "github-prs",
+      "title": "GitHub (PRs & repos)",
+      "kind": "module",
+      "description": "The Code pane's GitHub tab. Here the module is used interactively: list, read, review, comment on, open and merge pull requests, and browse related repositories.",
+      "files": [
+        "src/code.rs",
+        "src/github_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "session-loop"
+      ],
+      "module": "github",
+      "pos": [
+        1040.0,
+        336.0
+      ]
+    },
+    {
+      "id": "github-context",
+      "title": "GitHub (related repos context)",
+      "kind": "module",
+      "description": "The prompt builder uses the module's related-repository list so every Claude session knows which other GitHub projects it may read with gh for context.",
+      "files": [
+        "src/prompts.rs",
+        "src/session.rs"
+      ],
+      "module": "github",
+      "pos": [
+        2080.0,
+        168.0
+      ]
+    },
+    {
+      "id": "external-references",
+      "title": "External references",
+      "kind": "service",
+      "description": "Nodes of kind `reference` point outside the project through `reference.source`: a local folder or file, a GitHub repository (URL, owner/repo or github:owner/repo@ref/path), a website, or an npm/crate/pypi/go package. Sources are parsed into a Source, and Workbench looks for the referenced project's .workbench/graph.json: locally by walking up from the path, on GitHub through gh at the path and its parents, or in node_modules and the cargo registry for packages. Loaded graphs are cached in AppState by source. The user can pick nodes of that graph into `reference.nodes`, and their descriptions and files are put into the system prompt, the selection context and process prompts as read-only context.",
+      "files": [
+        "src/reference.rs",
+        "src/graph.rs",
+        "src/github.rs",
+        "src/state.rs",
+        "src/prompts.rs",
+        "src/graph_view.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "graph-model",
+        "project-files"
+      ],
+      "pos": [
+        2080.0,
+        252.0
+      ]
+    },
+    {
+      "id": "module-pane",
+      "title": "Module inspector",
+      "kind": "component",
+      "description": "Shown in the Node sub-tab when a module is open and no node is selected. Edits the module's title and description, lists every place the module is attached (click to jump there), shows pending module changes with Revert, and deletes the module together with its attachment nodes.",
+      "files": [
+        "src/graph_view.rs"
+      ],
+      "links": [
+        "app-state",
+        "graph-model"
+      ],
+      "pos": [
+        1300.0,
+        420.0
+      ]
+    },
+    {
+      "id": "ghost-branches",
+      "title": "Ghost branches",
+      "kind": "service",
+      "description": "Shows the graph work on other git branches as read-only ghost nodes on the canvas. For each branch the user picks from the Ghosts toggle, it reads the branch's .workbench/graph.json and the one at the merge base with HEAD, and diffs them so only that branch's own work appears: added nodes become dashed ghosts with dashed links, and nodes it changed or removed get a coloured ring. Clicking a ghost puts it into Claude's context next to the selected nodes, with a note to read its code via git show instead of checking the branch out.",
+      "files": [
+        "src/ghost.rs",
+        "src/git.rs",
+        "src/state.rs",
+        "src/graph_view.rs",
+        "src/prompts.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "git-service",
+        "graph-model"
+      ],
+      "pos": [
+        2080.0,
+        338.0
+      ]
+    },
+    {
+      "id": "project-view",
+      "title": "Project view (related repositories)",
+      "kind": "screen",
+      "description": "The level above a repository's graph. A project, such as Workbench, groups the local clones of the repositories that make up one product, for example frontend, backend and host. It shows each repository as a node with an editable description text box beside it instead of links, plus its graph size and GitHub remote. Projects are stored in ~/.config/workbench/projects.json; double-clicking a repository opens it as the working folder and shows its graph. When the open folder belongs to a project, the other repositories and their descriptions go into Claude's system prompt.",
+      "files": [
+        "src/project_view.rs",
+        "src/projects.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "app-state",
+        "app-root",
+        "graph-model",
+        "github-prs"
+      ],
+      "pos": [
+        2080.0,
+        -76.0
+      ]
+    },
+    {
+      "id": "node-history",
+      "title": "Node history",
+      "kind": "store",
+      "description": "Shared, append-only history of node and module changes (title, kind, module, reference, links, files and description) stored as before/after text. Each entry has a unique id, a time, an author (git user.name) and a source: a person in Workbench, Claude working for that person, or an edit outside Workbench. The log is .workbench/node-history.jsonl, one entry per line, with a .workbench/.gitattributes union-merge rule so logs from several people merge without conflicts; on load lines are de-duplicated by id and sorted by time. What this client last saw of the graph is kept locally in ~/.config/workbench/node-snapshots/, and a change already in the shared log (for example pulled from a teammate) is not logged again. Rapid edits by the same person are merged into one entry, and a built-in LCS line diff renders entries as classic +/− diffs.",
+      "files": [
+        "src/node_history.rs",
+        "src/state.rs",
+        "src/git.rs"
+      ],
+      "links": [
+        "graph-model",
+        "workbench-files",
+        "git-service"
+      ]
+    },
+    {
+      "id": "history-pane",
+      "title": "History pane",
+      "kind": "component",
+      "description": "Bottom-panel tab that lists recorded node and module changes newest first as classic line diffs, with who made each change (you, a teammate, Claude, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo.",
+      "files": [
+        "src/graph_view.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "app-state",
+        "node-history"
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "chat-message",
+      "name": "Send a chat message to Claude",
+      "nodes": [
+        "chat-pane",
+        "session-loop",
+        "prompt-builder",
+        "claude-process",
+        "claude-code-cli",
+        "project-files"
+      ]
+    },
+    {
+      "id": "generate-graph",
+      "name": "Generate architecture graph",
+      "nodes": [
+        "graph-tab",
+        "prompt-builder",
+        "session-loop",
+        "claude-process",
+        "claude-code-cli",
+        "workbench-files",
+        "app-state",
+        "graph-model"
+      ]
+    },
+    {
+      "id": "commit-graph-changes",
+      "name": "Commit graph edits into code",
+      "nodes": [
+        "node-pane",
+        "app-state",
+        "graph-model",
+        "changes-pane",
+        "prompt-builder",
+        "session-loop",
+        "claude-process",
+        "claude-code-cli",
+        "project-files"
+      ]
+    },
+    {
+      "id": "debug-flow",
+      "name": "Debug a flow",
+      "nodes": [
+        "flows-pane",
+        "prompt-builder",
+        "session-loop",
+        "claude-process",
+        "claude-code-cli"
+      ]
+    },
+    {
+      "id": "edit-file",
+      "name": "Open, edit and save a file",
+      "nodes": [
+        "code-pane",
+        "git-service",
+        "code-editor",
+        "app-state",
+        "project-files"
+      ]
+    },
+    {
+      "id": "review-diff",
+      "name": "Review diff and ask Claude about a hunk",
+      "nodes": [
+        "code-pane",
+        "git-service",
+        "project-files",
+        "app-state",
+        "chat-pane",
+        "session-loop"
+      ]
+    }
+  ],
+  "modules": [
+    {
+      "id": "github",
+      "title": "GitHub integration",
+      "description": "Talks to GitHub through the gh CLI so the user can read, write, review and merge pull requests of this project and read related repositories for context. Its interface is the GitHub tab component plus the related-repos list in AppState, which the prompt builder turns into Claude context.",
+      "nodes": [
+        {
+          "id": "gh-tab",
+          "title": "GitHub tab",
+          "kind": "screen",
+          "description": "Container with a repository selector (this repo or any related repo), sub-tabs for Pull requests, New PR and Related repos, and a reload button. Shares the selected repo, open PR and a reload counter with its children through a context.",
+          "files": [
+            "src/github_view.rs",
+            "src/style.css"
+          ],
+          "links": [
+            "gh-pr-list",
+            "gh-pr-detail",
+            "gh-new-pr",
+            "gh-related"
+          ]
+        },
+        {
+          "id": "gh-pr-list",
+          "title": "Pull request list",
+          "kind": "component",
+          "description": "Lists up to 50 pull requests of the selected repository filtered by open, closed, merged or all, with state, number, title, author, branches and review decision. Clicking one opens its detail view.",
+          "files": [
+            "src/github_view.rs"
+          ],
+          "links": [
+            "gh-service"
+          ]
+        },
+        {
+          "id": "gh-pr-detail",
+          "title": "PR detail, review & merge",
+          "kind": "component",
+          "description": "Shows a pull request's description, checks, reviews and comments, and its diff on demand. Posts comments, approvals and change requests, and merges with squash, merge or rebase (optionally deleting the branch) behind a confirm step. Ask Claude to review sends a read-only review prompt to the chat.",
+          "files": [
+            "src/github_view.rs",
+            "src/code.rs"
+          ],
+          "links": [
+            "gh-service"
+          ]
+        },
+        {
+          "id": "gh-new-pr",
+          "title": "New pull request",
+          "kind": "component",
+          "description": "Opens a pull request from the current branch into the base branch (the default branch unless changed), with title, markdown body and draft flag, optionally pushing the branch first. Refuses to open one from the base branch. Draft with Claude asks Claude to write the title and description from the branch's commits.",
+          "files": [
+            "src/github_view.rs",
+            "src/git.rs"
+          ],
+          "links": [
+            "gh-service"
+          ]
+        },
+        {
+          "id": "gh-related",
+          "title": "Related repositories",
+          "kind": "component",
+          "description": "Adds and removes related repositories (owner/repo or a github.com URL), jumps to a related repo's pull requests, and browses its files through the contents API. A file can be added to the chat input as context, truncated to keep prompts small.",
+          "files": [
+            "src/github_view.rs",
+            "src/state.rs"
+          ],
+          "links": [
+            "gh-service",
+            "gh-config"
+          ]
+        },
+        {
+          "id": "gh-service",
+          "title": "GitHub service (gh CLI)",
+          "kind": "service",
+          "description": "Wraps the gh CLI with prompts disabled: current and named repo info, list, view and diff pull requests (diffs parsed by the git service's parser), create, comment, review and merge, and read repository contents and raw files. Repository names and content paths are validated before they reach gh.",
+          "files": [
+            "src/github.rs"
+          ],
+          "links": [
+            "gh-cli",
+            "gh-config"
+          ]
+        },
+        {
+          "id": "gh-config",
+          "title": "Related repos file",
+          "kind": "db",
+          "description": ".workbench/github.json holds the list of related repositories. It is loaded with the rest of the workbench data, and saving it bumps the system-prompt version so Claude restarts with the new context.",
+          "files": [
+            ".workbench/github.json"
+          ]
+        },
+        {
+          "id": "gh-cli",
+          "title": "GitHub CLI (gh)",
+          "kind": "external",
+          "description": "The external gh executable, authenticated with gh auth login. It runs in the project directory and talks to the GitHub API."
+        }
+      ],
+      "flows": [
+        {
+          "id": "review-and-merge-pr",
+          "name": "Review and merge a pull request",
+          "nodes": [
+            "gh-tab",
+            "gh-pr-list",
+            "gh-pr-detail",
+            "gh-service",
+            "gh-cli"
+          ]
+        },
+        {
+          "id": "read-related-repo",
+          "name": "Read a related repository for context",
+          "nodes": [
+            "gh-tab",
+            "gh-related",
+            "gh-service",
+            "gh-cli"
+          ]
+        }
+      ]
+    }
+  ]
+}

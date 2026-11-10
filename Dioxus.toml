@@ -1,0 +1,9 @@
+[application]
+name = "Workbench"
+default_platform = "desktop"
+
+[bundle]
+identifier = "se.codebrain.workbench"
+publisher = "codebrain"
+category = "DeveloperTool"
+short_description = "Shape any codebase through an architecture graph, project rules and Claude Code"
