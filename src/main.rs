@@ -22,6 +22,8 @@ mod rules_view;
 mod screens;
 mod session;
 mod state;
+mod update;
+mod update_view;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 

@@ -394,46 +394,197 @@ pub fn free_spot(want: [f64; 2], placed: &HashMap<String, [f64; 2]>) -> [f64; 2]
         .unwrap_or([x, y])
 }
 
+/// Drops the edges that close a cycle (DFS back edges), so the rest forms a DAG.
+fn acyclic_edges(n: usize, edges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut out_of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg = vec![0usize; n];
+    for &(u, v) in edges {
+        out_of[u].push(v);
+        indeg[v] += 1;
+    }
+    // 0 = unvisited, 1 = on stack, 2 = done
+    let mut state = vec![0u8; n];
+    let mut keep = Vec::new();
+    let roots: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).chain(0..n).collect();
+    for r in roots {
+        if state[r] != 0 {
+            continue;
+        }
+        state[r] = 1;
+        let mut stack = vec![(r, 0usize)];
+        while let Some(&mut (u, ref mut k)) = stack.last_mut() {
+            if let Some(&v) = out_of[u].get(*k) {
+                *k += 1;
+                match state[v] {
+                    0 => {
+                        keep.push((u, v));
+                        state[v] = 1;
+                        stack.push((v, 0));
+                    }
+                    2 => keep.push((u, v)),
+                    _ => {} // back edge: closes a cycle
+                }
+            } else {
+                state[u] = 2;
+                stack.pop();
+            }
+        }
+    }
+    keep
+}
+
+/// Moves `want` as little as possible (least squares) while keeping the order and a
+/// minimum `gap` between neighbours.
+fn spread(want: &[f64], gap: f64) -> Vec<f64> {
+    let shifted: Vec<f64> = want.iter().enumerate().map(|(i, w)| w - i as f64 * gap).collect();
+    let mut blocks: Vec<(f64, usize)> = Vec::new();
+    for &v in &shifted {
+        blocks.push((v, 1));
+        while blocks.len() > 1 {
+            let (b, nb) = blocks[blocks.len() - 1];
+            let (a, na) = blocks[blocks.len() - 2];
+            if a <= b {
+                break;
+            }
+            blocks.pop();
+            *blocks.last_mut().unwrap() = ((a * na as f64 + b * nb as f64) / (na + nb) as f64, na + nb);
+        }
+    }
+    blocks.iter().flat_map(|&(v, c)| std::iter::repeat_n(v, c)).enumerate().map(|(i, v)| v + i as f64 * gap).collect()
+}
+
 pub fn auto_layout(g: &Graph) -> HashMap<String, [f64; 2]> {
     let n = g.nodes.len();
     let index: HashMap<&str, usize> = g.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
     let index = &index;
-    let edges: Vec<(usize, usize)> = g
+    let mut edges: Vec<(usize, usize)> = g
         .nodes
         .iter()
         .enumerate()
         .flat_map(|(i, node)| node.links.iter().filter_map(move |l| index.get(l.as_str())).map(move |&j| (i, j)))
         .filter(|(i, j)| i != j)
         .collect();
+    edges.sort();
+    edges.dedup();
+    let dag = acyclic_edges(n, &edges);
 
-    let mut depth = vec![0usize; n];
-    for _ in 0..n {
-        let mut changed = false;
-        for &(u, v) in &edges {
-            if depth[u] + 1 > depth[v] && depth[u] + 1 < n {
-                depth[v] = depth[u] + 1;
-                changed = true;
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(u, v) in &dag {
+        succs[u].push(v);
+        preds[v].push(u);
+    }
+    let connected: Vec<bool> = (0..n).map(|i| !preds[i].is_empty() || !succs[i].is_empty()).collect();
+
+    // Longest-path layering over the DAG (Kahn order).
+    let mut indeg: Vec<usize> = preds.iter().map(Vec::len).collect();
+    let mut queue: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut topo = Vec::with_capacity(n);
+    while let Some(u) = queue.pop() {
+        topo.push(u);
+        for &v in &succs[u] {
+            indeg[v] -= 1;
+            if indeg[v] == 0 {
+                queue.push(v);
             }
         }
-        if !changed {
-            break;
+    }
+    let mut depth = vec![0usize; n];
+    for &u in &topo {
+        for &v in &succs[u] {
+            depth[v] = depth[v].max(depth[u] + 1);
+        }
+    }
+    // Sources sit right before their nearest callee instead of far out in column 0.
+    for &u in topo.iter().rev() {
+        if preds[u].is_empty() {
+            if let Some(m) = succs[u].iter().map(|&v| depth[v]).min() {
+                depth[u] = m.saturating_sub(1);
+            }
         }
     }
 
-    let max_depth = depth.iter().copied().max().unwrap_or(0);
-    let mut row_of = vec![0f64; n];
-    let mut out = HashMap::new();
-    for d in 0..=max_depth {
-        let mut layer: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
-        let bary = |i: usize| {
-            let parents: Vec<f64> = edges.iter().filter(|e| e.1 == i && depth[e.0] < d).map(|e| row_of[e.0]).collect();
-            if parents.is_empty() { f64::MAX } else { parents.iter().sum::<f64>() / parents.len() as f64 }
-        };
-        layer.sort_by(|&a, &b| bary(a).partial_cmp(&bary(b)).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b)));
-        for (row, &i) in layer.iter().enumerate() {
-            row_of[i] = row as f64;
-            out.insert(g.nodes[i].id.clone(), [d as f64 * COL_W, row as f64 * ROW_H]);
+    let max_depth = (0..n).filter(|&i| connected[i]).map(|i| depth[i]).max().unwrap_or(0);
+    let mut layers: Vec<Vec<usize>> = vec![Vec::new(); max_depth + 1];
+    for &u in &topo {
+        if connected[u] {
+            layers[depth[u]].push(u);
         }
+    }
+
+    // Crossing reduction: barycenter sweeps, left-to-right then right-to-left.
+    let mut slot = vec![0f64; n];
+    let renumber = |layer: &[usize], slot: &mut Vec<f64>| {
+        for (k, &i) in layer.iter().enumerate() {
+            slot[i] = k as f64;
+        }
+    };
+    for layer in &layers {
+        renumber(layer, &mut slot);
+    }
+    let bary = |nbrs: &[usize], slot: &[f64], own: f64| {
+        if nbrs.is_empty() { own } else { nbrs.iter().map(|&j| slot[j]).sum::<f64>() / nbrs.len() as f64 }
+    };
+    for _ in 0..6 {
+        for d in 1..layers.len() {
+            let mut keyed: Vec<(f64, usize)> = layers[d].iter().map(|&i| (bary(&preds[i], &slot, slot[i]), i)).collect();
+            keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+            layers[d] = keyed.into_iter().map(|(_, i)| i).collect();
+            renumber(&layers[d], &mut slot);
+        }
+        for d in (0..layers.len().saturating_sub(1)).rev() {
+            let mut keyed: Vec<(f64, usize)> = layers[d].iter().map(|&i| (bary(&succs[i], &slot, slot[i]), i)).collect();
+            keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+            layers[d] = keyed.into_iter().map(|(_, i)| i).collect();
+            renumber(&layers[d], &mut slot);
+        }
+    }
+
+    // Vertical placement: pull each node toward the mean height of its neighbours.
+    let mut y = vec![0f64; n];
+    for layer in &layers {
+        for (k, &i) in layer.iter().enumerate() {
+            y[i] = k as f64 * ROW_H;
+        }
+    }
+    let mean_y = |nbrs: &[usize], y: &[f64], own: f64| {
+        if nbrs.is_empty() { own } else { nbrs.iter().map(|&j| y[j]).sum::<f64>() / nbrs.len() as f64 }
+    };
+    for round in 0..8 {
+        let order: Vec<usize> = if round % 2 == 0 { (0..layers.len()).collect() } else { (0..layers.len()).rev().collect() };
+        for d in order {
+            let want: Vec<f64> = layers[d]
+                .iter()
+                .map(|&i| {
+                    let side = if round % 2 == 0 { &preds[i] } else { &succs[i] };
+                    let all: Vec<usize> = preds[i].iter().chain(&succs[i]).copied().collect();
+                    if round >= 4 { mean_y(&all, &y, y[i]) } else { mean_y(side, &y, y[i]) }
+                })
+                .collect();
+            for (&i, v) in layers[d].iter().zip(spread(&want, ROW_H)) {
+                y[i] = v;
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    let top = layers.iter().flatten().map(|&i| y[i]).fold(f64::MAX, f64::min);
+    let top = if top.is_finite() { top } else { 0.0 };
+    let mut bottom = f64::MIN;
+    for (d, layer) in layers.iter().enumerate() {
+        for &i in layer {
+            let yy = (y[i] - top).round();
+            bottom = bottom.max(yy);
+            out.insert(g.nodes[i].id.clone(), [d as f64 * COL_W, yy]);
+        }
+    }
+
+    // Unconnected nodes go in a tidy grid underneath.
+    let lone: Vec<usize> = (0..n).filter(|&i| !connected[i]).collect();
+    let cols = (layers.len().max(1)).max((lone.len() as f64).sqrt().ceil() as usize);
+    let y0 = if out.is_empty() { 0.0 } else { bottom + ROW_H * 2.0 };
+    for (k, &i) in lone.iter().enumerate() {
+        out.insert(g.nodes[i].id.clone(), [(k % cols) as f64 * COL_W, y0 + (k / cols) as f64 * ROW_H]);
     }
     out
 }
@@ -666,6 +817,31 @@ mod tests {
         assert_eq!(pos["api"][0], 0.0);
         assert_eq!(pos["r1"][0], COL_W);
         assert_eq!(pos["svc"][0], 2.0 * COL_W);
+    }
+
+    #[test]
+    fn cycles_do_not_stretch_the_layout() {
+        let mut nodes = vec![node("root", &["view", "s0"]), node("view", &["root"])];
+        for i in 0..20 {
+            nodes.push(node(&format!("s{i}"), &[]));
+        }
+        let g = Graph { nodes, ..Default::default() };
+        let pos = auto_layout(&g);
+        assert_eq!(pos["root"][0], 0.0);
+        assert_eq!(pos["view"][0], COL_W);
+        let max_x = pos.values().map(|p| p[0]).fold(0.0, f64::max);
+        assert!(max_x <= 5.0 * COL_W, "layout too wide: {max_x}");
+        let mut seen: Vec<[f64; 2]> = pos.values().copied().collect();
+        seen.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        seen.dedup();
+        assert_eq!(seen.len(), pos.len(), "nodes overlap");
+    }
+
+    #[test]
+    fn spread_keeps_order_and_gap() {
+        let out = spread(&[0.0, 0.0, 0.0], 10.0);
+        assert_eq!(out, vec![-10.0, 0.0, 10.0]);
+        assert_eq!(spread(&[0.0, 50.0], 10.0), vec![0.0, 50.0]);
     }
 
     #[test]

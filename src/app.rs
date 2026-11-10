@@ -9,6 +9,7 @@ use crate::history::{self, SessionInfo};
 use crate::screens::{Screen, ScreenControls, ScreenState, Screens};
 use crate::session;
 use crate::state::{AppState, Cmd, LeftTab, Tab};
+use crate::update_view::UpdateMenu;
 
 pub fn initial_cwd() -> PathBuf {
     if let Some(arg) = std::env::args().nth(1) {
@@ -116,6 +117,7 @@ fn Header() -> Element {
                 span { class: "badge warn", "not a git repo" }
             }
             div { class: "spacer" }
+            UpdateMenu {}
             if !model.is_empty() { span { class: "badge", "{model}" } }
             if let Some(c) = cost { span { class: "badge", "${c:.4}" } }
             select {

@@ -23,7 +23,7 @@
       "id": "app-root",
       "title": "App root & header",
       "kind": "ui",
-      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context and starts the Claude session coroutine. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), model and cost badges, permission-mode selector, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it. open_folder switches the working folder (used by the folder picker and the project view), and a project chip in the header jumps to the project that contains the open folder.",
+      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context and starts the Claude session coroutine. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), model and cost badges, permission-mode selector, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it. open_folder switches the working folder (used by the folder picker and the project view), and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
       "files": [
         "src/app.rs"
       ],
@@ -32,7 +32,8 @@
         "session-loop",
         "git-service",
         "new-node",
-        "project-view"
+        "project-view",
+        "self-updater"
       ],
       "pos": [
         281.0,
@@ -448,7 +449,7 @@
       "id": "install-tooling",
       "title": "Build & install tooling",
       "kind": "job",
-      "description": "Makefile targets for run, test, install, open, uninstall and the editor bundle build. install.sh builds a release binary, packages it as ~/Applications/Workbench.app and installs a `wbrs` launcher in ~/.local/bin. `make editor` uses esbuild to bundle editor-js into src/editor.bundle.js.",
+      "description": "Makefile targets for run, test, install, open, uninstall and the editor bundle build. install.sh builds a release binary, packages it as ~/Applications/Workbench.app and installs a `wbrs` launcher in ~/.local/bin. `make editor` uses esbuild to bundle editor-js into src/editor.bundle.js. Before building it checks for git, curl, cargo and, on Linux, make, a C compiler, pkg-config and the GUI libraries. It lists what's missing with the exact install commands (pacman, apt, dnf, zypper, apk or xbps; rustup for Rust; Xcode Command Line Tools on macOS) and runs them only after the user confirms on the terminal. It stops with an explanation on Debian/Ubuntu releases too old to have WebKitGTK 4.1. If the folder isn't a git checkout (a ZIP download), it offers to link it to the GitHub repo so the update check works, stashing any files that differ from main.",
       "files": [
         "Makefile",
         "scripts/install.sh"
@@ -627,6 +628,22 @@
       "links": [
         "app-state",
         "node-history"
+      ]
+    },
+    {
+      "id": "self-updater",
+      "title": "Self-updater",
+      "kind": "service",
+      "description": "Checks on startup whether GitHub's main branch has commits that the running build lacks. It compares the commit embedded at build time (build.rs) with main through the GitHub compare API using curl. If main is ahead, a header button opens and lists the new commits. Choosing Update fetches main into a private checkout under ~/.cache/workbench/source and builds it in the background. Restart now runs that checkout's install script in a detached process and reopens the current folder. If git or cargo is missing, it points the user to install.sh instead of starting the build.",
+      "files": [
+        "src/update.rs",
+        "src/update_view.rs",
+        "build.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "app-state",
+        "install-tooling"
       ]
     }
   ],

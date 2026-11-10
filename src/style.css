@@ -67,6 +67,17 @@ code, pre { font-family: var(--mono); font-size: 12px; }
 .branch-button { font-family: var(--mono); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch-pop { left: 0; right: auto; width: 360px; }
 .branch-filter { margin: 6px; }
+.update-button { border-color: var(--accent); color: var(--accent); }
+.update-pop { width: 420px; }
+.update-body { display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow-y: auto; }
+.update-title { font-weight: 600; }
+.update-commits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.update-commits li { display: flex; gap: 8px; min-width: 0; }
+.update-commits li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-commits code { color: var(--muted); }
+.update-line { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-actions { display: flex; gap: 6px; }
+.update-pop .branch-error { padding: 6px 0 0; max-height: 160px; overflow-y: auto; }
 .branch-error { padding: 6px 10px; color: #e06c75; font-size: 12px; white-space: pre-wrap; border-top: 1px solid var(--border); }
 
 .main { flex: 1; display: flex; min-height: 0; }
