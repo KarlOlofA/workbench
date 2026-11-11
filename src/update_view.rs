@@ -137,14 +137,14 @@ pub fn UpdateMenu() -> Element {
                                     button {
                                         class: "primary",
                                         disabled: busy,
-                                        title: if busy { "Stop Claude before restarting" } else { "Install the new build and reopen this folder" },
+                                        title: if busy { "Stop Workbench before restarting" } else { "Install the new build and reopen this folder" },
                                         onclick: restart,
                                         "Restart now"
                                     }
                                     button { onclick: move |_| open.set(false), "Later" }
                                 }
                                 if busy {
-                                    div { class: "muted small-text", "Stop Claude before restarting." }
+                                    div { class: "muted small-text", "Stop Workbench before restarting." }
                                 }
                             },
                             Phase::Failed(e) => rsx! {

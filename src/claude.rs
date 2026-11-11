@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone)]
 pub enum ClaudeEvent {
-    Init { session_id: String, model: String },
+    Init { session_id: String, model: String, mcp_servers: Vec<McpStatus> },
     TextDelta(String),
     AssistantText(String),
     ToolUse { id: String, name: String, input: Value },
@@ -22,6 +22,13 @@ pub enum ClaudeEvent {
     ControlCancel { request_id: String },
     Stderr(String),
     Exited,
+}
+
+/// One MCP server as reported by the agent when a session starts, e.g. status "connected" or "failed".
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpStatus {
+    pub name: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,57 +96,68 @@ fn suggestion_label(s: &Value) -> Option<String> {
     (!what.is_empty()).then(|| format!("{what}{place}"))
 }
 
+/// What the agent may do on its own. It decides both how the agent acts and when it asks.
+///
+/// - `Plan` (the base mode): read only. The agent asks questions until it knows exactly what
+///   to work on, then presents a plan; Workbench then asks which mode to run it in.
+/// - `AcceptEdits`: the agent asks before every change to the code and every command.
+/// - `Auto`: the agent edits and runs commands itself, but asks before deleting files.
+/// - `FullAuto`: the agent never asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionMode {
-    Manual,
-    AcceptEdits,
+pub enum ChatMode {
     Plan,
-    BypassPermissions,
+    AcceptEdits,
+    Auto,
     FullAuto,
 }
 
-impl PermissionMode {
-    pub const ALL: [PermissionMode; 5] = [
-        PermissionMode::Manual,
-        PermissionMode::AcceptEdits,
-        PermissionMode::Plan,
-        PermissionMode::BypassPermissions,
-        PermissionMode::FullAuto,
-    ];
+/// Plan mode tool for presenting a finished plan; using it asks to leave plan mode.
+pub const EXIT_PLAN_TOOL: &str = "ExitPlanMode";
 
-    pub fn as_arg(self) -> &'static str {
-        match self {
-            PermissionMode::Manual => "manual",
-            PermissionMode::AcceptEdits => "acceptEdits",
-            PermissionMode::Plan => "plan",
-            PermissionMode::BypassPermissions => "bypassPermissions",
-            PermissionMode::FullAuto => "fullAuto",
-        }
-    }
-
-    pub fn cli_arg(self) -> &'static str {
-        match self {
-            PermissionMode::FullAuto => PermissionMode::AcceptEdits.as_arg(),
-            m => m.as_arg(),
-        }
-    }
+impl ChatMode {
+    pub const ALL: [ChatMode; 4] = [ChatMode::Plan, ChatMode::AcceptEdits, ChatMode::Auto, ChatMode::FullAuto];
+    /// The modes a finished plan can be run in.
+    pub const RUN_PLAN: [ChatMode; 3] = [ChatMode::Auto, ChatMode::FullAuto, ChatMode::AcceptEdits];
 
     pub fn label(self) -> &'static str {
         match self {
-            PermissionMode::FullAuto => "full auto (asks for rm)",
-            m => m.as_arg(),
+            ChatMode::Plan => "Plan",
+            ChatMode::AcceptEdits => "Accept edits",
+            ChatMode::Auto => "Auto",
+            ChatMode::FullAuto => "Full auto",
         }
     }
 
-    pub fn auto_allows(self, req: &PermissionRequest) -> bool {
-        self == PermissionMode::FullAuto && !deletes_files(req)
+    pub fn hint(self) -> &'static str {
+        match self {
+            ChatMode::Plan => "Read only: the agent asks questions until it knows exactly what to do, then presents a plan for you to approve",
+            ChatMode::AcceptEdits => "You accept every change to the code and every command the agent runs",
+            ChatMode::Auto => "The agent edits and runs commands itself, but asks before deleting files (rm, rmdir, unlink, shred, git rm, find -delete)",
+            ChatMode::FullAuto => "The agent acts on the task with full permission and never asks",
+        }
     }
 
-    pub fn from_arg(s: &str) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|m| m.as_arg() == s)
-            .unwrap_or(PermissionMode::AcceptEdits)
+    /// The `--permission-mode` the agent runs in. Auto and Full auto run in `acceptEdits`
+    /// and Workbench answers the remaining permission requests itself (see `auto_allows`).
+    pub fn cli_arg(self) -> &'static str {
+        match self {
+            ChatMode::Plan => "plan",
+            ChatMode::AcceptEdits => "default",
+            ChatMode::Auto | ChatMode::FullAuto => "acceptEdits",
+        }
+    }
+
+    /// Whether Workbench allows a permission request without asking. A plan is never
+    /// approved without asking.
+    pub fn auto_allows(self, req: &PermissionRequest) -> bool {
+        if req.tool == EXIT_PLAN_TOOL {
+            return false;
+        }
+        match self {
+            ChatMode::Plan | ChatMode::AcceptEdits => false,
+            ChatMode::Auto => !deletes_files(req),
+            ChatMode::FullAuto => true,
+        }
     }
 }
 
@@ -167,8 +185,11 @@ fn command_deletes_files(command: &str) -> bool {
 pub struct SpawnOptions {
     pub cwd: PathBuf,
     pub resume: Option<String>,
-    pub permission_mode: PermissionMode,
+    pub mode: ChatMode,
     pub append_system_prompt: Option<String>,
+    pub mcp_config: Option<String>,
+    /// Empty means the CLI's own default model.
+    pub model: String,
 }
 
 pub struct ClaudeProcess {
@@ -201,15 +222,24 @@ impl ClaudeProcess {
             "--verbose",
             "--include-partial-messages",
             "--permission-mode",
-            opts.permission_mode.cli_arg(),
+            opts.mode.cli_arg(),
             "--permission-prompt-tool",
             "stdio",
+            // Workbench can't answer the agent's question form, so it asks questions in the reply.
+            "--disallowedTools",
+            "AskUserQuestion",
         ]);
         if let Some(id) = &opts.resume {
             cmd.args(["--resume", id]);
         }
         if let Some(extra) = &opts.append_system_prompt {
             cmd.args(["--append-system-prompt", extra]);
+        }
+        if !opts.model.trim().is_empty() {
+            cmd.args(["--model", opts.model.trim()]);
+        }
+        if let Some(config) = &opts.mcp_config {
+            cmd.args(["--mcp-config", config]);
         }
         cmd.current_dir(&opts.cwd)
             .env("PATH", augmented_path())
@@ -348,7 +378,13 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
 
     match v.get("type").and_then(Value::as_str) {
         Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
-            vec![ClaudeEvent::Init { session_id: str_at(&v, "session_id"), model: str_at(&v, "model") }]
+            let mcp_servers = v["mcp_servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| McpStatus { name: str_at(m, "name"), status: str_at(m, "status") })
+                .collect();
+            vec![ClaudeEvent::Init { session_id: str_at(&v, "session_id"), model: str_at(&v, "model"), mcp_servers }]
         }
         Some("stream_event") => {
             let ev = &v["event"];
@@ -470,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn full_auto_still_asks_before_deleting_files() {
+    fn modes_decide_which_requests_are_allowed_without_asking() {
         for cmd in ["rm -rf target", "cargo build && rm x", "find . -name '*.o' -delete", "xargs /bin/rm", "bash -c \"rm a\"", "git rm src/a.rs", "sudo rmdir d", "ls | xargs rm"] {
             assert!(command_deletes_files(cmd), "{cmd}");
         }
@@ -485,13 +521,17 @@ mod tests {
             blocked_path: None,
             reason: None,
         };
-        let full = PermissionMode::FullAuto;
-        assert!(full.auto_allows(&req("Bash", serde_json::json!({"command": "cargo build"}))));
-        assert!(!full.auto_allows(&req("Bash", serde_json::json!({"command": "rm -r build"}))));
-        assert!(full.auto_allows(&req("WebFetch", serde_json::json!({"url": "https://example.com"}))));
-        assert!(!PermissionMode::AcceptEdits.auto_allows(&req("Bash", serde_json::json!({"command": "ls"}))));
-        assert_eq!(full.cli_arg(), "acceptEdits");
-        assert_eq!(PermissionMode::from_arg("fullAuto"), full);
+        let build = req("Bash", serde_json::json!({"command": "cargo build"}));
+        let delete = req("Bash", serde_json::json!({"command": "rm -r build"}));
+        let plan = req(EXIT_PLAN_TOOL, serde_json::json!({"plan": "1. do it"}));
+        assert!(ChatMode::Auto.auto_allows(&build));
+        assert!(!ChatMode::Auto.auto_allows(&delete));
+        assert!(ChatMode::Auto.auto_allows(&req("WebFetch", serde_json::json!({"url": "https://example.com"}))));
+        assert!(ChatMode::FullAuto.auto_allows(&delete));
+        assert!(!ChatMode::AcceptEdits.auto_allows(&build));
+        assert!(!ChatMode::Plan.auto_allows(&build));
+        assert!(ChatMode::ALL.iter().all(|m| !m.auto_allows(&plan)));
+        assert_eq!(ChatMode::AcceptEdits.cli_arg(), "default");
     }
 
     #[test]
@@ -519,8 +559,9 @@ mod tests {
 
     #[test]
     fn parses_init_and_result() {
-        let i = r#"{"type":"system","subtype":"init","session_id":"s1","model":"m"}"#;
-        assert!(matches!(&parse_line(i)[..], [ClaudeEvent::Init { session_id, .. }] if session_id == "s1"));
+        let i = r#"{"type":"system","subtype":"init","session_id":"s1","model":"m","mcp_servers":[{"name":"docs","status":"connected"}]}"#;
+        assert!(matches!(&parse_line(i)[..], [ClaudeEvent::Init { session_id, mcp_servers, .. }]
+            if session_id == "s1" && mcp_servers[0] == McpStatus { name: "docs".into(), status: "connected".into() }));
         let r = r#"{"type":"result","subtype":"success","is_error":false,"result":"x","total_cost_usd":0.5}"#;
         assert!(matches!(&parse_line(r)[..], [ClaudeEvent::Done { cost_usd: Some(c), .. }] if *c == 0.5));
     }

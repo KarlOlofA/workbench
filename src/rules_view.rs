@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 
+use crate::dropdown::{Choice, Dropdown};
+
 use crate::prompts;
 use crate::rules::{self, Rule};
 use crate::state::{AppState, Cmd};
@@ -39,12 +41,12 @@ pub fn RulesView() -> Element {
         div { class: "rules",
             div { class: "graph-toolbar",
                 button { class: "primary", onclick: add, "+ Rule" }
-                button { disabled: busy || enabled == 0, title: "Ask Claude to check the codebase against every enabled rule (read-only)", onclick: audit, "Audit code" }
+                button { disabled: busy || enabled == 0, title: "Ask Workbench to check the codebase against every enabled rule (read-only)", onclick: audit, "Audit code" }
                 div { class: "spacer" }
                 input { class: "filter", placeholder: "Filter rules…", value: "{filter}", oninput: move |e| filter.set(e.value()) }
             }
             div { class: "rules-intro muted small-text",
-                "Enabled rules are given to Claude on every message, graph commit and debug run in this project. Scope a rule to a node to apply it only there. Stored in "
+                "Enabled rules are given to Workbench on every message, graph commit and debug run in this project. Scope a rule to a node to apply it only there. Stored in "
                 code { "{rules::RULES_FILE}" }
                 "."
             }
@@ -124,19 +126,15 @@ fn RuleCard(rule: Rule, nodes: Vec<(String, String)>) -> Element {
             }
             div { class: "rule-scope",
                 span { class: "muted small-text", "Applies to" }
-                select {
-                    value: "{scope}",
-                    onchange: move |e| {
-                        let v = e.value();
+                Dropdown {
+                    value: scope.clone(),
+                    choices: std::iter::once(Choice::new("", "Whole project"))
+                        .chain(nodes.iter().map(|(nid, title)| Choice::new(nid.clone(), format!("Node: {title}"))))
+                        .chain(scope_missing.then(|| Choice::new(scope.clone(), format!("Missing node: {scope}"))))
+                        .collect::<Vec<_>>(),
+                    onchange: move |v: String| {
                         e_scope(Box::new(move |r| r.scope = if v.is_empty() { None } else { Some(v) }));
                     },
-                    option { value: "", selected: scope.is_empty(), "Whole project" }
-                    for (nid, title) in nodes.iter() {
-                        option { key: "{nid}", value: "{nid}", selected: *nid == scope, "Node: {title}" }
-                    }
-                    if scope_missing {
-                        option { value: "{scope}", selected: true, "Missing node: {scope}" }
-                    }
                 }
             }
         }

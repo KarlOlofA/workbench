@@ -2,14 +2,16 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
+use crate::activity;
 use crate::chat;
-use crate::claude::PermissionMode;
+use crate::claude::ChatMode;
 use crate::git;
 use crate::history::{self, SessionInfo};
-use crate::screens::{Screen, ScreenControls, ScreenState, Screens};
+use crate::providers::Provider;
 use crate::session;
-use crate::state::{AppState, Cmd, LeftTab, Tab};
+use crate::state::{AppState, Cmd, Tab, WorkbenchView};
 use crate::update_view::UpdateMenu;
+use crate::workbench::{Body, ChatDock};
 
 pub fn initial_cwd() -> PathBuf {
     if let Some(arg) = std::env::args().nth(1) {
@@ -42,6 +44,50 @@ pub fn open_folder(mut st: AppState, claude: Coroutine<Cmd>, dir: PathBuf) {
     st.bump_repo();
 }
 
+/// Reads the worktrees of every project repository again.
+pub async fn refresh_worktrees(mut st: AppState) {
+    let paths: Vec<String> = st.projects.peek().iter().flat_map(|p| p.repos.iter().map(|r| r.path.clone())).collect();
+    let found = tokio::task::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .filter_map(|p| git::worktrees(std::path::Path::new(&p)).ok().map(|w| (p, w)))
+            .collect::<std::collections::HashMap<_, _>>()
+    })
+    .await
+    .unwrap_or_default();
+    if *st.worktrees.peek() != found {
+        st.worktrees.set(found);
+    }
+}
+
+/// How often running agents are checked. Worktrees are read every `WORKTREE_EVERY` checks.
+const AGENT_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+const WORKTREE_EVERY: u64 = 3;
+
+/// Keeps `AppState::agents` and `AppState::worktrees` up to date for as long as the app runs.
+fn watch_activity(mut st: AppState) {
+    spawn(async move {
+        let mut scanner = activity::Scanner::default();
+        for tick in 0u64.. {
+            let (back, agents) = tokio::task::spawn_blocking(move || {
+                let agents = scanner.scan();
+                (scanner, agents)
+            })
+            .await
+            .unwrap_or_else(|_| (activity::Scanner::default(), Vec::new()));
+            scanner = back;
+            if *st.agents.peek() != agents {
+                st.agents.set(agents);
+            }
+            if tick % WORKTREE_EVERY == 0 {
+                refresh_worktrees(st).await;
+            }
+            tokio::time::sleep(AGENT_POLL).await;
+        }
+    });
+}
+
 #[component]
 pub fn App() -> Element {
     let mut st = use_context_provider(|| AppState::new(initial_cwd()));
@@ -53,11 +99,20 @@ pub fn App() -> Element {
         }
     });
     let claude = use_coroutine(move |rx: UnboundedReceiver<Cmd>| session::run(st, rx));
+    use_hook(move || watch_activity(st));
+    crate::chat_window::use_chat_window(st, claude);
+    // Pick up new or removed repositories, and worktrees made by git commands, straight away.
+    use_effect(move || {
+        let _ = st.projects.read();
+        let _ = st.repo_version.read();
+        spawn(refresh_worktrees(st));
+    });
 
     use_effect(move || {
         let cwd = st.cwd.read().clone();
         st.load_workbench();
-        if let Some(id) = history::last_session(&cwd) {
+        let uses_claude_code = st.provider_settings.peek().provider == Provider::ClaudeCode;
+        if uses_claude_code && let Some(id) = history::last_session(&cwd) {
             claude.send(Cmd::Resume { id });
         }
     });
@@ -71,7 +126,9 @@ pub fn App() -> Element {
     rsx! {
         div { class: "app",
             Header {}
-            Screens {}
+            Body {}
+            // Floats over the whole window; it can be dragged anywhere and resized from its edges.
+            ChatDock {}
         }
     }
 }
@@ -84,7 +141,7 @@ fn Header() -> Element {
     let project = st.current_project();
     let is_repo = git::is_repo(&st.cwd.read());
     let model = st.model.read().clone();
-    let mode = *st.permission_mode.read();
+    let mode = *st.chat_mode.read();
     let cost = *st.last_cost.read();
 
     let pick_folder = move |_| {
@@ -98,15 +155,13 @@ fn Header() -> Element {
 
     rsx! {
         div { class: "header",
-            ScreenControls {}
             button { onclick: pick_folder, "Open folder…" }
             if let Some((pid, pname)) = project.map(|p| (p.id, p.name)) {
                 button {
                     class: "project-chip",
                     title: "Show all repositories in {pname}",
                     onclick: move |_| {
-                        st.left_tab.set(LeftTab::Graph);
-                        st.set_screen(Screen::Graph, ScreenState::Open);
+                        st.view.set(WorkbenchView::Graph);
                         st.show_project(Some(pid.clone()));
                     },
                     "◈ {pname}"
@@ -118,24 +173,27 @@ fn Header() -> Element {
             } else {
                 span { class: "badge warn", "not a git repo" }
             }
-            div { class: "spacer" }
+            div {
+                class: "spacer",
+                // No OS title bar on Linux, so let the header's empty space move the window.
+                onmousedown: move |_| {
+                    if cfg!(target_os = "linux") {
+                        dioxus::desktop::window().drag();
+                    }
+                },
+                ondoubleclick: move |_| {
+                    if cfg!(target_os = "linux") {
+                        dioxus::desktop::window().toggle_maximized();
+                    }
+                },
+            }
             UpdateMenu {}
             if !model.is_empty() { span { class: "badge", "{model}" } }
             if let Some(c) = cost { span { class: "badge", "${c:.4}" } }
-            select {
-                value: "{mode.as_arg()}",
-                onchange: move |e| {
-                    st.permission_mode.set(PermissionMode::from_arg(&e.value()));
-                    claude.send(Cmd::Restart { keep_session: true });
-                },
-                for m in PermissionMode::ALL {
-                    option { value: "{m.as_arg()}", selected: m == mode, "{m.label()}" }
-                }
-            }
-            if mode == PermissionMode::FullAuto {
+            if mode == ChatMode::FullAuto {
                 span {
                     class: "badge warn",
-                    title: "Claude runs commands and edits files without asking. It still asks before commands that delete files (rm, rmdir, unlink, shred, git rm, find -delete).",
+                    title: "{mode.hint()}. Change the mode under the chat.",
                     "Full auto"
                 }
             }
@@ -323,7 +381,7 @@ fn BranchMenu() -> Element {
                     }
                     div { class: "history-hint muted small-text",
                         if busy {
-                            "Stop Claude before switching branches"
+                            "Stop Workbench before switching branches"
                         } else if is_working {
                             "Switching…"
                         } else {
@@ -378,7 +436,7 @@ fn HistoryMenu() -> Element {
         div { class: "history",
             button {
                 class: if is_open { "active" } else { "" },
-                title: "Earlier Claude sessions in this folder",
+                title: "Earlier Workbench sessions in this folder",
                 onclick: move |_| toggle(),
                 "History"
             }
@@ -455,7 +513,7 @@ fn HistoryMenu() -> Element {
                     }
                     div { class: "history-hint muted small-text",
                         if busy {
-                            "Stop Claude before switching sessions"
+                            "Stop Workbench before switching sessions"
                         } else {
                             "↑/↓ or j/k to move · Enter to resume · Esc to close"
                         }

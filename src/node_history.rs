@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{Graph, Module, Node};
-use crate::screens;
+use crate::config;
 
 pub const HISTORY_FILE: &str = ".workbench/node-history.jsonl";
 const ATTRIBUTES_FILE: &str = ".workbench/.gitattributes";
@@ -26,8 +26,8 @@ const CONTEXT: usize = 2;
 pub enum Source {
     /// A person edited the graph in Workbench.
     Person,
-    /// Claude edited the graph during a chat turn or job started by the entry's author.
-    Claude,
+    /// Workbench edited the graph during a chat turn or job started by the entry's author.
+    Workbench,
     /// The graph changed on disk without Workbench (an editor, git, another tool).
     Outside,
 }
@@ -78,9 +78,9 @@ impl Entry {
             (Source::Person, _) if mine => "you".into(),
             (Source::Person, Some(a)) => a.into(),
             (Source::Person, None) => "someone".into(),
-            (Source::Claude, _) if mine => "Claude".into(),
-            (Source::Claude, Some(a)) => format!("Claude for {a}"),
-            (Source::Claude, None) => "Claude".into(),
+            (Source::Workbench, _) if mine => "Workbench".into(),
+            (Source::Workbench, Some(a)) => format!("Workbench for {a}"),
+            (Source::Workbench, None) => "Workbench".into(),
             (Source::Outside, _) => "outside Workbench".into(),
         }
     }
@@ -340,12 +340,12 @@ fn snapshot_name(cwd: &Path) -> String {
 
 /// The local "last seen" state of the graph for this folder, if this client has seen it before.
 pub fn load_snapshot(cwd: &Path) -> Option<Snapshot> {
-    let s: Option<Snapshot> = screens::load_json(&snapshot_name(cwd));
+    let s: Option<Snapshot> = config::load_json(&snapshot_name(cwd));
     s
 }
 
 pub fn save_snapshot(cwd: &Path, s: &Snapshot) -> Result<(), String> {
-    screens::save_json(&snapshot_name(cwd), s)
+    config::save_json(&snapshot_name(cwd), s)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,10 +433,10 @@ mod tests {
     fn records_added_modified_and_removed_nodes() {
         let mut h = NodeHistory::default();
         h.record(&graph(vec![node("a", "Does a."), node("b", "Does b.")]), Source::Outside, None, 0);
-        h.record(&graph(vec![node("a", "Does a better."), node("c", "New.")]), Source::Claude, None, 5);
+        h.record(&graph(vec![node("a", "Does a better."), node("c", "New.")]), Source::Workbench, None, 5);
         let kinds: Vec<(&str, &str)> = h.entries.iter().map(|e| (e.id.as_str(), e.kind())).collect();
         assert_eq!(kinds, vec![("a", "modified"), ("c", "added"), ("b", "removed")]);
-        assert!(h.entries.iter().all(|e| e.source == Source::Claude));
+        assert!(h.entries.iter().all(|e| e.source == Source::Workbench));
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
         h.record(&graph(vec![node("a", "One.")]), Source::Outside, None, 0);
         h.record(&graph(vec![node("a", "Two.")]), Source::Person, None, 0);
         h.record(&graph(vec![node("a", "Three.")]), Source::Person, None, 1000);
-        h.record(&graph(vec![node("a", "Four.")]), Source::Claude, None, 1001);
+        h.record(&graph(vec![node("a", "Four.")]), Source::Workbench, None, 1001);
         h.record(&graph(vec![node("a", "Five.")]), Source::Person, None, 1002);
         assert_eq!(h.entries.len(), 4);
     }

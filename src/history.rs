@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use serde_json::Value;
 
 use crate::claude::tool_summary;
-use crate::screens;
+use crate::config;
 use crate::state::{ChatItem, Message};
 
 const LAST_FILE: &str = "sessions.json";
@@ -42,24 +42,24 @@ fn transcript(cwd: &Path, id: &str) -> Option<PathBuf> {
 }
 
 pub fn last_session(cwd: &Path) -> Option<String> {
-    let map: HashMap<String, String> = screens::load_json(LAST_FILE);
+    let map: HashMap<String, String> = config::load_json(LAST_FILE);
     map.get(&cwd.to_string_lossy().to_string()).filter(|id| transcript(cwd, id).is_some()).cloned()
 }
 
 pub fn remember(cwd: &Path, id: &str) -> Result<(), String> {
     let key = cwd.to_string_lossy().to_string();
-    let mut map: HashMap<String, String> = screens::load_json(LAST_FILE);
+    let mut map: HashMap<String, String> = config::load_json(LAST_FILE);
     if map.get(&key).map(String::as_str) == Some(id) {
         return Ok(());
     }
     map.insert(key, id.to_string());
-    screens::save_json(LAST_FILE, &map)
+    config::save_json(LAST_FILE, &map)
 }
 
 pub fn forget(cwd: &Path) -> Result<(), String> {
-    let mut map: HashMap<String, String> = screens::load_json(LAST_FILE);
+    let mut map: HashMap<String, String> = config::load_json(LAST_FILE);
     if map.remove(&cwd.to_string_lossy().to_string()).is_some() {
-        screens::save_json(LAST_FILE, &map)?;
+        config::save_json(LAST_FILE, &map)?;
     }
     Ok(())
 }

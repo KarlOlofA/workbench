@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github;
 use crate::graph::{self, GRAPH_FILE, slugify};
-use crate::screens;
+use crate::config;
 
 const PROJECTS_FILE: &str = "projects.json";
 
@@ -119,7 +119,7 @@ impl Project {
     }
 }
 
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub fn same_dir(a: &Path, b: &Path) -> bool {
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     a == b || canon(a) == canon(b)
 }
@@ -140,11 +140,11 @@ pub fn containing<'a>(projects: &'a [Project], dir: &Path) -> Option<&'a Project
 }
 
 pub fn load() -> Vec<Project> {
-    screens::load_json(PROJECTS_FILE)
+    config::load_json(PROJECTS_FILE)
 }
 
 pub fn save(projects: &[Project]) -> Result<(), String> {
-    screens::save_json(PROJECTS_FILE, &projects)
+    config::save_json(PROJECTS_FILE, &projects)
 }
 
 pub fn github_remote(dir: &Path) -> Option<String> {

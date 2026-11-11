@@ -1,20 +1,23 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::claude::{PermissionDecision, PermissionMode, PermissionRequest};
+use crate::activity::{self, AgentKind, AgentProc};
+use crate::claude::{ChatMode, McpStatus, PermissionDecision, PermissionRequest};
 use crate::ghost::{self, GhostBranch, GhostPick};
 use crate::git;
 use crate::github;
+use crate::mcp;
 use crate::projects::{self, Project};
+use crate::providers::{self, Provider};
 use crate::prompts;
 use crate::graph::{self, BASELINE_FILE, Change, GRAPH_FILE, Graph, Subject};
 use crate::node_history::{self, NodeHistory, Source};
 use crate::reference::{self, RefGraphs, RefState, Refs};
 use crate::rules::{self, Rule};
-use crate::screens::{self, Layout, Screen, ScreenState, Sizes};
+use crate::config;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatItem {
@@ -63,6 +66,17 @@ pub enum Cmd {
     Restart { keep_session: bool },
     Resume { id: String },
     Permission { request_id: String, decision: PermissionDecision },
+    /// Answers the pending `PlanApproval`: run the plan in `mode`, or keep planning when `None`.
+    ApprovePlan { mode: Option<ChatMode> },
+}
+
+/// A finished plan waiting for the user to pick how to run it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanApproval {
+    pub plan: String,
+    /// Workbench's `ExitPlanMode` permission request, answered when the user picks.
+    /// `None` for providers without plan mode: picking sends a message to implement the plan.
+    pub request: Option<PermissionRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,40 +87,31 @@ pub enum JobKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunMode {
-    Plan,
-    Auto,
-}
-
-impl RunMode {
-    pub const ALL: [RunMode; 2] = [RunMode::Plan, RunMode::Auto];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            RunMode::Plan => "Plan",
-            RunMode::Auto => "Auto",
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            RunMode::Plan => "Claude asks clarifying questions before changing anything",
-            RunMode::Auto => "Claude fills in the gaps itself and lists its assumptions",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Job {
     pub kind: JobKind,
-    pub mode: RunMode,
+    pub mode: ChatMode,
     pub awaiting: bool,
 }
 
+/// What the main screen (the right side of the window) shows. The graph is the home screen;
+/// the others replace it until closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeftTab {
+pub enum WorkbenchView {
     Graph,
+    Code,
     Rules,
+    Settings,
+}
+
+impl WorkbenchView {
+    pub fn title(self) -> &'static str {
+        match self {
+            WorkbenchView::Graph => "Graph",
+            WorkbenchView::Code => "Code",
+            WorkbenchView::Rules => "Rules",
+            WorkbenchView::Settings => "Settings",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,29 +123,68 @@ pub enum GraphPane {
     Prompt,
 }
 
-/// Size of the node/flows/changes area under the graph canvas, as a percentage of the graph
-/// tab's height, and whether it is collapsed down to its tab bar.
+/// Where the floating chat sits and how big it is, in window pixels (CSS px).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BottomPane {
-    pub collapsed: bool,
-    pub pct: f64,
+pub struct ChatRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
-impl Default for BottomPane {
+impl ChatRect {
+    pub const MIN_W: f64 = 280.0;
+    pub const MIN_H: f64 = 140.0;
+}
+
+/// How much of the floating chat is showing right now. Not saved: it starts at `Normal`.
+/// `Faded` shrinks it to a peek at the latest reply (after a click in the graph);
+/// a click in the chat makes it `Active` again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatFocus {
+    Faded,
+    Normal,
+    Active,
+}
+
+
+/// The window layout, saved in the user's config folder: the projects sidebar, the node menu
+/// to the right of the graph, and where and how big the floating chat is.
+/// Old layout files with `chat_anchor`/`chat_expanded` still load: unknown fields are ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    pub projects_open: bool,
+    pub node_menu_open: bool,
+    /// Width of the node menu as a percentage of the graph area.
+    pub node_menu_pct: f64,
+    /// Set once the chat has been moved or resized; `None` puts it at the bottom centre.
+    pub chat_rect: Option<ChatRect>,
+    /// The chat lives in a window of its own. See `chat_window`.
+    pub chat_detached: bool,
+    /// When locked, clicking the graph no longer fades the chat.
+    pub chat_locked: bool,
+}
+
+impl Default for Layout {
     fn default() -> Self {
-        Self { collapsed: false, pct: BottomPane::DEFAULT_PCT }
+        Self {
+            projects_open: true,
+            node_menu_open: true,
+            node_menu_pct: Layout::DEFAULT_NODE_MENU_PCT,
+            chat_rect: None,
+            chat_detached: false,
+            chat_locked: false,
+        }
     }
 }
 
-impl BottomPane {
-    pub const DEFAULT_PCT: f64 = 45.0;
-    pub const MIN_PCT: f64 = 15.0;
-    pub const MAX_PCT: f64 = 85.0;
-    const FILE: &str = "graph-bottom.json";
+impl Layout {
+    pub const DEFAULT_NODE_MENU_PCT: f64 = 32.0;
+    const FILE: &str = "layout.json";
 
-    pub fn clamp(pct: f64) -> f64 {
-        pct.clamp(Self::MIN_PCT, Self::MAX_PCT)
+    pub fn clamp_node_menu(pct: f64) -> f64 {
+        pct.clamp(18.0, 65.0)
     }
 }
 
@@ -158,19 +202,26 @@ pub struct AppState {
     pub ghost_picks: Signal<Vec<GhostPick>>,
     pub scope: Signal<Vec<String>>,
     pub related_repos: Signal<Vec<String>>,
+    pub mcp_servers: Signal<Vec<mcp::Server>>,
+    pub mcp_status: Signal<Vec<McpStatus>>,
+    pub provider_settings: Signal<providers::Settings>,
     pub projects: Signal<Vec<Project>>,
+    /// The worktrees of every project repository, by the repository's path in the project.
+    pub worktrees: Signal<HashMap<String, Vec<git::Worktree>>>,
+    /// Coding agents running on this machine outside Workbench. See `activity`.
+    pub agents: Signal<Vec<AgentProc>>,
     pub project_view: Signal<Option<String>>,
     pub refs: Signal<RefGraphs>,
     pub job: Signal<Option<Job>>,
-    pub run_mode: Signal<RunMode>,
     pub workbench_error: Signal<Option<String>>,
-    pub left_tab: Signal<LeftTab>,
+    pub view: Signal<WorkbenchView>,
     pub graph_pane: Signal<GraphPane>,
-    pub graph_bottom: Signal<BottomPane>,
+    pub layout: Signal<Layout>,
+    pub chat_focus: Signal<ChatFocus>,
+    /// The detached chat's window, while it is open.
+    pub chat_window: Signal<Option<dioxus::desktop::tao::window::WindowId>>,
     pub node_history: Signal<NodeHistory>,
     pub me: Signal<Option<String>>,
-    pub screens: Signal<Layout>,
-    pub sizes: Signal<Sizes>,
     pub flow_draft: Signal<Option<Vec<String>>>,
     pub active_flow: Signal<Option<String>>,
     pub fit_request: Signal<u64>,
@@ -182,7 +233,9 @@ pub struct AppState {
     pub session_id: Signal<Option<String>>,
     pub model: Signal<String>,
     pub last_cost: Signal<Option<f64>>,
-    pub permission_mode: Signal<PermissionMode>,
+    /// The chat's mode; every app start is in Plan.
+    pub chat_mode: Signal<ChatMode>,
+    pub plan_approval: Signal<Option<PlanApproval>>,
     pub repo_version: Signal<u64>,
     pub chat_input: Signal<String>,
     pub tab: Signal<Tab>,
@@ -206,19 +259,23 @@ impl AppState {
             ghost_picks: Signal::new(Vec::new()),
             scope: Signal::new(Vec::new()),
             related_repos: Signal::new(Vec::new()),
+            mcp_servers: Signal::new(Vec::new()),
+            mcp_status: Signal::new(Vec::new()),
+            provider_settings: Signal::new(providers::Settings::load()),
             projects: Signal::new(projects::load()),
+            worktrees: Signal::new(HashMap::new()),
+            agents: Signal::new(Vec::new()),
             project_view: Signal::new(None),
             refs: Signal::new(RefGraphs::new()),
             job: Signal::new(None),
-            run_mode: Signal::new(RunMode::Plan),
             workbench_error: Signal::new(None),
-            left_tab: Signal::new(LeftTab::Graph),
+            view: Signal::new(WorkbenchView::Graph),
             graph_pane: Signal::new(GraphPane::Node),
-            graph_bottom: Signal::new(screens::load_json(BottomPane::FILE)),
+            layout: Signal::new(config::load_json(Layout::FILE)),
+            chat_focus: Signal::new(ChatFocus::Normal),
+            chat_window: Signal::new(None),
             node_history: Signal::new(NodeHistory::default()),
             me: Signal::new(None),
-            screens: Signal::new(screens::load()),
-            sizes: Signal::new(screens::load_sizes()),
             flow_draft: Signal::new(None),
             active_flow: Signal::new(None),
             fit_request: Signal::new(0),
@@ -230,7 +287,8 @@ impl AppState {
             session_id: Signal::new(None),
             model: Signal::new(String::new()),
             last_cost: Signal::new(None),
-            permission_mode: Signal::new(PermissionMode::AcceptEdits),
+            chat_mode: Signal::new(ChatMode::Plan),
+            plan_approval: Signal::new(None),
             repo_version: Signal::new(0),
             chat_input: Signal::new(String::new()),
             tab: Signal::new(Tab::Files),
@@ -269,6 +327,7 @@ impl AppState {
             Err(e) => self.editor_error.set(Some(format!("{rel}: {e}"))),
         }
         self.tab.set(Tab::Editor);
+        self.view.set(WorkbenchView::Code);
     }
 
     pub fn save(&mut self) {
@@ -338,6 +397,10 @@ impl AppState {
             errors.push(e);
             Vec::new()
         });
+        let mcp_servers = mcp::load(&cwd).unwrap_or_else(|e| {
+            errors.push(e);
+            Vec::new()
+        });
         let entries = node_history::load(&cwd).unwrap_or_else(|e| {
             errors.push(e);
             Vec::new()
@@ -349,6 +412,8 @@ impl AppState {
         self.baseline.set(base);
         self.rules.set(r);
         self.related_repos.set(related);
+        self.mcp_servers.set(mcp_servers);
+        self.mcp_status.set(Vec::new());
         *self.rules_version.write() += 1;
         self.selected.set(Vec::new());
         self.ghost_branches.set(Vec::new());
@@ -481,7 +546,7 @@ impl AppState {
 
     fn disk_source(&self) -> Source {
         if *self.busy.peek() || self.job.peek().is_some() || self.turn_start.peek().is_some() {
-            Source::Claude
+            Source::Workbench
         } else {
             Source::Outside
         }
@@ -512,21 +577,33 @@ impl AppState {
         }
     }
 
-    pub fn set_bottom(&mut self, f: impl FnOnce(&mut BottomPane)) {
-        f(&mut self.graph_bottom.write());
-        self.save_bottom();
+    pub fn set_layout(&mut self, f: impl FnOnce(&mut Layout)) {
+        f(&mut self.layout.write());
+        self.save_layout();
     }
 
-    pub fn save_bottom(&mut self) {
-        if let Err(e) = screens::save_json(BottomPane::FILE, &*self.graph_bottom.peek()) {
+    pub fn save_layout(&mut self) {
+        if let Err(e) = config::save_json(Layout::FILE, &*self.layout.peek()) {
             self.workbench_error.set(Some(e));
         }
     }
 
+    /// Opens a tab of the node menu next to the graph.
     pub fn show_pane(&mut self, pane: GraphPane) {
         self.graph_pane.set(pane);
-        if self.graph_bottom.peek().collapsed {
-            self.set_bottom(|b| b.collapsed = false);
+        self.view.set(WorkbenchView::Graph);
+        if !self.layout.peek().node_menu_open {
+            self.set_layout(|l| l.node_menu_open = true);
+        }
+    }
+
+    /// A click in the graph shrinks the chat to a peek at the latest reply,
+    /// unless its size is locked.
+    pub fn fade_chat(&mut self) {
+        let layout = *self.layout.peek();
+        let waiting_for_answer = !self.permissions.peek().is_empty() || self.plan_approval.peek().is_some();
+        if !layout.chat_locked && !waiting_for_answer {
+            self.chat_focus.set(ChatFocus::Faded);
         }
     }
 
@@ -782,9 +859,65 @@ impl AppState {
         }
     }
 
+    /// Saves the MCP connections and restarts Workbench on the next message so it connects to them.
+    pub fn update_mcp(&mut self, f: impl FnOnce(&mut Vec<mcp::Server>)) {
+        f(&mut self.mcp_servers.write());
+        *self.rules_version.write() += 1;
+        self.mcp_status.set(Vec::new());
+        let cwd = self.cwd.peek().clone();
+        if let Err(e) = mcp::save(&cwd, &self.mcp_servers.peek()) {
+            self.workbench_error.set(Some(e));
+        }
+    }
+
+    /// Saves the user's provider settings (chosen provider, models, API keys).
+    pub fn update_provider_settings(&mut self, f: impl FnOnce(&mut providers::Settings)) {
+        f(&mut self.provider_settings.write());
+        if let Err(e) = self.provider_settings.peek().save() {
+            self.workbench_error.set(Some(e));
+        }
+    }
+
+    /// Switches the chat provider. The chat mode resets to Plan when the new provider
+    /// can't run it (e.g. Full auto on an API provider, which only answers).
+    pub fn set_provider(&mut self, provider: Provider) {
+        self.update_provider_settings(|s| s.provider = provider);
+        if !provider.modes().contains(&self.chat_mode.peek()) {
+            self.chat_mode.set(ChatMode::Plan);
+        }
+    }
+
     pub fn current_project(&self) -> Option<Project> {
         let cwd = self.cwd.read().clone();
-        projects::containing(&self.projects.read(), &cwd).cloned()
+        let _ = self.worktrees.read();
+        self.project_for(&cwd)
+    }
+
+    /// The project that `dir` belongs to: one of its repositories, or a worktree of one.
+    pub fn project_for(&self, dir: &Path) -> Option<Project> {
+        let projects = self.projects.peek();
+        if let Some(p) = projects::containing(&projects, dir) {
+            return Some(p.clone());
+        }
+        let worktrees = self.worktrees.peek();
+        let repo = worktrees.iter().find(|(_, list)| list.iter().any(|w| projects::same_dir(&w.path, dir))).map(|(r, _)| r.clone())?;
+        projects.iter().find(|p| p.repo(&repo).is_some()).cloned()
+    }
+
+    /// Every known agent (the ones found on the machine plus Workbench's own session) by the
+    /// project repository or worktree folder it runs in. Agents outside them are left out.
+    pub fn agent_activity(&self) -> HashMap<PathBuf, Vec<AgentProc>> {
+        let mut dirs: Vec<PathBuf> = self.projects.read().iter().flat_map(|p| p.repos.iter().map(|r| r.dir())).collect();
+        dirs.extend(self.worktrees.read().values().flatten().map(|w| w.path.clone()));
+        let mut agents = self.agents.read().clone();
+        let kind = match self.provider_settings.read().provider {
+            Provider::ClaudeCode => AgentKind::Workbench,
+            Provider::Codex => AgentKind::Codex,
+            Provider::Vibe => AgentKind::Vibe,
+            api => AgentKind::Api(api),
+        };
+        agents.push(AgentProc { pid: 0, kind, cwd: self.cwd.read().clone(), working: *self.busy.read(), in_app: true });
+        activity::assign(&agents, &dirs)
     }
 
     pub fn update_projects(&mut self, f: impl FnOnce(&mut Vec<Project>)) {
@@ -814,14 +947,14 @@ impl AppState {
     pub fn show_project(&mut self, id: Option<String>) {
         let cwd = self.cwd.peek().clone();
         let id = id
-            .or_else(|| projects::containing(&self.projects.peek(), &cwd).map(|p| p.id.clone()))
+            .or_else(|| self.project_for(&cwd).map(|p| p.id))
             .or_else(|| self.projects.peek().first().map(|p| p.id.clone()))
             .unwrap_or_default();
         self.project_view.set(Some(id));
     }
 
-    pub fn start_job(&mut self, kind: JobKind) -> RunMode {
-        let mode = *self.run_mode.peek();
+    pub fn start_job(&mut self, kind: JobKind) -> ChatMode {
+        let mode = *self.chat_mode.peek();
         self.job.set(Some(Job { kind, mode, awaiting: false }));
         mode
     }
@@ -886,7 +1019,7 @@ impl AppState {
     pub fn finish_job(&mut self, success: bool) {
         self.end_chat_turn(success);
         let Some(job) = *self.job.peek() else { return };
-        // Sync while the job is still set so its graph edits are credited to Claude.
+        // Sync while the job is still set so its graph edits are credited to Workbench.
         self.sync_workbench_from_disk();
         self.job.set(None);
         if success && job.kind != JobKind::Draft {
@@ -899,24 +1032,6 @@ impl AppState {
         *self.rules_version.write() += 1;
         let cwd = self.cwd.peek().clone();
         if let Err(e) = rules::save(&cwd, &self.rules.peek()) {
-            self.workbench_error.set(Some(e));
-        }
-    }
-
-    pub fn set_screen(&mut self, screen: Screen, state: ScreenState) {
-        self.screens.write().insert(screen, state);
-        if let Err(e) = screens::save(&self.screens.peek()) {
-            self.workbench_error.set(Some(e));
-        }
-    }
-
-    pub fn set_size(&mut self, screen: Screen, pct: f64) {
-        self.sizes.write().insert(screen, pct);
-        self.save_sizes();
-    }
-
-    pub fn save_sizes(&mut self) {
-        if let Err(e) = screens::save_sizes(&self.sizes.peek()) {
             self.workbench_error.set(Some(e));
         }
     }

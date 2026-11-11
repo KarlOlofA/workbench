@@ -4,52 +4,14 @@ use std::rc::Rc;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
+use crate::dropdown::{Choice, ComboBox, Dropdown};
 use crate::ghost::{self, GhostPick};
 use crate::git;
 use crate::graph::{self, ChangeKind, Flow, Graph, KNOWN_KINDS, Module, NODE_H, NODE_W, Node, REFERENCE_KIND, RefNode, Reference, Subject};
-use crate::project_view::ProjectView;
 use crate::prompts::{self, DebugMode};
 use crate::reference::{self, RefState, Source};
-use crate::rules_view::RulesView;
 use crate::node_history::{self, Entry, Op, Row};
-use crate::state::{AppState, BottomPane, Cmd, GraphPane, Job, JobKind, LeftTab};
-
-#[component]
-pub fn LeftPanel() -> Element {
-    let mut st = use_context::<AppState>();
-    let tab = *st.left_tab.read();
-    let n_rules = st.rules.read().iter().filter(|r| r.enabled).count();
-    let error = st.workbench_error.read().clone();
-    let project_view = st.project_view.read().clone();
-
-    rsx! {
-        div { class: "left",
-            div { class: "tabs",
-                button {
-                    class: if tab == LeftTab::Graph { "tab active" } else { "tab" },
-                    onclick: move |_| st.left_tab.set(LeftTab::Graph),
-                    "Graph"
-                }
-                button {
-                    class: if tab == LeftTab::Rules { "tab active" } else { "tab" },
-                    onclick: move |_| st.left_tab.set(LeftTab::Rules),
-                    "Rules ({n_rules})"
-                }
-            }
-            if let Some(e) = error {
-                div { class: "wb-error",
-                    span { "{e}" }
-                    button { onclick: move |_| st.workbench_error.set(None), "✕" }
-                }
-            }
-            match (tab, project_view) {
-                (LeftTab::Graph, Some(id)) => rsx! { ProjectView { key: "{id}", id } },
-                (LeftTab::Graph, None) => rsx! { GraphTab {} },
-                (LeftTab::Rules, _) => rsx! { RulesView {} },
-            }
-        }
-    }
-}
+use crate::state::{AppState, Cmd, GraphPane, Job, JobKind, Layout};
 
 fn attach_module(mut st: AppState, module: String) {
     let scope = st.scope.peek().last().cloned();
@@ -150,8 +112,10 @@ fn add_node(mut st: AppState, parent: Option<String>) {
     }
 }
 
+/// The graph view of the workbench: toolbar, breadcrumbs, the canvas with the floating chat,
+/// and the node menu (node, flows, changes, history, prompt) on the right.
 #[component]
-fn GraphTab() -> Element {
+pub fn GraphTab() -> Element {
     let mut st = use_context::<AppState>();
     let claude = use_coroutine_handle::<Cmd>();
     let job = *st.job.read();
@@ -163,8 +127,8 @@ fn GraphTab() -> Element {
     let n_flows = net.flows.len();
     let pane = *st.graph_pane.read();
     let n_history = st.node_history.read().entries.len();
-    let bottom = *st.graph_bottom.read();
-    let mut tab_el = use_signal(|| None::<Rc<MountedData>>);
+    let layout = *st.layout.read();
+    let mut row_el = use_signal(|| None::<Rc<MountedData>>);
     let mut split_drag = use_signal(|| None::<(f64, f64, Option<f64>)>);
     let splitting = split_drag.read().is_some();
     let drafting = st.flow_draft.read().is_some();
@@ -207,85 +171,80 @@ fn GraphTab() -> Element {
     let pane_btn = move |p: GraphPane, label: String| {
         rsx! {
             button {
-                class: if pane == p && !bottom.collapsed { "subtab active" } else { "subtab" },
+                class: if pane == p { "subtab active" } else { "subtab" },
                 onclick: move |_| st.show_pane(p),
                 "{label}"
             }
         }
     };
 
+    // Dragging the splitter left widens the node menu; the drag holds (start x, start %, row width).
     let start_split = move |e: MouseEvent| {
         if e.trigger_button() != Some(MouseButton::Primary) {
             return;
         }
         e.prevent_default();
-        let y = e.client_coordinates().y;
-        let pct = st.graph_bottom.peek().pct;
-        split_drag.set(Some((y, pct, None)));
-        let Some(m) = tab_el.peek().clone() else { return };
+        let x = e.client_coordinates().x;
+        let pct = st.layout.peek().node_menu_pct;
+        split_drag.set(Some((x, pct, None)));
+        let Some(m) = row_el.peek().clone() else { return };
         spawn(async move {
             if let Ok(rect) = m.get_client_rect().await
                 && let Some(d) = split_drag.write().as_mut()
             {
-                d.2 = Some(rect.size.height);
+                d.2 = Some(rect.size.width);
             }
         });
     };
     let mut end_split = move || {
         if split_drag.peek().is_some() {
             split_drag.set(None);
-            st.save_bottom();
+            st.save_layout();
         }
     };
-    let bottom_style = if bottom.collapsed || drafting {
-        String::new()
-    } else {
-        format!("flex: 0 0 {:.2}%;", BottomPane::clamp(bottom.pct))
-    };
-    let bottom_class = if bottom.collapsed && !drafting { "graph-bottom collapsed" } else { "graph-bottom" };
+    let menu_open = layout.node_menu_open || drafting;
+    let menu_style = format!("flex: 0 0 {:.2}%;", Layout::clamp_node_menu(layout.node_menu_pct));
 
     rsx! {
-        div { class: "graph-tab", onmounted: move |e| tab_el.set(Some(e.data())),
+        div { class: "graph-tab",
             div { class: "graph-toolbar",
                 button {
                     disabled: busy || rescan_blocked || job.is_some(),
-                    title: if rescan_blocked { "Process or revert your graph changes before rescanning" } else { "Let Claude explore the code and (re)build the graph" },
+                    title: if rescan_blocked { "Process or revert your graph changes before rescanning" } else { "Let Workbench explore the code and (re)build the graph" },
                     onclick: generate,
                     if has_nodes { "Rescan code" } else { "Map codebase" }
                 }
                 button { disabled: job.is_some(), onclick: move |_| add_node(st, None), "+ Node" }
                 button {
                     disabled: job.is_some(),
-                    title: "Reference an external project, file, website or package to give Claude more context",
+                    title: "Reference an external project, file, website or package to give Workbench more context",
                     onclick: move |_| add_reference(st),
                     "+ Reference"
                 }
-                select {
+                Dropdown {
                     class: "add-module",
                     disabled: job.is_some(),
                     title: "Attach a module (an isolated node network) here as a single node",
                     value: "",
-                    onchange: move |e: FormEvent| match e.value().as_str() {
-                        "" => {}
+                    placeholder: "+ Module…",
+                    choices: std::iter::once(Choice::new("__new__", "New module"))
+                        .chain(attachable.into_iter().map(|(mid, title)| Choice::new(mid, format!("Attach “{title}”"))))
+                        .collect::<Vec<_>>(),
+                    onchange: move |v: String| match v.as_str() {
                         "__new__" => new_module(st),
                         id => attach_module(st, id.to_string()),
                     },
-                    option { value: "", "+ Module…" }
-                    option { value: "__new__", "New module" }
-                    for (mid, title) in attachable {
-                        option { key: "{mid}", value: "{mid}", "Attach “{title}”" }
-                    }
                 }
                 button {
                     disabled: job.is_some(),
-                    title: "Describe what you want and let Claude add the nodes",
+                    title: "Describe what you want and let Workbench add the nodes",
                     onclick: move |_| st.show_pane(GraphPane::Prompt),
                     "+ From prompt"
                 }
                 div { class: "spacer" }
                 match job {
                     Some(Job { awaiting: true, .. }) => rsx! {
-                        span { class: "badge warn", title: "Answer Claude's questions in the chat to continue", "Waiting for your answers" }
+                        span { class: "badge warn", title: "Answer Workbench's questions in the chat to continue", "Waiting for your answers" }
                         button { class: "small", onclick: move |_| st.finish_job(false), "Cancel" }
                     },
                     Some(Job { kind: JobKind::Generate, .. }) => rsx! { span { class: "badge busy", "Mapping…" } },
@@ -349,84 +308,82 @@ fn GraphTab() -> Element {
                     "↑ Up"
                 }
             }
-            div { class: "graph-canvas-wrap",
-                GraphCanvas {}
-                if scope.is_some() && net_empty && job.is_none() {
-                    div { class: "graph-empty",
-                        p { "This module has no nodes yet." }
-                        p { class: "muted",
-                            "Add nodes with + Node, or describe the feature in the Prompt tab and Claude drafts the module's network."
+            div { class: "graph-row", onmounted: move |e| row_el.set(Some(e.data())),
+                div { class: "graph-canvas-wrap",
+                    GraphCanvas {}
+                    if scope.is_some() && net_empty && job.is_none() {
+                        div { class: "graph-empty",
+                            p { "This module has no nodes yet." }
+                            p { class: "muted",
+                                "Add nodes with + Node, or describe the feature in the Prompt tab and Workbench drafts the module's network."
+                            }
+                        }
+                    }
+                    if scope.is_none() && !has_nodes && job.is_none() {
+                        div { class: "graph-empty",
+                            p { "No graph for this project yet." }
+                            p { class: "muted",
+                                "Map codebase lets Workbench explore the code and draw its architecture: entry points, APIs, routes, services, data and integrations. Or add nodes yourself."
+                            }
+                            button { class: "primary", disabled: busy, onclick: generate, "Map codebase" }
                         }
                     }
                 }
-                if scope.is_none() && !has_nodes && job.is_none() {
-                    div { class: "graph-empty",
-                        p { "No graph for this project yet." }
-                        p { class: "muted",
-                            "Map codebase lets Claude explore the code and draw its architecture: entry points, APIs, routes, services, data and integrations. Or add nodes yourself."
-                        }
-                        button { class: "primary", disabled: busy, onclick: generate, "Map codebase" }
+                if menu_open {
+                    div {
+                        class: "splitter",
+                        title: "Drag to resize the node menu · double-click to hide it",
+                        onmousedown: start_split,
+                        ondoubleclick: move |_| st.set_layout(|l| l.node_menu_open = false),
                     }
-                }
-            }
-            if !bottom.collapsed || drafting {
-                div {
-                    class: "hsplitter",
-                    title: "Drag to resize the panel · double-click to collapse it",
-                    onmousedown: start_split,
-                    ondoubleclick: move |_| st.set_bottom(|b| b.collapsed = true),
-                }
-            }
-            div { class: "{bottom_class}", style: "{bottom_style}",
-                if drafting {
-                    FlowDraft {}
+                    div { class: "node-menu", style: "{menu_style}",
+                        if drafting {
+                            FlowDraft {}
+                        } else {
+                            div { class: "subtabs",
+                                {pane_btn(GraphPane::Node, "Node".into())}
+                                {pane_btn(GraphPane::Flows, format!("Flows ({n_flows})"))}
+                                {pane_btn(GraphPane::Changes, format!("Changes ({n_changes})"))}
+                                {pane_btn(GraphPane::History, format!("History ({n_history})"))}
+                                {pane_btn(GraphPane::Prompt, "Prompt".into())}
+                                div { class: "spacer" }
+                                button {
+                                    class: "pane-toggle",
+                                    title: "Hide the node menu to give the graph more room",
+                                    onclick: move |_| st.set_layout(|l| l.node_menu_open = false),
+                                    "▸"
+                                }
+                            }
+                            div { class: "pane-body",
+                                match pane {
+                                    GraphPane::Node => rsx! { NodePane {} },
+                                    GraphPane::Flows => rsx! { FlowsPane {} },
+                                    GraphPane::Changes => rsx! { ChangesPane {} },
+                                    GraphPane::History => rsx! { HistoryPane {} },
+                                    GraphPane::Prompt => rsx! { PromptPane {} },
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    div { class: "subtabs",
-                        {pane_btn(GraphPane::Node, "Node".into())}
-                        {pane_btn(GraphPane::Flows, format!("Flows ({n_flows})"))}
-                        {pane_btn(GraphPane::Changes, format!("Changes ({n_changes})"))}
-                        {pane_btn(GraphPane::History, format!("History ({n_history})"))}
-                        {pane_btn(GraphPane::Prompt, "Prompt".into())}
-                        div { class: "spacer" }
-                        if !bottom.collapsed && bottom.pct != BottomPane::DEFAULT_PCT {
-                            button {
-                                class: "pane-toggle",
-                                title: "Reset the panel to its default height",
-                                onclick: move |_| st.set_bottom(|b| b.pct = BottomPane::DEFAULT_PCT),
-                                "↺"
-                            }
-                        }
-                        button {
-                            class: "pane-toggle",
-                            title: if bottom.collapsed { "Expand the panel" } else { "Minimize the panel to give the graph more room" },
-                            onclick: move |_| st.set_bottom(|b| b.collapsed = !b.collapsed),
-                            if bottom.collapsed { "▴" } else { "▾" }
-                        }
-                    }
-                    if !bottom.collapsed {
-                        div { class: "pane-body",
-                            match pane {
-                                GraphPane::Node => rsx! { NodePane {} },
-                                GraphPane::Flows => rsx! { FlowsPane {} },
-                                GraphPane::Changes => rsx! { ChangesPane {} },
-                                GraphPane::History => rsx! { HistoryPane {} },
-                                GraphPane::Prompt => rsx! { PromptPane {} },
-                            }
-                        }
+                    div {
+                        class: "screen-strip",
+                        title: "Show the node menu",
+                        onclick: move |_| st.set_layout(|l| l.node_menu_open = true),
+                        span { "Node menu" }
                     }
                 }
             }
             if splitting {
                 div {
-                    class: "drag-overlay row",
+                    class: "drag-overlay",
                     onmousemove: move |e: MouseEvent| {
-                        let Some((start_y, start_pct, Some(height))) = *split_drag.peek() else { return };
-                        if height <= 0.0 {
+                        let Some((start_x, start_pct, Some(width))) = *split_drag.peek() else { return };
+                        if width <= 0.0 {
                             return;
                         }
-                        let y = e.client_coordinates().y;
-                        let pct = BottomPane::clamp(start_pct - (y - start_y) / height * 100.0);
-                        st.graph_bottom.write().pct = pct;
+                        let x = e.client_coordinates().x;
+                        st.layout.write().node_menu_pct = Layout::clamp_node_menu(start_pct - (x - start_x) / width * 100.0);
                     },
                     onmouseup: move |_| end_split(),
                     onmouseleave: move |_| end_split(),
@@ -957,6 +914,7 @@ fn GraphCanvas() -> Element {
                 if e.trigger_button() != Some(MouseButton::Primary) {
                     return;
                 }
+                st.fade_chat();
                 let p = e.client_coordinates();
                 let m = e.modifiers();
                 if (m.ctrl() || m.meta()) && st.flow_draft.peek().is_none() {
@@ -1075,6 +1033,7 @@ fn GraphCanvas() -> Element {
                                         return;
                                     }
                                     e.stop_propagation();
+                                    st.fade_chat();
                                     let p = e.client_coordinates();
                                     drag.set(Some(Drag::Node { id: id.clone(), sx: p.x, sy: p.y, group: Vec::new(), moved: false, shift: m.shift() }));
                                 },
@@ -1140,7 +1099,7 @@ fn GraphCanvas() -> Element {
                         let pick = GhostPick { branch: branch.clone(), scope: scope.clone(), id: gn.node.id.clone() };
                         let sel = if ghost_picks.contains(&pick) { "selected" } else { "" };
                         let tip = format!(
-                            "{}\n\nWork in progress on branch {branch}. Click to send it to Claude as context, Shift+click to add it to the context.",
+                            "{}\n\nWork in progress on branch {branch}. Click to send it to Workbench as context, Shift+click to add it to the context.",
                             gn.node.description
                         );
                         rsx! {
@@ -1242,7 +1201,7 @@ fn GraphCanvas() -> Element {
                         button { class: "small", onclick: move |_| ghost_menu.set(false), "✕" }
                     }
                     div { class: "muted small-text",
-                        "Show the graph work on other branches as ghost nodes. Click a ghost to send it to Claude as context."
+                        "Show the graph work on other branches as ghost nodes. Click a ghost to send it to Workbench as context."
                     }
                     div { class: "ghost-branches",
                         match branch_list.read().clone() {
@@ -1291,7 +1250,7 @@ fn GraphCanvas() -> Element {
                                                             span { class: "muted small-text", "{n} node{plural(n)}" }
                                                             button {
                                                                 class: "small",
-                                                                title: "Add all of this branch's ghost nodes here to Claude's context",
+                                                                title: "Add all of this branch's ghost nodes here to Workbench's context",
                                                                 onclick: move |_| {
                                                                     for id in &ids {
                                                                         let pick = GhostPick { branch: pick_name.clone(), scope: pick_scope.clone(), id: id.clone() };
@@ -1364,7 +1323,7 @@ fn GhostPane() -> Element {
                 button { class: "small", onclick: move |_| st.toggle_ghost_pick(remove.clone()), "Remove from context" }
             }
             div { class: "muted small-text",
-                "Ghost node: {change}. It only exists on branch {branch}, so it is read-only here. It is sent to Claude as context with your messages."
+                "Ghost node: {change}. It only exists on branch {branch}, so it is read-only here. It is sent to Workbench as context with your messages."
             }
             label { "Title" }
             div { class: "ghost-field", "{node.title}" }
@@ -1411,8 +1370,8 @@ fn NodePane() -> Element {
         }
         return rsx! {
             div { class: "muted pad",
-                "Select a node to read and edit what it does. Edit descriptions, links or add and remove nodes, then commit the changes so Claude updates the code to match. "
-                "Shift+click or Ctrl+drag to select several nodes; selected nodes are sent to Claude as context."
+                "Select a node to read and edit what it does. Edit descriptions, links or add and remove nodes, then commit the changes so Workbench updates the code to match. "
+                "Shift+click or Ctrl+drag to select several nodes; selected nodes are sent to Workbench as context."
             }
         };
     };
@@ -1535,12 +1494,11 @@ fn NodePane() -> Element {
                 },
             }
             label { "Kind" }
-            input {
-                value: "{node.kind}",
-                "list": "wb-kinds",
+            ComboBox {
+                value: node.kind.clone(),
+                suggestions: KNOWN_KINDS.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
                 disabled: locked,
-                oninput: move |e| {
-                    let v = e.value();
+                onchange: move |v: String| {
                     let id = id_kind.clone();
                     st.update_net(|g| if let Some(n) = g.node_mut(&id) { n.kind = v });
                 },
@@ -1549,10 +1507,13 @@ fn NodePane() -> Element {
                 ReferenceBox { id: id.clone(), reference: reference.clone(), title: node.title.clone(), locked }
             } else {
                 label { "Module" }
-                select {
+                Dropdown {
                     disabled: locked,
-                    onchange: move |e: FormEvent| {
-                        let v = e.value();
+                    value: node.module.clone().unwrap_or_default(),
+                    choices: std::iter::once(Choice::new("", "None — a plain node"))
+                        .chain(module_choices.into_iter().map(|(mid, mtitle)| Choice::new(mid, format!("Attaches “{mtitle}”"))))
+                        .collect::<Vec<_>>(),
+                    onchange: move |v: String| {
                         let id = id_mod.clone();
                         st.update_net(|g| {
                             if let Some(n) = g.node_mut(&id) {
@@ -1560,20 +1521,6 @@ fn NodePane() -> Element {
                             }
                         });
                     },
-                    option { value: "", selected: node.module.is_none(), "None — a plain node" }
-                    for (mid, mtitle) in module_choices {
-                        option {
-                            key: "{mid}",
-                            value: "{mid}",
-                            selected: node.module.as_deref() == Some(mid.as_str()),
-                            "Attaches “{mtitle}”"
-                        }
-                    }
-                }
-            }
-            datalist { id: "wb-kinds",
-                for k in KNOWN_KINDS {
-                    option { value: "{k}" }
                 }
             }
             label { "What it does" }
@@ -1614,24 +1561,18 @@ fn NodePane() -> Element {
                     }
                 }
                 if !locked && !input_candidates.is_empty() {
-                    select {
+                    Dropdown {
                         class: "add-link",
                         value: "",
+                        placeholder: "+ input from…",
+                        choices: input_candidates.into_iter().map(|(cid, title)| Choice::new(cid, title)).collect::<Vec<_>>(),
                         onchange: {
                             let id = id_link.clone();
-                            move |e: FormEvent| {
-                                let source = e.value();
-                                if source.is_empty() {
-                                    return;
-                                }
+                            move |source: String| {
                                 let id = id.clone();
                                 st.update_net(|g| if let Some(n) = g.node_mut(&source) { n.links.push(id) });
                             }
                         },
-                        option { value: "", "+ input from…" }
-                        for (cid, title) in input_candidates {
-                            option { key: "{cid}", value: "{cid}", "{title}" }
-                        }
                     }
                 }
             }
@@ -1661,23 +1602,17 @@ fn NodePane() -> Element {
                     }
                 }
                 if !locked && !candidates.is_empty() {
-                    select {
+                    Dropdown {
                         class: "add-link",
                         value: "",
+                        placeholder: "+ output to…",
+                        choices: candidates.into_iter().map(|(cid, title)| Choice::new(cid, title)).collect::<Vec<_>>(),
                         onchange: {
                             let id = id_link.clone();
-                            move |e: FormEvent| {
-                                let target = e.value();
-                                if target.is_empty() {
-                                    return;
-                                }
+                            move |target: String| {
                                 st.update_net(|g| if let Some(n) = g.node_mut(&id) { n.links.push(target) });
                             }
                         },
-                        option { value: "", "+ output to…" }
-                        for (cid, title) in candidates {
-                            option { key: "{cid}", value: "{cid}", "{title}" }
-                        }
                     }
                 }
             }
@@ -1685,7 +1620,7 @@ fn NodePane() -> Element {
                 label { "Files" }
             }
             if node.files.is_empty() && !is_ref {
-                div { class: "muted small-text", "Not mapped yet — Claude fills this in when it maps or processes the node." }
+                div { class: "muted small-text", "Not mapped yet — Workbench fills this in when it maps or processes the node." }
             }
             ul { class: "file-list",
                 for f in node.files.iter().cloned() {
@@ -1830,7 +1765,7 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                         None => rsx! { span { class: "muted small-text", "Not checked for a Workbench graph yet." } },
                         Some(RefState::Loading) => rsx! { span { class: "muted small-text", "Looking for a Workbench graph…" } },
                         Some(RefState::Ready(None)) => rsx! {
-                            span { class: "muted small-text", "No Workbench graph found. Claude reads the source directly when it needs it." }
+                            span { class: "muted small-text", "No Workbench graph found. Workbench reads the source directly when it needs it." }
                         },
                         Some(RefState::Ready(Some(g))) => rsx! {
                             span { class: "chip ref-wb", "◆ Workbench" }
@@ -1853,7 +1788,7 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                 label { "Referenced nodes" }
                 if picked.is_empty() {
                     div { class: "muted small-text",
-                        "Pick the nodes of the other project that matter here. Their descriptions and files are sent to Claude as context."
+                        "Pick the nodes of the other project that matter here. Their descriptions and files are sent to Workbench as context."
                     }
                 }
                 ul { class: "ref-nodes",
@@ -1889,11 +1824,13 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                     }
                 }
                 if !locked && !choices.is_empty() {
-                    select {
+                    Dropdown {
                         class: "add-link",
                         value: "",
-                        onchange: move |e: FormEvent| {
-                            let Ok(r) = serde_json::from_str::<RefNode>(&e.value()) else { return };
+                        placeholder: "+ reference a node…",
+                        choices: choices.into_iter().map(|(value, label)| Choice::new(value, label)).collect::<Vec<_>>(),
+                        onchange: move |v: String| {
+                            let Ok(r) = serde_json::from_str::<RefNode>(&v) else { return };
                             edit_reference(st, &id_pick, |n| {
                                 let nodes = &mut n.reference.as_mut().unwrap().nodes;
                                 if !nodes.contains(&r) {
@@ -1902,10 +1839,6 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                             });
                             st.touch_context();
                         },
-                        option { value: "", "+ reference a node…" }
-                        for (value, label) in choices {
-                            option { key: "{value}", value: "{value}", "{label}" }
-                        }
                     }
                 }
             }
@@ -2195,7 +2128,7 @@ fn HistoryPane() -> Element {
                     }
                 }
                 span { class: "muted small-text",
-                    "Every change to a node's title, kind, links, files or description, by you, teammates, Claude or edits outside Workbench. Shared with the repo in .workbench/node-history.jsonl."
+                    "Every change to a node's title, kind, links, files or description, by you, teammates, Workbench or edits outside Workbench. Shared with the repo in .workbench/node-history.jsonl."
                 }
             }
             if groups.is_empty() {
@@ -2332,7 +2265,7 @@ fn PromptPane() -> Element {
     let busy = *st.busy.read();
     let locked = st.graph_locked();
     let awaiting = st.awaiting_answers();
-    let mode = *st.run_mode.read();
+    let mode = *st.chat_mode.read();
     let empty = request.read().trim().is_empty();
     let context = st.selected_titles().join(", ");
 
@@ -2361,7 +2294,7 @@ fn PromptPane() -> Element {
         div { class: "prompt-pane",
             if awaiting {
                 div { class: "hint-box",
-                    "Claude has questions about your request. Answer them in the chat to continue, or cancel the job from the toolbar."
+                    "Workbench has questions about your request. Answer them in the chat to continue, or cancel the job from the toolbar."
                 }
             }
             textarea {
@@ -2380,7 +2313,7 @@ fn PromptPane() -> Element {
                 button {
                     class: "primary",
                     disabled: busy || locked || empty,
-                    title: "Claude adds nodes to the graph only. Commit them afterwards to generate the code.",
+                    title: "Workbench adds nodes to the graph only. Commit them afterwards to generate the code.",
                     onclick: draft,
                     "Add nodes"
                 }
@@ -2490,7 +2423,7 @@ fn ChangesPane() -> Element {
                 button {
                     class: "primary",
                     disabled: busy || locked,
-                    title: "Send the diff between the graph and the code to Claude and let it change the code",
+                    title: "Send the diff between the graph and the code to Workbench and let it change the code",
                     onclick: process,
                     "Commit & process"
                 }
@@ -2584,12 +2517,10 @@ fn FlowsPane() -> Element {
                             div { class: "flow-path", "{path}" }
                             if is_debug {
                                 div { class: "debug-form",
-                                    select {
-                                        value: "{mode.read().key()}",
-                                        onchange: move |e| mode.set(DebugMode::from_key(&e.value())),
-                                        for m in DebugMode::ALL {
-                                            option { value: "{m.key()}", selected: m == *mode.read(), "{m.label()}" }
-                                        }
+                                    Dropdown {
+                                        value: mode.read().key().to_string(),
+                                        choices: DebugMode::ALL.iter().map(|m| Choice::new(m.key(), m.label())).collect::<Vec<_>>(),
+                                        onchange: move |v: String| mode.set(DebugMode::from_key(&v)),
                                     }
                                     textarea {
                                         placeholder: "What's going wrong? (optional) e.g. “returns 500 when the list is empty”",

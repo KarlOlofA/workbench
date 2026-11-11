@@ -1,15 +1,20 @@
 use dioxus::prelude::*;
 use futures_util::StreamExt;
 
-use crate::claude::{ClaudeEvent, ClaudeProcess, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
+use crate::agent::{self, Agent, TurnOptions};
+use crate::api_chat;
+use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
 use crate::history;
-use crate::projects;
+use crate::mcp;
+use crate::providers::Provider;
 use crate::prompts;
-use crate::state::{AppState, ChatItem, Cmd, RunMode};
+use crate::state::{AppState, ChatItem, Cmd, PlanApproval};
 
 struct Live {
-    proc: ClaudeProcess,
+    agent: Agent,
     rules_version: u64,
+    /// The mode the agent runs in; a different chat mode restarts it on the next message.
+    mode: ChatMode,
 }
 
 pub async fn run(mut st: AppState, mut rx: UnboundedReceiver<Cmd>) {
@@ -46,7 +51,7 @@ pub async fn run(mut st: AppState, mut rx: UnboundedReceiver<Cmd>) {
                         };
                         let Some(req) = req else { continue };
                         if let Some(l) = live.as_mut()
-                            && let Err(e) = l.proc.respond_permission(&request_id, &decision).await
+                            && let Err(e) = l.agent.respond_permission(&request_id, &decision).await
                         {
                             st.items.write().push(ChatItem::Error(format!("could not answer the permission request: {e:#}")));
                             continue;
@@ -62,13 +67,47 @@ pub async fn run(mut st: AppState, mut rx: UnboundedReceiver<Cmd>) {
                         st.items.write().push(ChatItem::Info(format!("{verdict} {}: {summary}", req.tool)));
                         continue;
                     }
+                    Cmd::ApprovePlan { mode } => {
+                        let Some(approval) = st.plan_approval.take() else { continue };
+                        if let Some(mode) = mode {
+                            st.chat_mode.set(mode);
+                        }
+                        match (approval.request, mode) {
+                            // Workbench: answer its ExitPlanMode request and switch the running session's mode.
+                            (Some(req), Some(mode)) => {
+                                let set_mode = serde_json::json!({ "type": "setMode", "mode": mode.cli_arg(), "destination": "session" });
+                                let decision = PermissionDecision::Allow { input: req.input.clone(), permissions: vec![set_mode] };
+                                answer_plan(&mut st, &mut live, &req.request_id, &decision).await;
+                                if let Some(l) = live.as_mut() {
+                                    l.mode = mode;
+                                }
+                                st.items.write().push(ChatItem::Info(format!("Plan approved · running in {}", mode.label())));
+                                continue;
+                            }
+                            (Some(req), None) => {
+                                let decision = PermissionDecision::Deny {
+                                    message: "The user wants to keep planning. Ask them what to change in the plan.".into(),
+                                    interrupt: false,
+                                };
+                                answer_plan(&mut st, &mut live, &req.request_id, &decision).await;
+                                st.items.write().push(ChatItem::Info("Kept planning".into()));
+                                continue;
+                            }
+                            // Other providers: ask for the plan to be implemented in a new turn, in the picked mode.
+                            (None, Some(mode)) => {
+                                let text = "The plan is approved. Implement it now.".to_string();
+                                (ChatItem::Prompt { label: format!("Run the plan · {}", mode.label()), text: text.clone() }, text)
+                            }
+                            (None, None) => continue,
+                        }
+                    }
                     Cmd::Interrupt => {
                         deny_pending(&mut st, &mut live).await;
                         if let Some(l) = live.as_mut()
-                            && l.proc.interrupt().await.is_err()
+                            && l.agent.interrupt().await.is_err()
                         {
                             if let Some(l) = live.take() {
-                                l.proc.kill().await;
+                                l.agent.kill().await;
                             }
                             generation += 1;
                             st.busy.set(false);
@@ -78,10 +117,11 @@ pub async fn run(mut st: AppState, mut rx: UnboundedReceiver<Cmd>) {
                     }
                     Cmd::Resume { id } => {
                         if let Some(l) = live.take() {
-                            l.proc.kill().await;
+                            l.agent.kill().await;
                         }
                         generation += 1;
                         st.permissions.write().clear();
+                        st.plan_approval.set(None);
                         st.queued.write().clear();
                         st.busy.set(false);
                         st.finish_job(false);
@@ -95,10 +135,11 @@ pub async fn run(mut st: AppState, mut rx: UnboundedReceiver<Cmd>) {
                     }
                     Cmd::Restart { keep_session } => {
                         if let Some(l) = live.take() {
-                            l.proc.kill().await;
+                            l.agent.kill().await;
                         }
                         generation += 1;
                         st.permissions.write().clear();
+                        st.plan_approval.set(None);
                         st.busy.set(false);
                         st.queued.write().clear();
                         st.finish_job(false);
@@ -118,27 +159,33 @@ pub async fn run(mut st: AppState, mut rx: UnboundedReceiver<Cmd>) {
                 }
                 if let ClaudeEvent::ControlRequest { request_id, subtype } = &ev {
                     if let Some(l) = live.as_mut() {
-                        let _ = l.proc.respond_error(request_id, &format!("Workbench does not handle `{subtype}` requests")).await;
+                        let _ = l.agent.respond_error(request_id, &format!("Workbench does not handle `{subtype}` requests")).await;
                     }
                     continue;
                 }
                 if let ClaudeEvent::Exited = ev {
-                    let code = live.as_mut().and_then(|l| l.proc.exit_code());
+                    let code = live.as_mut().and_then(|l| l.agent.exit_code());
                     live = None;
                     st.permissions.write().clear();
-                    if *st.busy.peek() {
-                        st.items.write().push(ChatItem::Error(format!("claude exited (code {code:?})")));
+                    // A plan from a one-turn provider outlives its process; Workbench's plan request doesn't.
+                    if st.plan_approval.peek().as_ref().is_some_and(|a| a.request.is_some()) {
+                        st.plan_approval.set(None);
                     }
-                    st.busy.set(false);
-                    st.finish_job(false);
+                    // One-turn providers exit after every finished turn; only an exit mid-turn is a failure.
+                    if *st.busy.peek() {
+                        let name = st.provider_settings.peek().provider.short_name();
+                        st.items.write().push(ChatItem::Error(format!("{name} exited (code {code:?})")));
+                        st.busy.set(false);
+                        st.finish_job(false);
+                    }
                     continue;
                 }
                 if let ClaudeEvent::Permission(req) = &ev
-                    && st.permission_mode.peek().auto_allows(req)
+                    && st.chat_mode.peek().auto_allows(req)
                     && let Some(l) = live.as_mut()
                 {
                     let decision = PermissionDecision::Allow { input: req.input.clone(), permissions: Vec::new() };
-                    match l.proc.respond_permission(&req.request_id, &decision).await {
+                    match l.agent.respond_permission(&req.request_id, &decision).await {
                         Ok(()) => {
                             let cwd = st.cwd.peek().clone();
                             let summary = tool_summary(&req.tool, &req.input, &cwd);
@@ -163,30 +210,32 @@ async fn deliver(
     text: String,
 ) {
     let rules_version = *st.rules_version.peek();
-    if live.as_ref().is_some_and(|l| l.rules_version != rules_version)
+    let provider = st.provider_settings.peek().provider;
+    if provider != Provider::ClaudeCode {
+        start_turn(st, live, generation, ev_tx, shown, text, provider).await;
+        return;
+    }
+    let mode = *st.chat_mode.peek();
+    if live.as_ref().is_some_and(|l| l.rules_version != rules_version || l.mode != mode)
         && let Some(l) = live.take()
     {
-        l.proc.kill().await;
+        l.agent.kill().await;
         *generation += 1;
         st.permissions.write().clear();
+        st.plan_approval.set(None);
     }
     if live.is_none() {
         *generation += 1;
         let opts = SpawnOptions {
             cwd: st.cwd.peek().clone(),
             resume: st.session_id.peek().clone(),
-            permission_mode: *st.permission_mode.peek(),
-            append_system_prompt: {
-                let base = st.with_refs(|refs| {
-                    prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs))
-                });
-                let cwd = st.cwd.peek().clone();
-                let project = projects::containing(&st.projects.peek(), &cwd).cloned();
-                prompts::with_project(base, project.as_ref(), &cwd)
-            },
+            mode,
+            append_system_prompt: system_prompt(st),
+            mcp_config: mcp::claude_config(&st.mcp_servers.peek()),
+            model: st.provider_settings.peek().model(Provider::ClaudeCode),
         };
         match ClaudeProcess::spawn(&opts, *generation, ev_tx.clone()) {
-            Ok(proc) => *live = Some(Live { proc, rules_version }),
+            Ok(proc) => *live = Some(Live { agent: Agent::Workbench(proc), rules_version, mode }),
             Err(e) => {
                 st.items.write().push(ChatItem::Error(format!("{e:#}")));
                 st.finish_job(false);
@@ -198,7 +247,7 @@ async fn deliver(
     st.items.write().push(shown);
     st.busy.set(true);
     if let Some(l) = live.as_mut()
-        && let Err(e) = l.proc.send_user(&text).await
+        && let Err(e) = l.agent.send_user(&text).await
     {
         st.items.write().push(ChatItem::Error(format!("send failed: {e:#}")));
         st.busy.set(false);
@@ -207,12 +256,78 @@ async fn deliver(
     }
 }
 
+/// The Workbench context every provider gets: graph upkeep, rules, related repos and the project.
+fn system_prompt(st: &AppState) -> Option<String> {
+    let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
+    let cwd = st.cwd.peek().clone();
+    let project = st.project_for(&cwd);
+    prompts::with_project(base, project.as_ref(), &cwd)
+}
+
+/// Every provider except Workbench runs one turn per message: a fresh CLI
+/// process that resumes the previous session, or one API request.
+async fn start_turn(
+    st: &mut AppState,
+    live: &mut Option<Live>,
+    generation: &mut u64,
+    ev_tx: &tokio::sync::mpsc::UnboundedSender<(u64, ClaudeEvent)>,
+    shown: ChatItem,
+    text: String,
+    provider: Provider,
+) {
+    // Answering in the chat instead of picking a mode replaces the plan.
+    st.plan_approval.set(None);
+    if let Some(l) = live.take() {
+        l.agent.kill().await;
+    }
+    *generation += 1;
+    let settings = st.provider_settings.peek().clone();
+    let mode = *st.chat_mode.peek();
+    let mut instructions = system_prompt(st).unwrap_or_default();
+    if mode == ChatMode::Plan {
+        instructions.push_str(prompts::plan_mode_instructions());
+    }
+    let opts = TurnOptions {
+        cwd: st.cwd.peek().clone(),
+        model: settings.model(provider),
+        resume: st.session_id.peek().clone(),
+        mode,
+        system_prompt: instructions,
+        mcp_servers: st.mcp_servers.peek().clone(),
+        prompt: text,
+        history: api_chat::history(&st.items.peek()),
+    };
+    st.model.set(if opts.model.is_empty() { provider.short_name().to_string() } else { opts.model.clone() });
+    match agent::start_turn(provider, &settings, opts, *generation, ev_tx.clone()) {
+        Ok(agent) => *live = Some(Live { agent, rules_version: *st.rules_version.peek(), mode }),
+        Err(e) => {
+            st.items.write().push(shown);
+            st.items.write().push(ChatItem::Error(format!("{e:#}")));
+            st.finish_job(false);
+            return;
+        }
+    }
+    st.begin_chat_turn();
+    st.items.write().push(shown);
+    st.busy.set(true);
+}
+
+/// Answers Workbench's ExitPlanMode request.
+async fn answer_plan(st: &mut AppState, live: &mut Option<Live>, request_id: &str, decision: &PermissionDecision) {
+    if let Some(l) = live.as_mut()
+        && let Err(e) = l.agent.respond_permission(request_id, decision).await
+    {
+        st.items.write().push(ChatItem::Error(format!("could not answer the plan request: {e:#}")));
+    }
+}
+
 async fn deny_pending(st: &mut AppState, live: &mut Option<Live>) {
-    let pending: Vec<_> = st.permissions.write().drain(..).collect();
+    let mut pending: Vec<_> = st.permissions.write().drain(..).collect();
+    pending.extend(st.plan_approval.take().and_then(|a| a.request));
     let Some(l) = live.as_mut() else { return };
     let decision = PermissionDecision::Deny { message: "The user stopped the task.".into(), interrupt: true };
     for p in pending {
-        let _ = l.proc.respond_permission(&p.request_id, &decision).await;
+        let _ = l.agent.respond_permission(&p.request_id, &decision).await;
     }
 }
 
@@ -223,9 +338,13 @@ fn handle_event(st: &mut AppState, ev: ClaudeEvent) {
         st.busy.set(true);
     }
     match ev {
-        ClaudeEvent::Init { session_id, model } => {
+        ClaudeEvent::Init { session_id, model, mcp_servers } => {
+            st.mcp_status.set(mcp_servers);
+            // The session history menu reads Workbench transcripts, so only Workbench sessions are remembered.
             let cwd = st.cwd.peek().clone();
-            if let Err(e) = history::remember(&cwd, &session_id) {
+            if st.provider_settings.peek().provider == Provider::ClaudeCode
+                && let Err(e) = history::remember(&cwd, &session_id)
+            {
                 st.items.write().push(ChatItem::Error(format!("could not remember the session: {e}")));
             }
             st.session_id.set(Some(session_id));
@@ -292,9 +411,8 @@ fn handle_event(st: &mut AppState, ev: ClaudeEvent) {
         ClaudeEvent::Done { cost_usd, is_error, text } => {
             st.busy.set(false);
             st.last_cost.set(cost_usd);
-            let questions = !is_error
-                && text.as_deref().is_some_and(prompts::asks_questions)
-                && st.job.peek().is_some_and(|j| j.mode == RunMode::Plan);
+            let asked = text.as_deref().is_some_and(prompts::asks_questions);
+            let questions = !is_error && asked && st.job.peek().is_some_and(|j| j.mode == ChatMode::Plan);
             if is_error {
                 st.items
                     .write()
@@ -315,11 +433,32 @@ fn handle_event(st: &mut AppState, ev: ClaudeEvent) {
             } else {
                 st.finish_job(!is_error);
             }
+            // Providers without a plan mode of their own: a plan-mode reply that doesn't ask
+            // questions is the plan, so ask how to run it.
+            let plan_from_reply = st.provider_settings.peek().provider != Provider::ClaudeCode && *st.chat_mode.peek() == ChatMode::Plan;
+            if plan_from_reply && !is_error && !asked {
+                let plan = st.items.peek().iter().rev().find_map(|i| match i {
+                    ChatItem::Assistant { text, .. } => Some(text.clone()),
+                    _ => None,
+                });
+                if let Some(plan) = plan.filter(|p| !p.trim().is_empty()) {
+                    st.plan_approval.set(Some(PlanApproval { plan, request: None }));
+                }
+            }
             st.bump_repo();
             st.reload_open_file_if_clean();
         }
+        ClaudeEvent::Permission(req) if req.tool == EXIT_PLAN_TOOL => {
+            let plan = req.input.get("plan").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+            st.plan_approval.set(Some(PlanApproval { plan, request: Some(req) }));
+        }
         ClaudeEvent::Permission(req) => st.permissions.write().push(req),
-        ClaudeEvent::ControlCancel { request_id } => st.permissions.write().retain(|p| p.request_id != request_id),
+        ClaudeEvent::ControlCancel { request_id } => {
+            st.permissions.write().retain(|p| p.request_id != request_id);
+            if st.plan_approval.peek().as_ref().and_then(|a| a.request.as_ref()).is_some_and(|r| r.request_id == request_id) {
+                st.plan_approval.set(None);
+            }
+        }
         ClaudeEvent::Stderr(line) => st.items.write().push(ChatItem::Info(line)),
         ClaudeEvent::ControlRequest { .. } | ClaudeEvent::Exited => {}
     }

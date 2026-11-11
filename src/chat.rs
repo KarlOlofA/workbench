@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 use serde_json::Value;
 
-use crate::claude::{PermissionDecision, PermissionRequest, tool_summary};
+use crate::claude::{ChatMode, PermissionDecision, PermissionRequest, tool_summary};
 use crate::markdown;
-use crate::state::{AppState, ChatItem, Cmd, RunMode};
+use crate::state::{AppState, ChatItem, Cmd, PlanApproval};
 
 #[component]
 pub fn ChatPane() -> Element {
@@ -16,16 +16,23 @@ pub fn ChatPane() -> Element {
                 div { class: "chat-log-inner",
                     if items.is_empty() {
                         div { class: "empty",
-                            "Ask Claude something about "
+                            "Craft something with "
+                            span { class: "accent", "Workbench" }
+                            " about "
                             code { "{st.cwd.read().display()}" }
                         }
                     }
-                    for (idx, item) in items.iter().enumerate() {
-                        ChatEntry { key: "{idx}", item: item.clone() }
+                    for row in rows(&items) {
+                        match row {
+                            Row::One(idx, item) => rsx! { ChatEntry { key: "{idx}", item } },
+                            Row::Tools(idx, tools) => rsx! { ToolGroup { key: "g{idx}", tools } },
+                        }
                     }
-                    if *st.busy.read() {
+                    if st.plan_approval.read().is_some() {
+                        div { class: "thinking", "Waiting for you to approve the plan…" }
+                    } else if *st.busy.read() {
                         if st.permissions.read().is_empty() {
-                            div { class: "thinking", "Claude is working…" }
+                            div { class: "thinking", "Workbench is working…" }
                         } else {
                             div { class: "thinking", "Waiting for your permission…" }
                         }
@@ -33,10 +40,72 @@ pub fn ChatPane() -> Element {
                     QueuedMessages {}
                 }
             }
+            if let Some(approval) = st.plan_approval.read().clone() {
+                PlanPrompt { approval }
+            }
             if let Some(req) = st.permissions.read().first().cloned() {
                 PermissionPrompt { key: "{req.request_id}", req, more: st.permissions.read().len() - 1 }
             }
             ChatInput {}
+        }
+    }
+}
+
+/// A line in the chat log: one item, or a run of back-to-back tool calls shown as a group.
+/// Rows are keyed by the index of their first item, so a growing group keeps its state.
+enum Row {
+    One(usize, ChatItem),
+    Tools(usize, Vec<ChatItem>),
+}
+
+fn rows(items: &[ChatItem]) -> Vec<Row> {
+    let mut out: Vec<Row> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        if matches!(item, ChatItem::Tool { .. }) {
+            if let Some(Row::Tools(_, tools)) = out.last_mut() {
+                tools.push(item.clone());
+            } else {
+                out.push(Row::Tools(idx, vec![item.clone()]));
+            }
+        } else {
+            out.push(Row::One(idx, item.clone()));
+        }
+    }
+    out
+}
+
+/// Back-to-back tool calls. Collapsed, only the latest call shows, under a button that lists
+/// them all; a single call shows on its own.
+#[component]
+fn ToolGroup(tools: Vec<ChatItem>) -> Element {
+    let mut open = use_signal(|| false);
+    let n = tools.len();
+    if n == 1 {
+        return rsx! { ChatEntry { item: tools[0].clone() } };
+    }
+    let failed = tools.iter().filter(|t| matches!(t, ChatItem::Tool { result: Some((_, true)), .. })).count();
+    let is_open = *open.read();
+    let shown: Vec<ChatItem> = if is_open { tools } else { tools.into_iter().skip(n - 1).collect() };
+    let shown_from = if is_open { 0 } else { n - 1 };
+
+    rsx! {
+        div { class: "tool-group",
+            button {
+                class: "tool-group-toggle",
+                title: if is_open { "Show only the latest tool call" } else { "Show all {n} tool calls" },
+                onclick: move |_| open.set(!is_open),
+                span { class: if is_open { "tool-mark open" } else { "tool-mark" }, ">" }
+                span { "{n} tool calls" }
+                if failed > 0 {
+                    span { class: "tool-group-failed", "· {failed} failed" }
+                }
+                if !is_open {
+                    span { class: "muted", "· latest below" }
+                }
+            }
+            for (i, item) in shown.into_iter().enumerate() {
+                ChatEntry { key: "{shown_from + i}", item }
+            }
         }
     }
 }
@@ -56,8 +125,8 @@ fn permission_choices(req: &PermissionRequest) -> Vec<(Choice, String)> {
         (Choice::Allow, "Yes".to_string()),
         (Choice::AllowAlways(rules), format!("Yes, and don't ask again for {label}")),
         (Choice::Deny, "No".to_string()),
-        (Choice::DenyWithNote, "No, and tell Claude what to do instead".to_string()),
-        (Choice::Stop, "No, and stop Claude".to_string()),
+        (Choice::DenyWithNote, "No, and tell Workbench what to do instead".to_string()),
+        (Choice::Stop, "No, and stop Workbench".to_string()),
     ]
 }
 
@@ -159,7 +228,7 @@ fn PermissionPrompt(req: PermissionRequest, more: usize) -> Element {
             },
             div { class: "permission-head",
                 span { class: "permission-tag", "Permission" }
-                span { "Claude wants to use " }
+                span { "Workbench wants to use " }
                 b { "{req.tool}" }
                 if more > 0 {
                     span { class: "muted small-text", " · {more} more waiting" }
@@ -183,7 +252,7 @@ fn PermissionPrompt(req: PermissionRequest, more: usize) -> Element {
                     div { class: "permission-note",
                         input {
                             value: "{text}",
-                            placeholder: "What should Claude do instead? (Enter to send, Esc to go back)",
+                            placeholder: "What should Workbench do instead? (Enter to send, Esc to go back)",
                             onmounted: focus,
                             oninput: move |e| note.set(Some(e.value())),
                             onkeydown: move |e: KeyboardEvent| {
@@ -273,7 +342,7 @@ fn ChatEntry(item: ChatItem) -> Element {
             rsx! {
                 details { class: "tool {status}",
                     summary {
-                        span { class: "tool-dot" }
+                        span { class: "tool-mark", ">" }
                         span { class: "tool-name", "{name}" }
                         span { class: "tool-summary", "{summary}" }
                     }
@@ -331,22 +400,82 @@ fn QueuedMessages() -> Element {
     }
 }
 
+/// The chat's mode, offered in the variants the current provider can run. A change reaches
+/// the agent with the next message; Workbench's own permission answers (Auto, Full auto)
+/// follow it at once.
 #[component]
-fn RunModeToggle() -> Element {
+fn ModeToggle() -> Element {
     let mut st = use_context::<AppState>();
-    let run_mode = *st.run_mode.read();
-    let locked = st.job.read().is_some();
+    let provider = st.provider_settings.peek().provider;
+    let current = *st.chat_mode.read();
 
     rsx! {
-        div { class: "mode-toggle", title: "{run_mode.hint()}",
-            for m in RunMode::ALL {
+        div { class: "mode-toggle", title: "{provider.mode_hint(current)}",
+            for m in provider.modes().iter().copied() {
                 button {
-                    class: if m == run_mode { "mode-btn active" } else { "mode-btn" },
-                    disabled: locked,
-                    title: "{m.hint()}",
-                    onclick: move |_| st.run_mode.set(m),
-                    "{m.label()}"
+                    class: match (m == current, m) {
+                        (true, ChatMode::FullAuto) => "mode-btn active danger",
+                        (true, _) => "mode-btn active",
+                        _ => "mode-btn",
+                    },
+                    title: "{provider.mode_hint(m)}",
+                    onclick: move |_| st.chat_mode.set(m),
+                    "{provider.mode_label(m)}"
                 }
+            }
+        }
+    }
+}
+
+/// A finished plan: shows it and asks which mode to run it in, or to keep planning.
+/// Keys 1–3 pick a mode, Esc keeps planning.
+#[component]
+fn PlanPrompt(approval: PlanApproval) -> Element {
+    let st = use_context::<AppState>();
+    let claude = use_coroutine_handle::<Cmd>();
+    let provider = st.provider_settings.peek().provider;
+    // Only the run modes the current provider supports (API providers just answer).
+    let run_modes: Vec<ChatMode> = ChatMode::RUN_PLAN.into_iter().filter(|m| provider.modes().contains(m)).collect();
+    let key_modes = run_modes.clone();
+    let html = markdown::to_html(&approval.plan);
+    let answer = move |mode: Option<ChatMode>| claude.send(Cmd::ApprovePlan { mode });
+
+    rsx! {
+        div {
+            class: "permission plan-approval",
+            tabindex: "0",
+            onmounted: focus,
+            onkeydown: move |e: KeyboardEvent| {
+                let pick = match e.key() {
+                    Key::Escape => Some(None),
+                    Key::Character(d) => d.parse::<usize>().ok().and_then(|i| key_modes.get(i.wrapping_sub(1))).map(|m| Some(*m)),
+                    _ => None,
+                };
+                if let Some(mode) = pick {
+                    e.prevent_default();
+                    answer(mode);
+                }
+            },
+            div { class: "permission-head",
+                span { class: "permission-tag", "Plan" }
+                span { "The plan is ready. How do you want to run it?" }
+            }
+            if !approval.plan.trim().is_empty() {
+                div { class: "plan-body md", dangerous_inner_html: "{html}" }
+            }
+            div { class: "plan-choices",
+                for (i, m) in run_modes.into_iter().enumerate() {
+                    button {
+                        key: "{i}",
+                        class: if i == 0 { "primary" } else { "" },
+                        title: "{provider.mode_hint(m)}",
+                        onclick: move |_| answer(Some(m)),
+                        span { class: "permission-key", "{i + 1}" }
+                        "{provider.mode_label(m)}"
+                    }
+                }
+                div { class: "spacer" }
+                button { title: "Tell the agent what to change in the plan", onclick: move |_| answer(None), "Keep planning" }
             }
         }
     }
@@ -376,14 +505,14 @@ fn ChatInput() -> Element {
     };
 
     let placeholder = if busy {
-        "Claude is working…  (Enter to queue, Ctrl+Enter to send now, Ctrl+C to stop)"
+        "Workbench is working…  (Enter to queue, Ctrl+Enter to send now, Ctrl+C to stop)"
     } else {
-        "Message Claude…  (Enter to send, Shift+Enter for newline)"
+        "Message Workbench…  (Enter to send, Shift+Enter for newline)"
     };
 
     rsx! {
         div { class: "chat-toolbar",
-            RunModeToggle {}
+            ModeToggle {}
             div { class: "spacer" }
             if context.is_empty() {
                 span { class: "muted small-text", title: "Select nodes in the graph, or ghost nodes from other branches, to send them as context", "Context: project" }

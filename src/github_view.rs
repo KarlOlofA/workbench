@@ -2,6 +2,8 @@ use std::path::Path;
 
 use dioxus::prelude::*;
 
+use crate::dropdown::{Choice, Dropdown};
+
 use crate::code::FileDiffView;
 use crate::git;
 use crate::github::{self, MergeMethod, NewPr, PrState, ReviewKind};
@@ -134,17 +136,16 @@ pub fn GitHubView() -> Element {
     rsx! {
         div { class: "gh",
             div { class: "diff-bar gh-bar",
-                select {
+                Dropdown {
                     title: "Repository to read pull requests from",
-                    onchange: move |e: FormEvent| {
-                        let v = e.value();
+                    value: repo.clone().unwrap_or_default(),
+                    choices: std::iter::once(Choice::new("", current_name.clone()))
+                        .chain(related.into_iter().map(|r| Choice::new(r.clone(), r)))
+                        .collect::<Vec<_>>(),
+                    onchange: move |v: String| {
                         ctx.repo.set(if v.is_empty() { None } else { Some(v) });
                         ctx.open_pr.set(None);
                     },
-                    option { value: "", selected: repo.is_none(), "{current_name}" }
-                    for r in related {
-                        option { key: "{r}", value: "{r}", selected: repo.as_deref() == Some(r.as_str()), "{r}" }
-                    }
                 }
                 div { class: "subtabs gh-tabs",
                     {tab_btn(GhTab::Prs, "Pull requests")}
@@ -224,11 +225,10 @@ fn PrList() -> Element {
     rsx! {
         div { class: "gh-body",
             div { class: "inspector-actions",
-                select {
-                    onchange: move |e: FormEvent| filter.set(PrState::from_arg(&e.value())),
-                    for s in PrState::ALL {
-                        option { value: "{s.arg()}", selected: s == current, "{s.arg()}" }
-                    }
+                Dropdown {
+                    value: current.arg().to_string(),
+                    choices: PrState::ALL.iter().map(|s| Choice::new(s.arg(), s.arg())).collect::<Vec<_>>(),
+                    onchange: move |v: String| filter.set(PrState::from_arg(&v)),
                 }
             }
             {body}
@@ -412,9 +412,9 @@ fn PrDetailView(number: u64) -> Element {
             div { class: "inspector-actions",
                 button {
                     disabled: *st.busy.read(),
-                    title: "Let Claude read the PR and its diff and report back in the chat. Nothing is posted.",
+                    title: "Let Workbench read the PR and its diff and report back in the chat. Nothing is posted.",
                     onclick: ask_claude,
-                    "Ask Claude to review"
+                    "Ask Workbench to review"
                 }
                 button {
                     class: if *show_diff.read() { "toggle on" } else { "toggle" },
@@ -440,15 +440,14 @@ fn PrDetailView(number: u64) -> Element {
                 h4 { class: "gh-section", "Merge" }
                 div { class: "muted small-text", "Mergeable: {mergeable} · state: {merge_state}" }
                 div { class: "inspector-actions",
-                    select {
+                    Dropdown {
                         disabled: busy,
-                        onchange: move |e: FormEvent| {
-                            method.set(MergeMethod::from_key(&e.value()));
+                        value: cur_method.key().to_string(),
+                        choices: MergeMethod::ALL.iter().map(|m| Choice::new(m.key(), m.key())).collect::<Vec<_>>(),
+                        onchange: move |v: String| {
+                            method.set(MergeMethod::from_key(&v));
                             confirm_merge.set(false);
                         },
-                        for m in MergeMethod::ALL {
-                            option { value: "{m.key()}", selected: m == cur_method, "{m.key()}" }
-                        }
                     }
                     label { class: "check",
                         input {
@@ -581,9 +580,9 @@ fn NewPrTab() -> Element {
                 div { class: "spacer" }
                 button {
                     disabled: *st.busy.read() || branch.is_empty(),
-                    title: "Claude writes a title and description from the branch's commits; copy them from the chat",
+                    title: "Workbench writes a title and description from the branch's commits; copy them from the chat",
                     onclick: ask_claude,
-                    "Draft with Claude"
+                    "Draft with Workbench"
                 }
                 button { class: "primary", disabled: busy || empty_title || on_base, onclick: create, "Create pull request" }
             }
@@ -621,7 +620,7 @@ fn RelatedTab() -> Element {
     rsx! {
         div { class: "gh-body",
             div { class: "muted small-text",
-                "Related repositories give Claude context from other projects. They are saved in .workbench/github.json and listed in Claude's system prompt, so it can read them with gh."
+                "Related repositories give Workbench context from other projects. They are saved in .workbench/github.json and listed in Workbench's system prompt, so it can read them with gh."
             }
             div { class: "inspector-actions",
                 input {

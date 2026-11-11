@@ -9,7 +9,8 @@
         "src/main.rs",
         "src/style.css",
         "Dioxus.toml",
-        "Cargo.toml"
+        "Cargo.toml",
+        "src/theme.css"
       ],
       "links": [
         "app-root"
@@ -19,7 +20,7 @@
       "id": "app-root",
       "title": "App root & header",
       "kind": "ui",
-      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context and starts the Claude session coroutine. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), model and cost badges, permission-mode selector, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it. open_folder switches the working folder (used by the folder picker and the project view), and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
+      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context and starts the Workbench session coroutine. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), the provider and model picker, model and cost badges, a warning badge in Full auto mode, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it. open_folder switches the working folder (used by the folder picker and the project view), and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
       "files": [
         "src/app.rs"
       ],
@@ -29,16 +30,18 @@
         "git-service",
         "new-node",
         "project-view",
-        "self-updater"
+        "self-updater",
+        "llm-providers"
       ]
     },
     {
       "id": "app-state",
       "title": "AppState (signals store)",
       "kind": "store",
-      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), chat items, session id, model, cost, permission mode, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules and related repos. For plain chat turns it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Claude made into the baseline (the whole graph if it was in sync, otherwise only Claude's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Also defines the Cmd enum sent to the session loop.",
+      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP connections and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), chat items, session id, model, cost, the chat mode and a plan waiting for approval, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Also defines the Cmd enum sent to the session loop.",
       "files": [
-        "src/state.rs"
+        "src/state.rs",
+        "src/config.rs"
       ],
       "links": [
         "graph-model",
@@ -52,36 +55,37 @@
     },
     {
       "id": "session-loop",
-      "title": "Claude session loop",
+      "title": "Workbench session loop",
       "kind": "service",
-      "description": "Long-running coroutine that receives Cmd values (Send, Prompt, Interrupt, Restart) and owns the live Claude process. It spawns the process lazily, respawns it when the rules version changes, and resumes the stored session id. A generation counter drops events from killed processes. Streamed events become chat items; file-touching tool results bump repo_version and reload the open file, and Done finishes the current graph job. Every delivered message outside a job starts a chat turn in app-state, which Done settles against the baseline. Changing a project's repositories or descriptions also restarts Claude with the updated project context.",
+      "description": "Long-running coroutine that receives Cmd values (Send, Prompt, Interrupt, Restart) and owns the live agent. With Workbench it spawns the agent process lazily, respawns it when the rules version changes, and resumes the stored session id. A generation counter drops events from killed processes. Streamed events become chat items; file-touching tool results bump repo_version and reload the open file, and Done finishes the current graph job. Every delivered message outside a job starts a chat turn in app-state, which Done settles against the baseline. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench sessions are remembered for the session history.",
       "files": [
         "src/session.rs",
         "src/history.rs"
       ],
       "links": [
-        "claude-process",
+        "agent-layer",
         "prompt-builder",
-        "app-state"
+        "app-state",
+        "mcp-connections"
       ]
     },
     {
-      "id": "claude-process",
-      "title": "Claude CLI process",
+      "id": "workbench-process",
+      "title": "Workbench agent process",
       "kind": "service",
-      "description": "Finds the claude binary, then spawns it with stream-json input/output, partial messages, a permission mode, an optional --resume and --append-system-prompt. It writes user messages and interrupt control requests to stdin. Stdout lines are parsed into ClaudeEvent values (Init, TextDelta, ToolUse, ToolResult, Done, Stderr, Exited) and tagged with a generation number. Also provides tool summaries and file-path extraction.",
+      "description": "Finds the agent binary, then spawns it with stream-json input/output, partial messages, the permission mode of the chat mode, AskUserQuestion turned off (the agent asks in its reply instead), an optional --resume, --model, --append-system-prompt and --mcp-config. It writes user messages, interrupt control requests and permission answers (a plan approval also sets the session's mode) to stdin. Stdout lines are parsed into AgentEvent values (Init with the MCP server statuses, TextDelta, ToolUse, ToolResult, Done, Stderr, Exited) and tagged with a generation number. Also provides tool summaries and file-path extraction.",
       "files": [
         "src/claude.rs"
       ],
       "links": [
-        "claude-code-cli"
+        "workbench-cli"
       ]
     },
     {
-      "id": "claude-code-cli",
-      "title": "Claude Code CLI",
+      "id": "workbench-cli",
+      "title": "Workbench agent CLI",
       "kind": "external",
-      "description": "The external `claude` executable, run as a subprocess in the project directory. It does the actual agent work (reading and editing files, writing .workbench/graph.json) and streams JSON events back.",
+      "description": "The external agent executable, run as a subprocess in the project directory. It does the actual agent work (reading and editing files, writing .workbench/graph.json) and streams JSON events back.",
       "links": [
         "project-files",
         "workbench-files"
@@ -91,7 +95,7 @@
       "id": "prompt-builder",
       "title": "Prompt builder",
       "kind": "service",
-      "description": "Builds every structured prompt sent to Claude: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Claude may add nodes for new units it had to create), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Claude to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Claude may read, the modules guide, enabled rules and the related GitHub repositories.",
+      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories.",
       "files": [
         "src/prompts.rs"
       ],
@@ -145,27 +149,13 @@
       "id": "project-files",
       "title": "Project working tree",
       "kind": "db",
-      "description": "The opened folder's source files and git repository. The editor and Claude both read and write files here, and git commands run against it."
-    },
-    {
-      "id": "left-panel",
-      "title": "Left panel (Graph / Rules tabs)",
-      "kind": "screen",
-      "description": "Collapsible side panel that switches between the architecture graph tab and the rules tab. It shows workbench load errors and the current job status (Mapping / Processing). When the user goes up from a repository's graph it shows the project view instead of the graph tab.",
-      "files": [
-        "src/graph_view.rs"
-      ],
-      "links": [
-        "graph-tab",
-        "rules-view",
-        "project-view"
-      ]
+      "description": "The opened folder's source files and git repository. The editor and Workbench both read and write files here, and git commands run against it."
     },
     {
       "id": "graph-tab",
       "title": "Graph tab & toolbar",
       "kind": "component",
-      "description": "Hosts the canvas and the side panes for Node, Flows, Changes, History and Prompt. The toolbar adds nodes and starts a Generate job, which sends the mapping prompt to Claude with the graph locked until the job finishes. The nodes have draggable inputs and outputs so they’re easily able to change their links. The breadcrumb row always shows project › repository › modules, and Up from the repository root opens the project view. The bottom panel under the canvas can be minimized to its tab bar and resized by dragging the splitter above it; its collapsed state and height are remembered in ~/.config/workbench/graph-bottom.json.",
+      "description": "Hosts the canvas with the floating chat and, on its right, the node menu with the Node, Flows, Changes, History and Prompt panes. The toolbar adds nodes and starts a Generate job, which sends the mapping prompt to Workbench with the graph locked until the job finishes. The nodes have draggable inputs and outputs so they're easily able to change their links. The breadcrumb row always shows project › repository › modules, and Up from the repository root opens the project view. The node menu can be hidden and resized by dragging the splitter to its left; its width and open state are saved in the workbench layout.",
       "files": [
         "src/graph_view.rs",
         "src/style.css",
@@ -182,14 +172,16 @@
         "prompt-builder",
         "session-loop",
         "project-view",
-        "history-pane"
+        "history-pane",
+        "chat-dock",
+        "theme"
       ]
     },
     {
       "id": "prompt-pane",
       "title": "Prompt pane (add nodes from prompt)",
       "kind": "component",
-      "description": "Graph sub-tab where the user describes behaviour in plain text. Add nodes starts a Draft job that asks Claude to extend graph.json with new nodes, links and flows without touching source code. Because a Draft job never updates the baseline, the new nodes show up as pending changes that are committed into code afterwards.",
+      "description": "Graph sub-tab where the user describes behaviour in plain text. Add nodes starts a Draft job that asks Workbench to extend graph.json with new nodes, links and flows without touching source code. Because a Draft job never updates the baseline, the new nodes show up as pending changes that are committed into code afterwards.",
       "files": [
         "src/graph_view.rs",
         "src/prompts.rs",
@@ -204,25 +196,28 @@
     },
     {
       "id": "run-mode",
-      "title": "Plan / Auto run mode",
+      "title": "Chat modes (Plan / Accept edits / Auto / Full auto)",
       "kind": "model",
-      "description": "Toolbar toggle that controls how Claude handles Draft and Process jobs. In Plan mode the prompt tells Claude to ask numbered questions and end its reply with a marker instead of editing. The session loop then pauses the job, keeping the graph locked, until the user answers in the chat or cancels. In Auto mode Claude fills in the gaps itself and lists its assumptions.",
+      "description": "One mode decides both how the agent acts and what it may do without asking; the toggle sits under the chat and every session starts in Plan. Plan is read only: Workbench runs in its own plan mode and presents its plan with ExitPlanMode, which Workbench turns into a prompt asking whether to run it in Auto, Full auto or Accept edits, or keep planning; picking a mode answers the request and switches the running session's mode. Other providers get plan instructions instead, and their plan-mode reply gets the same prompt, which then asks them to implement the plan. Accept edits asks before every change and command, Auto answers every permission request itself except deleting files, and Full auto never asks. For Draft and Process jobs, Plan mode also lets Workbench ask numbered questions ending in a marker, pausing the job until the user answers.",
       "files": [
+        "src/claude.rs",
         "src/state.rs",
         "src/prompts.rs",
         "src/session.rs",
+        "src/chat.rs",
         "src/graph_view.rs"
       ],
       "links": [
         "app-state",
-        "session-loop"
+        "session-loop",
+        "chat-pane"
       ]
     },
     {
       "id": "graph-canvas",
       "title": "Graph canvas",
       "kind": "component",
-      "description": "SVG and HTML node diagram with pan, zoom, fit-to-view, node dragging (saves the position) and link creation by clicking. It highlights the active flow path and colours nodes by kind. It always shows one network: the main graph or the module the user has opened. Module attachment nodes are drawn with a double teal border, the module name and node count, and are marked edited when their module has pending changes; double-clicking one opens the module, and a breadcrumb bar leads back up. The toolbar's + Module… menu creates a new module or attaches an existing one here.",
+      "description": "SVG and HTML node diagram with pan, zoom, fit-to-view, node dragging (saves the position) and link creation by clicking. It highlights the active flow path and colours nodes by kind. It always shows one network: the main graph or the module the user has opened. Module attachment nodes are drawn with a double teal border, the module name and node count, and are marked edited when their module has pending changes; double-clicking one opens the module, and a breadcrumb bar leads back up. The toolbar's + Module… menu creates a new module or attaches an existing one here. A press in the canvas or on a node fades the floating chat.",
       "files": [
         "src/graph_view.rs"
       ],
@@ -236,7 +231,7 @@
       "id": "node-pane",
       "title": "Node inspector",
       "kind": "component",
-      "description": "Editor for the selected node's title, kind, description, files and links. It shows incoming callers, can revert the node to the baseline, and has an Ask Claude action that sends a node-specific question. Here a node holds a explicit list of links to other nodes. One list of inputs flows and one for output flows. The nodes also hold a list of the files that is related to it and in what manner, like its own dependencies, where its used and such. For reference nodes it shows the source, its detected type, whether it is a Workbench project, and a picker for the referenced project's nodes.",
+      "description": "Editor for the selected node's title, kind, description, files and links. It shows incoming callers, can revert the node to the baseline, and has an Ask Workbench action that sends a node-specific question. Here a node holds a explicit list of links to other nodes. One list of inputs flows and one for output flows. The nodes also hold a list of the files that is related to it and in what manner, like its own dependencies, where its used and such. For reference nodes it shows the source, its detected type, whether it is a Workbench project, and a picker for the referenced project's nodes.",
       "files": [
         "src/graph_view.rs",
         "src/style.css"
@@ -246,14 +241,15 @@
         "prompt-builder",
         "session-loop",
         "external-references",
-        "history-pane"
+        "history-pane",
+        "theme"
       ]
     },
     {
       "id": "changes-pane",
       "title": "Changes pane (commit graph)",
       "kind": "component",
-      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. With an optional note, it sends a Process job that asks Claude to change the code to match the edited graph. When the job succeeds, the baseline is updated.",
+      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated.",
       "files": [
         "src/graph_view.rs"
       ],
@@ -274,14 +270,15 @@
       "links": [
         "app-state",
         "prompt-builder",
-        "session-loop"
+        "session-loop",
+        "theme"
       ]
     },
     {
       "id": "rules-view",
       "title": "Rules view",
       "kind": "screen",
-      "description": "CRUD list of project rules: add, edit, enable or disable, scope to a node, delete, and filter. An Audit action asks Claude to check the codebase against all enabled rules. Any change bumps rules_version, which restarts the Claude process on the next message.",
+      "description": "CRUD list of project rules: add, edit, enable or disable, scope to a node, delete, and filter. An Audit action asks Workbench to check the codebase against all enabled rules. Any change bumps rules_version, which restarts the Workbench process on the next message.",
       "files": [
         "src/rules_view.rs"
       ],
@@ -289,7 +286,8 @@
         "app-state",
         "rules-model",
         "prompt-builder",
-        "session-loop"
+        "session-loop",
+        "theme"
       ]
     },
     {
@@ -303,14 +301,15 @@
       ],
       "links": [
         "app-state",
-        "session-loop"
+        "session-loop",
+        "run-mode"
       ]
     },
     {
       "id": "code-pane",
       "title": "Code pane (Files / Editor / Diff)",
       "kind": "screen",
-      "description": "Right-hand tabs. Files lists tracked and untracked files with their git status. Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Claude button that pastes it into the chat input. Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module.",
+      "description": "Right-hand tabs. Files lists tracked and untracked files with their git status. Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Workbench button that pastes it into the chat input. Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module, the MCP tab hosts the MCP module, and the Providers tab hosts the LLM providers module.",
       "files": [
         "src/code.rs",
         "src/highlight.rs"
@@ -319,7 +318,9 @@
         "app-state",
         "git-service",
         "code-editor",
-        "github-prs"
+        "github-prs",
+        "mcp-connections",
+        "llm-providers"
       ]
     },
     {
@@ -365,18 +366,21 @@
     },
     {
       "id": "new-node",
-      "title": "Screen definition",
-      "kind": "model",
-      "description": "A screen can be minimized and reopened. When a screen is closed its saved to the app state so it persist across sessions.",
+      "title": "Workbench layout",
+      "kind": "screen",
+      "description": "The window body under the header: the projects sidebar on the left and the workbench on the right. The workbench switches between the Graph, Code and Rules views, shows workbench load errors, and shows the project view when a project is picked. The layout (sidebar open, node menu width and open state, chat anchor, expanded and locked) is saved in ~/.config/workbench/layout.json.",
       "files": [
-        "src/screens.rs",
+        "src/workbench.rs",
         "src/state.rs",
         "src/style.css"
       ],
       "links": [
-        "chat-pane",
+        "project-sidebar",
+        "graph-tab",
         "code-pane",
-        "left-panel"
+        "rules-view",
+        "project-view",
+        "chat-dock"
       ]
     },
     {
@@ -390,7 +394,8 @@
       ],
       "links": [
         "app-state",
-        "session-loop"
+        "session-loop",
+        "theme"
       ],
       "module": "github"
     },
@@ -398,7 +403,7 @@
       "id": "github-context",
       "title": "GitHub (related repos context)",
       "kind": "module",
-      "description": "The prompt builder uses the module's related-repository list so every Claude session knows which other GitHub projects it may read with gh for context.",
+      "description": "The prompt builder uses the module's related-repository list so every Workbench session knows which other GitHub projects it may read with gh for context.",
       "files": [
         "src/prompts.rs",
         "src/session.rs"
@@ -441,7 +446,7 @@
       "id": "ghost-branches",
       "title": "Ghost branches",
       "kind": "service",
-      "description": "Shows the graph work on other git branches as read-only ghost nodes on the canvas. For each branch the user picks from the Ghosts toggle, it reads the branch's .workbench/graph.json and the one at the merge base with HEAD, and diffs them so only that branch's own work appears: added nodes become dashed ghosts with dashed links, and nodes it changed or removed get a coloured ring. Clicking a ghost puts it into Claude's context next to the selected nodes, with a note to read its code via git show instead of checking the branch out.",
+      "description": "Shows the graph work on other git branches as read-only ghost nodes on the canvas. For each branch the user picks from the Ghosts toggle, it reads the branch's .workbench/graph.json and the one at the merge base with HEAD, and diffs them so only that branch's own work appears: added nodes become dashed ghosts with dashed links, and nodes it changed or removed get a coloured ring. Clicking a ghost puts it into Workbench's context next to the selected nodes, with a note to read its code via git show instead of checking the branch out.",
       "files": [
         "src/ghost.rs",
         "src/git.rs",
@@ -459,7 +464,7 @@
       "id": "project-view",
       "title": "Project view (related repositories)",
       "kind": "screen",
-      "description": "The level above a repository's graph. A project, such as Workbench, groups the local clones of the repositories that make up one product, for example frontend, backend and host. It shows each repository as a node with an editable description text box beside it instead of links, plus its graph size and GitHub remote. Projects are stored in ~/.config/workbench/projects.json; double-clicking a repository opens it as the working folder and shows its graph. When the open folder belongs to a project, the other repositories and their descriptions go into Claude's system prompt.",
+      "description": "The level above a repository's graph. A project, such as Workbench, groups the local clones of the repositories that make up one product, for example frontend, backend and host. It shows each repository as a node with an editable description text box beside it instead of links, plus its graph size and GitHub remote. Projects are stored in ~/.config/workbench/projects.json and listed in the projects sidebar; the inspector sits on the right and the floating chat sits over the canvas; double-clicking a repository opens it as the working folder and shows its graph. When the open folder belongs to a project, the other repositories and their descriptions go into Workbench's system prompt.",
       "files": [
         "src/project_view.rs",
         "src/projects.rs",
@@ -469,14 +474,17 @@
         "app-state",
         "app-root",
         "graph-model",
-        "github-prs"
+        "github-prs",
+        "chat-dock",
+        "agent-activity",
+        "theme"
       ]
     },
     {
       "id": "node-history",
       "title": "Node history",
       "kind": "store",
-      "description": "Shared, append-only history of node and module changes (title, kind, module, reference, links, files and description) stored as before/after text. Each entry has a unique id, a time, an author (git user.name) and a source: a person in Workbench, Claude working for that person, or an edit outside Workbench. The log is .workbench/node-history.jsonl, one entry per line, with a .workbench/.gitattributes union-merge rule so logs from several people merge without conflicts; on load lines are de-duplicated by id and sorted by time. What this client last saw of the graph is kept locally in ~/.config/workbench/node-snapshots/, and a change already in the shared log (for example pulled from a teammate) is not logged again. Rapid edits by the same person are merged into one entry, and a built-in LCS line diff renders entries as classic +/− diffs.",
+      "description": "Shared, append-only history of node and module changes (title, kind, module, reference, links, files and description) stored as before/after text. Each entry has a unique id, a time, an author (git user.name) and a source: a person in Workbench, Workbench working for that person, or an edit outside Workbench. The log is .workbench/node-history.jsonl, one entry per line, with a .workbench/.gitattributes union-merge rule so logs from several people merge without conflicts; on load lines are de-duplicated by id and sorted by time. What this client last saw of the graph is kept locally in ~/.config/workbench/node-snapshots/, and a change already in the shared log (for example pulled from a teammate) is not logged again. Rapid edits by the same person are merged into one entry, and a built-in LCS line diff renders entries as classic +/− diffs.",
       "files": [
         "src/node_history.rs",
         "src/state.rs",
@@ -492,7 +500,7 @@
       "id": "history-pane",
       "title": "History pane",
       "kind": "component",
-      "description": "Bottom-panel tab that lists recorded node and module changes newest first as classic line diffs, with who made each change (you, a teammate, Claude, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo. In a git repository the list is grouped against the git state: an Uncommitted section first, for entries not yet in a commit on this branch, then one section per commit (short hash, subject, author, time), newest first. Each entry also carries an uncommitted or commit-hash tag.",
+      "description": "Bottom-panel tab that lists recorded node and module changes newest first as classic line diffs, with who made each change (you, a teammate, Workbench, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo. In a git repository the list is grouped against the git state: an Uncommitted section first, for entries not yet in a commit on this branch, then one section per commit (short hash, subject, author, time), newest first. Each entry also carries an uncommitted or commit-hash tag.",
       "files": [
         "src/graph_view.rs",
         "src/style.css"
@@ -518,18 +526,133 @@
         "app-state",
         "install-tooling"
       ]
+    },
+    {
+      "id": "mcp-connections",
+      "title": "MCP connections",
+      "kind": "module",
+      "description": "The Code pane's MCP tab and the MCP config passed to the agent CLI in use. The user manages MCP server connections in the tab, and every enabled one goes to Workbench Code (--mcp-config), Codex (-c mcp_servers) or Vibe (VIBE_MCP_SERVERS) so the agent can call their tools. Workbench's reported connection status is shown back in the tab.",
+      "files": [
+        "src/code.rs",
+        "src/mcp_view.rs",
+        "src/mcp.rs",
+        "src/session.rs",
+        "src/codex.rs",
+        "src/vibe.rs"
+      ],
+      "links": [
+        "app-state",
+        "theme"
+      ],
+      "module": "mcp"
+    },
+    {
+      "id": "agent-layer",
+      "title": "Agent layer",
+      "kind": "service",
+      "description": "One interface over every LLM provider for the session loop. Workbench runs as the long-lived agent process; every other provider runs one turn per message, either a fresh Codex or Vibe process that resumes the previous session or one API request with the conversation so far. All of them report back as the same chat events. Only Workbench can be interrupted mid-turn or ask for permissions; other turns are stopped by killing them.",
+      "files": [
+        "src/agent.rs"
+      ],
+      "links": [
+        "workbench-process",
+        "llm-providers"
+      ]
+    },
+    {
+      "id": "llm-providers",
+      "title": "LLM providers",
+      "kind": "module",
+      "description": "Lets the user switch the chat between Workbench Code, Codex and Mistral Vibe (agent CLIs) and the Anthropic, OpenAI, Mistral and OpenRouter APIs, with a model per provider. The header uses it for the provider and model picker, the Code pane for the Providers tab, and the agent layer to run Codex, Vibe and API turns.",
+      "files": [
+        "src/providers.rs",
+        "src/providers_view.rs",
+        "src/codex.rs",
+        "src/vibe.rs",
+        "src/api_chat.rs",
+        "src/app.rs",
+        "src/code.rs"
+      ],
+      "links": [
+        "app-state",
+        "theme"
+      ],
+      "module": "providers"
+    },
+    {
+      "id": "project-sidebar",
+      "title": "Projects sidebar",
+      "kind": "component",
+      "description": "Collapsible list on the left of every project with its repositories and worktrees, read from the projects saved in ~/.config/workbench/projects.json. Under each project it lists every agent running in it, with its provider's logo, the folder it runs in and whether it is working or waiting for a prompt. Clicking a project shows its project view; clicking a repository, worktree or agent opens that folder. It can create a project and add a repository to a project.",
+      "files": [
+        "src/workbench.rs",
+        "src/projects.rs",
+        "src/logos.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "app-state",
+        "app-root",
+        "project-view",
+        "agent-activity"
+      ]
+    },
+    {
+      "id": "chat-dock",
+      "title": "Floating chat dock",
+      "kind": "component",
+      "description": "The chat floats over the graph, code or rules view and can be anchored to the top, bottom, left or right. Top and bottom chats are centred and get their height from the focus: a press in the graph fades the chat to a peek at the latest reply, hovering shows it again and clicking it shows more of the conversation. The Expand toggle makes it larger and the Lock toggle stops graph clicks from fading it; left and right chats fill the height.",
+      "files": [
+        "src/workbench.rs",
+        "src/state.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "chat-pane",
+        "app-state"
+      ]
+    },
+    {
+      "id": "agent-activity",
+      "title": "Agent activity",
+      "kind": "service",
+      "description": "Finds the coding agents (Workbench Code, Codex, Vibe) running on this machine by reading /proc, which folder each runs in, and whether it is working (using CPU) or waiting for a prompt. Workbench's own session is added with the provider it uses, and every agent is given to the project repository or worktree it runs in. Each agent kind maps to its LLM company's logo (Workbench, OpenAI, Mistral, OpenRouter), drawn from Simple Icons path data.",
+      "files": [
+        "src/activity.rs",
+        "src/worktree_view.rs",
+        "src/logos.rs",
+        "src/state.rs"
+      ],
+      "links": [
+        "app-state",
+        "llm-providers"
+      ]
+    },
+    {
+      "id": "theme",
+      "title": "Theme & dropdowns",
+      "kind": "component",
+      "description": "theme.css holds every colour, radius, font and shadow as a CSS variable, plus the base control styles; style.css only uses these variables. The webview draws native <select> and <datalist> popups with the system theme, so dropdown.rs draws themed ones instead: Dropdown picks one of a list of choices, and ComboBox is a text field with suggestions, used for model names and node kinds. Their open list is fixed to the window and opens upwards when there is more room above.",
+      "files": [
+        "src/theme.css",
+        "src/dropdown.rs",
+        "src/style.css",
+        "src/main.rs"
+      ],
+      "links": []
     }
   ],
   "flows": [
     {
       "id": "chat-message",
-      "name": "Send a chat message to Claude",
+      "name": "Send a chat message to Workbench",
       "nodes": [
         "chat-pane",
         "session-loop",
         "prompt-builder",
-        "claude-process",
-        "claude-code-cli",
+        "agent-layer",
+        "workbench-process",
+        "workbench-cli",
         "project-files"
       ]
     },
@@ -540,8 +663,9 @@
         "graph-tab",
         "prompt-builder",
         "session-loop",
-        "claude-process",
-        "claude-code-cli",
+        "agent-layer",
+        "workbench-process",
+        "workbench-cli",
         "workbench-files",
         "app-state",
         "graph-model"
@@ -557,8 +681,9 @@
         "changes-pane",
         "prompt-builder",
         "session-loop",
-        "claude-process",
-        "claude-code-cli",
+        "agent-layer",
+        "workbench-process",
+        "workbench-cli",
         "project-files"
       ]
     },
@@ -569,8 +694,9 @@
         "flows-pane",
         "prompt-builder",
         "session-loop",
-        "claude-process",
-        "claude-code-cli"
+        "agent-layer",
+        "workbench-process",
+        "workbench-cli"
       ]
     },
     {
@@ -586,7 +712,7 @@
     },
     {
       "id": "review-diff",
-      "name": "Review diff and ask Claude about a hunk",
+      "name": "Review diff and ask Workbench about a hunk",
       "nodes": [
         "code-pane",
         "git-service",
@@ -601,7 +727,7 @@
     {
       "id": "github",
       "title": "GitHub integration",
-      "description": "Talks to GitHub through the gh CLI so the user can read, write, review and merge pull requests of this project and read related repositories for context. Its interface is the GitHub tab component plus the related-repos list in AppState, which the prompt builder turns into Claude context.",
+      "description": "Talks to GitHub through the gh CLI so the user can read, write, review and merge pull requests of this project and read related repositories for context. Its interface is the GitHub tab component plus the related-repos list in AppState, which the prompt builder turns into Workbench context.",
       "nodes": [
         {
           "id": "gh-tab",
@@ -635,7 +761,7 @@
           "id": "gh-pr-detail",
           "title": "PR detail, review & merge",
           "kind": "component",
-          "description": "Shows a pull request's description, checks, reviews and comments, and its diff on demand. Posts comments, approvals and change requests, and merges with squash, merge or rebase (optionally deleting the branch) behind a confirm step. Ask Claude to review sends a read-only review prompt to the chat.",
+          "description": "Shows a pull request's description, checks, reviews and comments, and its diff on demand. Posts comments, approvals and change requests, and merges with squash, merge or rebase (optionally deleting the branch) behind a confirm step. Ask Workbench to review sends a read-only review prompt to the chat.",
           "files": [
             "src/github_view.rs",
             "src/code.rs"
@@ -648,7 +774,7 @@
           "id": "gh-new-pr",
           "title": "New pull request",
           "kind": "component",
-          "description": "Opens a pull request from the current branch into the base branch (the default branch unless changed), with title, markdown body and draft flag, optionally pushing the branch first. Refuses to open one from the base branch. Draft with Claude asks Claude to write the title and description from the branch's commits.",
+          "description": "Opens a pull request from the current branch into the base branch (the default branch unless changed), with title, markdown body and draft flag, optionally pushing the branch first. Refuses to open one from the base branch. Draft with Workbench asks Workbench to write the title and description from the branch's commits.",
           "files": [
             "src/github_view.rs",
             "src/git.rs"
@@ -688,7 +814,7 @@
           "id": "gh-config",
           "title": "Related repos file",
           "kind": "db",
-          "description": ".workbench/github.json holds the list of related repositories. It is loaded with the rest of the workbench data, and saving it bumps the system-prompt version so Claude restarts with the new context.",
+          "description": ".workbench/github.json holds the list of related repositories. It is loaded with the rest of the workbench data, and saving it bumps the system-prompt version so Workbench restarts with the new context.",
           "files": [
             ".workbench/github.json"
           ]
@@ -723,6 +849,164 @@
           ]
         }
       ]
+    },
+    {
+      "id": "mcp",
+      "title": "MCP connections",
+      "description": "Lets Workbench call tools on MCP servers. The user configures servers (local stdio programs or remote http/sse URLs) in the MCP tab, they are saved to .workbench/mcp.json, and every enabled server is passed to the agent CLI in use (Workbench Code, Codex or Vibe). Its interface is the MCP tab plus the mcp_servers list in AppState.",
+      "nodes": [
+        {
+          "id": "mcp-tab",
+          "title": "MCP tab",
+          "kind": "screen",
+          "description": "Lists the project's MCP servers as cards. Each card has an enabled toggle, a name, a transport (stdio, http or sse), and either a command with arguments and environment lines or a URL with header lines. It shows the status Workbench reported for the server, or why it is not passed to Workbench yet.",
+          "files": [
+            "src/mcp_view.rs",
+            "src/code.rs"
+          ],
+          "links": [
+            "mcp-config"
+          ]
+        },
+        {
+          "id": "mcp-config",
+          "title": "MCP server model",
+          "kind": "model",
+          "description": "The Server type and its transport, loading and saving of the MCP file, and claude_config, which turns the usable servers (enabled, named, with a command or URL) into the mcpServers JSON for --mcp-config. KEY=value and Name: value lines become env and header objects, which the Codex and Vibe runners reuse for their own config formats.",
+          "files": [
+            "src/mcp.rs"
+          ],
+          "links": [
+            "mcp-file",
+            "mcp-servers"
+          ]
+        },
+        {
+          "id": "mcp-file",
+          "title": "MCP connections file",
+          "kind": "db",
+          "description": ".workbench/mcp.json holds the list of MCP servers. It is loaded with the rest of the workbench data and is committed with the project, so secrets should be written as ${ENV_VAR} references that Workbench expands.",
+          "files": [
+            ".workbench/mcp.json"
+          ]
+        },
+        {
+          "id": "mcp-servers",
+          "title": "MCP servers",
+          "kind": "external",
+          "description": "The external MCP servers. The agent CLI in use starts the stdio ones as subprocesses and connects to the http/sse ones, then exposes their tools to the agent."
+        }
+      ],
+      "flows": []
+    },
+    {
+      "id": "providers",
+      "title": "LLM providers",
+      "description": "Switches the chat between agent CLIs installed on this machine (Workbench, Codex, Mistral Vibe) and direct chat APIs (Anthropic, OpenAI, Mistral, OpenRouter). The chosen provider, a model per provider, API keys and loaded model lists are stored per user. Its interface is the header picker, the Providers tab and the Codex, Vibe and API runners the agent layer starts.",
+      "nodes": [
+        {
+          "id": "provider-picker",
+          "title": "Provider & model picker",
+          "kind": "component",
+          "description": "Settings controls for the provider and the model. Switching provider starts a new session, since sessions can't move between providers. Changing the model restarts the agent on the next message. The provider is a themed Dropdown and the model a ComboBox with the provider's model list as suggestions.",
+          "files": [
+            "src/providers_view.rs",
+            "src/style.css",
+            "src/settings_view.rs",
+            "src/dropdown.rs"
+          ],
+          "links": [
+            "provider-settings"
+          ]
+        },
+        {
+          "id": "providers-tab",
+          "title": "Providers tab",
+          "kind": "screen",
+          "description": "One card per provider, showing whether its CLI is installed or its API key is set, with a Use button. API providers get a key field and a Load models button that fetches the provider's live model list.",
+          "files": [
+            "src/providers_view.rs",
+            "src/code.rs"
+          ],
+          "links": [
+            "provider-settings",
+            "api-chat"
+          ]
+        },
+        {
+          "id": "provider-settings",
+          "title": "Provider catalogue & settings",
+          "kind": "model",
+          "description": "The Provider enum: label, how it is reached (CLI binary or API base URL, key variable and API style), suggested models and availability. Settings holds the chosen provider, the model per provider, typed API keys (the environment variable wins) and loaded model lists.",
+          "files": [
+            "src/providers.rs"
+          ],
+          "links": [
+            "provider-settings-file"
+          ]
+        },
+        {
+          "id": "provider-settings-file",
+          "title": "Provider settings file",
+          "kind": "db",
+          "description": "providers.json in the user's Workbench config folder, outside every project, so API keys are never committed."
+        },
+        {
+          "id": "codex-runner",
+          "title": "Codex runner",
+          "kind": "service",
+          "description": "Builds one `codex exec --json` turn (resume, model, sandbox from the chat mode, Workbench instructions as developer_instructions, MCP servers as -c overrides) and parses its JSONL events into chat events: thread id, messages, commands, file changes, MCP and web-search calls, and turn end or failure.",
+          "files": [
+            "src/codex.rs"
+          ],
+          "links": [
+            "codex-cli"
+          ]
+        },
+        {
+          "id": "vibe-runner",
+          "title": "Vibe runner",
+          "kind": "service",
+          "description": "Builds one `vibe -p --output streaming` turn (resume, agent from the chat mode, model and MCP servers through VIBE_* variables, Workbench instructions at the top of a new session's first prompt) and parses its history entries into chat events, skipping the entries a resumed session replays.",
+          "files": [
+            "src/vibe.rs"
+          ],
+          "links": [
+            "vibe-cli"
+          ]
+        },
+        {
+          "id": "api-chat",
+          "title": "API chat client",
+          "kind": "service",
+          "description": "Sends the conversation to the Anthropic Messages API or an OpenAI-style chat completions API (OpenAI, Mistral, OpenRouter) in one request and returns the answer. Also lists a provider's models. API providers only chat: no file edits, tools or MCP.",
+          "files": [
+            "src/api_chat.rs"
+          ],
+          "links": [
+            "provider-apis"
+          ]
+        },
+        {
+          "id": "codex-cli",
+          "title": "Codex CLI",
+          "kind": "external",
+          "description": "The external `codex` executable from OpenAI, run once per message in the project folder."
+        },
+        {
+          "id": "vibe-cli",
+          "title": "Mistral Vibe CLI",
+          "kind": "external",
+          "description": "The external `vibe` executable from Mistral, run once per message in the project folder."
+        },
+        {
+          "id": "provider-apis",
+          "title": "Provider APIs",
+          "kind": "external",
+          "description": "The HTTP APIs of Anthropic, OpenAI, Mistral and OpenRouter, called with the user's API keys."
+        }
+      ],
+      "flows": []
     }
   ]
 }

@@ -4,7 +4,7 @@ use crate::graph::{BASELINE_FILE, Change, ChangeKind, Field, Flow, GRAPH_FILE, G
 use crate::projects::Project;
 use crate::reference::{self, Refs};
 use crate::rules::{self, Rule};
-use crate::state::RunMode;
+use crate::claude::ChatMode;
 
 pub const QUESTIONS_MARKER: &str = "[[workbench:awaiting-answers]]";
 
@@ -16,22 +16,32 @@ pub fn strip_marker(text: &str) -> String {
     text.replace(QUESTIONS_MARKER, "").trim_end().to_string()
 }
 
-fn mode_section(mode: RunMode, action: &str) -> String {
+fn mode_section(mode: ChatMode, action: &str) -> String {
     match mode {
-        RunMode::Plan => format!(
+        ChatMode::Plan => format!(
             "## Mode: Plan\n\n\
-             Before you {action}, check whether the request is clear enough to do it well: scope, responsibilities, how it connects to what already exists, and anything that contradicts the code, the graph or the rules. \
-             If anything material is unclear, do NOT edit any files yet. Reply with a short numbered list of concrete questions (suggest a sensible default for each), \
+             You are in plan mode: do NOT edit any files yet. Before you {action}, check whether the request is clear enough to do it well: scope, responsibilities, how it connects to what already exists, and anything that contradicts the code, the graph or the rules. \
+             If anything material is unclear, reply with a short numbered list of concrete questions (suggest a sensible default for each), \
              then a brief outline of what you intend to do as you currently understand it, and end the reply with a line containing exactly `{QUESTIONS_MARKER}`. \
-             The user will answer in the chat; then carry out the task using their answers (ask again with the same marker only if something important is still unclear). \
-             If everything is already clear, skip the questions and go straight to the work.\n\n"
+             The user will answer in the chat (ask again with the same marker only if something important is still unclear). \
+             Once everything is clear, present your plan; the user approves it and picks how you run it before you change anything.\n\n"
         ),
-        RunMode::Auto => format!(
-            "## Mode: Auto\n\n\
+        ChatMode::AcceptEdits | ChatMode::Auto | ChatMode::FullAuto => format!(
+            "## Mode: {}\n\n\
              Do not stop to ask questions. Where the request is ambiguous or incomplete, fill in the gaps with the most reasonable choice consistent with the codebase, the graph and the rules, \
-             then {action}. List every assumption you made in your final summary.\n\n"
+             then {action}. List every assumption you made in your final summary.\n\n",
+            mode.label()
         ),
     }
+}
+
+/// Plan mode for providers without one of their own (everything but Workbench): Workbench
+/// asks how to run the plan once the reply is in.
+pub fn plan_mode_instructions() -> &'static str {
+    "## Plan mode\n\n\
+     You are in plan mode: do NOT edit files or run commands that change anything. \
+     Find out exactly what the user wants you to work on: read the code you need, and ask concrete questions about anything unclear. \
+     When everything is clear, reply with a step-by-step plan of the changes. The user approves the plan and picks how you run it; then you'll be asked to implement it.\n\n"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,7 +278,7 @@ pub fn generate(existing: Option<&Graph>, rules: &[Rule]) -> String {
     p
 }
 
-pub fn draft_nodes(graph: &Graph, scope: Option<&str>, request: &str, selection: Option<&str>, mode: RunMode, rules: &[Rule]) -> String {
+pub fn draft_nodes(graph: &Graph, scope: Option<&str>, request: &str, selection: Option<&str>, mode: ChatMode, rules: &[Rule]) -> String {
     let rules = rules::relevant(rules, None);
     let mut p = format!(
         "The user wants to extend the Workbench architecture graph in `{GRAPH_FILE}` from a description. \
@@ -309,7 +319,7 @@ pub fn draft_nodes(graph: &Graph, scope: Option<&str>, request: &str, selection:
     p
 }
 
-pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mode: RunMode, refs: Option<&Refs>) -> String {
+pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mode: ChatMode, refs: Option<&Refs>) -> String {
     let ids: Vec<String> = changes.iter().map(|c| c.id.clone()).collect();
     let rules = rules::relevant(rules, Some(&ids));
 
@@ -803,7 +813,7 @@ mod tests {
         cur.node_mut("get-users").unwrap().description = "Lists users with pagination".into();
         cur.remove_node("db");
         let rules = vec![Rule { id: "r1".into(), title: "No unwrap".into(), body: String::new(), enabled: true, scope: None }];
-        let p = process(&cur, &diff(&base, &cur), &rules, "be careful", RunMode::Auto, None);
+        let p = process(&cur, &diff(&base, &cur), &rules, "be careful", ChatMode::Auto, None);
         assert!(p.contains("Lists users with pagination"));
         assert!(p.contains("Removed node `db`"));
         assert!(p.contains("No unwrap"));
@@ -816,7 +826,7 @@ mod tests {
 
     #[test]
     fn draft_prompt_includes_request_nodes_and_plan_marker() {
-        let p = draft_nodes(&g(), None, "Add a POST /users route", None, RunMode::Plan, &[]);
+        let p = draft_nodes(&g(), None, "Add a POST /users route", None, ChatMode::Plan, &[]);
         assert!(p.contains("> Add a POST /users route"));
         assert!(p.contains("`get-users` — GET /users (route)"));
         assert!(p.contains(QUESTIONS_MARKER));
@@ -904,7 +914,7 @@ mod tests {
         base.remove_node("auth-ref");
         let mut cur = graph.clone();
         cur.node_mut("get-users").unwrap().links.push("auth-ref".into());
-        let p = process(&cur, &diff(&base, &cur), &[], "", RunMode::Auto, Some(&refs));
+        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, Some(&refs));
         assert!(p.contains("### New external reference `auth-ref` — Shared auth"));
         assert!(p.contains("Do not create code for the reference itself"));
         assert!(p.contains("Login route"));
@@ -930,7 +940,7 @@ mod tests {
         let mut cur = with_github_module();
         cur.nodes.push(serde_json::from_str(r#"{"id":"gh","title":"GitHub","kind":"module","module":"github"}"#).unwrap());
         cur.node_mut("api").unwrap().links.push("gh".into());
-        let p = process(&cur, &diff(&base, &cur), &[], "", RunMode::Auto, None);
+        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, None);
         assert!(p.contains("### New module `github` — GitHub"));
         assert!(p.contains("Attached at: `gh` (GitHub) in the main network"));
         assert!(p.contains("New node `gh-service` — gh service (service) in module `github`"));
@@ -939,7 +949,7 @@ mod tests {
 
     #[test]
     fn draft_prompt_targets_the_open_module() {
-        let p = draft_nodes(&with_github_module(), Some("github"), "Add merge", None, RunMode::Auto, &[]);
+        let p = draft_nodes(&with_github_module(), Some("github"), "Add merge", None, ChatMode::Auto, &[]);
         assert!(p.contains("inside that module (`modules[]` entry with id `github`)"));
         assert!(p.contains("Module `github` — GitHub"));
         assert!(p.contains("`gh-service` — gh service (service)"));
@@ -964,7 +974,7 @@ mod tests {
         let msg = with_selection(None, Some(&ghosts), "hi");
         assert!(!msg.contains("has selected these nodes"));
         assert!(msg.contains("## Work on other branches") && msg.ends_with("## Message\n\nhi"));
-        let p = draft_nodes(&graph, None, "Add caching", Some(&nodes), RunMode::Auto, &[]);
+        let p = draft_nodes(&graph, None, "Add caching", Some(&nodes), ChatMode::Auto, &[]);
         assert!(p.contains("## Selected nodes"));
         assert!(p.contains("About graph node `db`"));
     }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -346,9 +346,109 @@ pub fn parse_diff(text: &str) -> Vec<FileDiff> {
     files
 }
 
+/// One checkout of a repository, from `git worktree list`. The first one is the main checkout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// The checked-out branch, without `refs/heads/`. `None` when detached or bare.
+    pub branch: Option<String>,
+    pub head: String,
+    pub main: bool,
+    pub bare: bool,
+    pub locked: bool,
+    /// Its folder is gone; `git worktree prune` would drop it.
+    pub prunable: bool,
+    /// Changed or untracked files, when the folder could be read.
+    pub changes: Option<usize>,
+}
+
+impl Worktree {
+    pub fn label(&self) -> String {
+        match &self.branch {
+            Some(b) => b.clone(),
+            None if self.bare => "(bare)".into(),
+            None => format!("detached {}", self.head.get(..7).unwrap_or(&self.head)),
+        }
+    }
+}
+
+pub fn parse_worktrees(text: &str) -> Vec<Worktree> {
+    let mut out: Vec<Worktree> = Vec::new();
+    for line in text.lines() {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        if key == "worktree" {
+            out.push(Worktree { path: PathBuf::from(value), main: out.is_empty(), ..Default::default() });
+            continue;
+        }
+        let Some(w) = out.last_mut() else { continue };
+        match key {
+            "HEAD" => w.head = value.to_string(),
+            "branch" => w.branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string()),
+            "bare" => w.bare = true,
+            "locked" => w.locked = true,
+            "prunable" => w.prunable = true,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Every worktree of the repository at `repo` (which may itself be any of its worktrees),
+/// with how many files each has changed.
+pub fn worktrees(repo: &Path) -> Result<Vec<Worktree>, String> {
+    let mut list = parse_worktrees(&run_git(repo, &["worktree", "list", "--porcelain"])?);
+    for w in list.iter_mut().filter(|w| !w.bare && !w.prunable) {
+        w.changes = run_git(&w.path, &["status", "--porcelain"]).ok().map(|s| s.lines().count());
+    }
+    Ok(list)
+}
+
+/// Where a new worktree for `branch` goes by default: next to the main checkout,
+/// named `<repo>-<branch>` (slashes in the branch become dashes).
+pub fn default_worktree_path(main: &Path, branch: &str) -> PathBuf {
+    let name = main.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "repo".into());
+    let slug: String = branch.trim().chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' }).collect();
+    main.with_file_name(format!("{name}-{slug}"))
+}
+
+/// Adds a worktree at `path` on `branch`: checks out the branch if it exists, otherwise
+/// creates it from the repository's current HEAD.
+pub fn add_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
+    let branch = branch.trim();
+    if branch.is_empty() || branch.contains(char::is_whitespace) {
+        return Err("Branch names can't be empty or contain spaces".into());
+    }
+    if path.exists() {
+        return Err(format!("{} already exists", path.display()));
+    }
+    let target = path.to_string_lossy().to_string();
+    let exists = run_git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    if exists {
+        run_git(repo, &["worktree", "add", &target, branch]).map(|_| ())
+    } else {
+        run_git(repo, &["worktree", "add", "-b", branch, &target]).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_worktree_list() {
+        let text = "worktree /code/app\nHEAD 1111111111\nbranch refs/heads/main\n\n\
+                    worktree /code/app-feat\nHEAD 2222222222\nbranch refs/heads/feat/x\nlocked\n\n\
+                    worktree /code/gone\nHEAD 3333333333abc\ndetached\nprunable gitdir file points to non-existent location\n";
+        let w = parse_worktrees(text);
+        assert_eq!(w.len(), 3);
+        assert!(w[0].main && !w[1].main);
+        assert_eq!(w[0].branch.as_deref(), Some("main"));
+        assert_eq!(w[1].label(), "feat/x");
+        assert!(w[1].locked);
+        assert_eq!(w[2].label(), "detached 3333333");
+        assert!(w[2].prunable);
+        assert_eq!(default_worktree_path(Path::new("/code/app"), "feat/x y"), PathBuf::from("/code/app-feat-x-y"));
+    }
 
     #[test]
     fn maps_history_lines_to_the_commit_that_added_them() {

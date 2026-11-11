@@ -5,11 +5,14 @@ use std::rc::Rc;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
+use crate::dropdown::{Choice, Dropdown};
+
 use crate::app::open_folder;
 use crate::github;
 use crate::graph_view::{View, zoom_at};
 use crate::projects::{self, NOTE_GAP, NOTE_W, Project, REPO_H, REPO_W, RepoInfo};
-use crate::state::{AppState, Cmd};
+use crate::state::{AppState, Cmd, Layout};
+use crate::worktree_view::{AgentChips, WorktreeList, agents_in_repo, other_worktrees};
 
 const NOTE_H: f64 = 96.0;
 const ITEM_W: f64 = REPO_W + NOTE_GAP + NOTE_W;
@@ -66,7 +69,7 @@ fn add_repo(mut st: AppState, project: String, dir: PathBuf) {
     }
 }
 
-fn pick_repo(st: AppState, project: String) {
+pub fn pick_repo(st: AppState, project: String) {
     spawn(async move {
         let start = st.cwd.peek().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| st.cwd.peek().clone());
         if let Some(handle) = rfd::AsyncFileDialog::new().set_directory(start).pick_folder().await {
@@ -75,7 +78,7 @@ fn pick_repo(st: AppState, project: String) {
     });
 }
 
-fn create_project(mut st: AppState, name: &str) {
+pub fn create_project(mut st: AppState, name: &str) {
     let name = name.trim();
     if name.is_empty() {
         return;
@@ -140,20 +143,18 @@ pub fn ProjectView(id: String) -> Element {
     rsx! {
         div { class: "graph-tab",
             div { class: "graph-toolbar",
-                select {
+                Dropdown {
                     class: "project-select",
-                    value: "{id}",
-                    onchange: move |e: FormEvent| match e.value().as_str() {
+                    value: id.clone(),
+                    placeholder: "Choose a project…",
+                    choices: all.iter()
+                        .map(|(pid, name)| Choice::new(pid.clone(), format!("◈ {name}")))
+                        .chain(std::iter::once(Choice::new("__new__", "New project…")))
+                        .collect::<Vec<_>>(),
+                    onchange: move |v: String| match v.as_str() {
                         "__new__" => creating.set(true),
                         v => st.project_view.set(Some(v.to_string())),
                     },
-                    if project.is_none() {
-                        option { value: "", selected: true, "Choose a project…" }
-                    }
-                    for (pid, name) in all.clone() {
-                        option { key: "{pid}", value: "{pid}", selected: pid == id, "◈ {name}" }
-                    }
-                    option { value: "__new__", "New project…" }
                 }
                 if let Some(p) = project.clone() {
                     {
@@ -191,6 +192,7 @@ pub fn ProjectView(id: String) -> Element {
                 }
                 span { class: "muted small-text", "Double-click a repository to open its graph" }
             }
+            div { class: "graph-row",
             div { class: "graph-canvas-wrap",
                 match project.clone() {
                     Some(p) => rsx! { ProjectCanvas { key: "{p.id}", project: p } },
@@ -218,12 +220,13 @@ pub fn ProjectView(id: String) -> Element {
                     }
                 }
             }
-            div { class: "graph-bottom",
-                div { class: "pane-body",
-                    if let Some(p) = project {
+            if let Some(p) = project {
+                div { class: "node-menu", style: "flex: 0 0 {Layout::DEFAULT_NODE_MENU_PCT}%;",
+                    div { class: "pane-body",
                         ProjectInspector { project: p, open: move |dir: PathBuf| open_folder(st, claude, dir) }
                     }
                 }
+            }
             }
         }
     }
@@ -323,6 +326,7 @@ fn ProjectCanvas(project: Project) -> Element {
     let infos = infos.read().clone().unwrap_or_default();
     let sel = selected.read().clone();
     let cwd = st.cwd.read().clone();
+    let activity = st.agent_activity();
     let (px, py, z) = *view.read();
     let grid = 24.0 * z;
 
@@ -341,6 +345,7 @@ fn ProjectCanvas(project: Project) -> Element {
                 if e.trigger_button() != Some(MouseButton::Primary) {
                     return;
                 }
+                st.fade_chat();
                 let p = e.client_coordinates();
                 let (ox, oy, _) = *view.peek();
                 drag.set(Some(Drag::Pan { sx: p.x, sy: p.y, ox, oy, moved: false }));
@@ -378,6 +383,23 @@ fn ProjectCanvas(project: Project) -> Element {
                             Some(i) if i.modules > 0 => format!("◆ {} · {}", count(i.nodes, "node"), count(i.modules, "module")),
                             Some(i) => format!("◆ {}", count(i.nodes, "node")),
                         };
+                        let worktrees = other_worktrees(&st, &r.path);
+                        let meta = match worktrees.len() {
+                            0 => meta,
+                            n => format!("{meta} · ⑂ {n}"),
+                        };
+                        let agents = agents_in_repo(&activity, &r.path, &worktrees);
+                        let n_working = agents.iter().filter(|a| a.working).count();
+                        let agent_badge = match (agents.len(), n_working) {
+                            (0, _) => None,
+                            (_, 0) => Some((format!("○ {} idle", agents.len()), "repo-agents")),
+                            (_, w) => Some((format!("● {w} working"), "repo-agents working")),
+                        };
+                        let agent_tip = agents
+                            .iter()
+                            .map(|a| format!("{} in {} · {}", a.kind.label(), a.cwd.display(), if a.working { "working" } else { "idle" }))
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         let gh = r.github.clone();
                         let classes = format!(
                             "gnode repo-node{}{}{}",
@@ -409,6 +431,9 @@ fn ProjectCanvas(project: Project) -> Element {
                                         open_folder(st, claude, open_dir.clone());
                                     },
                                     div { class: "gnode-title", "{label}" }
+                                    if let Some((text, class)) = agent_badge {
+                                        span { class: "{class}", title: "{agent_tip}", "{text}" }
+                                    }
                                     div { class: "gnode-meta",
                                         span { class: "gnode-kind", "{meta}" }
                                         if here {
@@ -489,6 +514,8 @@ fn ProjectInspector(project: Project, open: EventHandler<PathBuf>) -> Element {
                     }
                     label { "Folder" }
                     code { class: "small-text", "{r.path}" }
+                    label { "Worktrees" }
+                    WorktreeList { key: "{r.path}", repo_path: r.path.clone() }
                     label { "GitHub" }
                     div { class: "inspector-actions",
                         match r.github.clone() {
@@ -528,6 +555,19 @@ fn ProjectInspector(project: Project, open: EventHandler<PathBuf>) -> Element {
             let del_pid = pid.clone();
             let n = project.repos.len();
             let noun = if n == 1 { "repository" } else { "repositories" };
+            let activity = st.agent_activity();
+            // (repo, folder label, agents) for every folder of the project that has agents.
+            let mut agent_rows: Vec<(String, String, Vec<crate::activity::AgentProc>)> = Vec::new();
+            for r in &project.repos {
+                if let Some(a) = activity.get(&r.dir()) {
+                    agent_rows.push((r.label(), String::new(), a.clone()));
+                }
+                for w in other_worktrees(&st, &r.path) {
+                    if let Some(a) = activity.get(&w.path) {
+                        agent_rows.push((r.label(), format!("⑂ {}", w.label()), a.clone()));
+                    }
+                }
+            }
             rsx! {
                 div { class: "inspector",
                     div { class: "inspector-head",
@@ -552,7 +592,20 @@ fn ProjectInspector(project: Project, open: EventHandler<PathBuf>) -> Element {
                             st.update_project(&desc_pid, |p| p.description = v);
                         },
                     }
-                    div { class: "muted small-text", "Select a repository to edit it. Projects are stored in ~/.config/workbench/projects.json." }
+                    label { "Agents" }
+                    if agent_rows.is_empty() {
+                        div { class: "muted small-text", "No agents running in this project's repositories or worktrees." }
+                    }
+                    for (repo, place, agents) in agent_rows {
+                        div { key: "{repo}{place}", class: "agent-row",
+                            div { class: "agent-row-where", b { "{repo}" } if !place.is_empty() { span { class: "muted", " {place}" } } }
+                            AgentChips { agents }
+                        }
+                    }
+                    if !cfg!(target_os = "linux") {
+                        div { class: "muted small-text", "Agents started outside Workbench are only detected on Linux." }
+                    }
+                    div { class: "muted small-text", "Select a repository to edit it and see its worktrees. Projects are stored in ~/.config/workbench/projects.json." }
                     div { class: "inspector-actions",
                         if *confirm_delete.read() {
                             span { class: "small-text", "Delete the project? The repositories are not touched." }

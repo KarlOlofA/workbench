@@ -232,7 +232,7 @@ pub fn FileDiffView(file: FileDiff, #[props(default = true)] local: bool) -> Ele
                                 let p = path.clone();
                                 move |_| st.append_to_input(&format!("In `{p}`:\n```diff\n{patch}\n```\n"))
                             },
-                            "Ask Claude"
+                            "Ask Workbench"
                         }
                     }
                     table { class: "hunk-lines",
