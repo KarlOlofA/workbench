@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::claims::BranchClaim;
 use crate::graph::{BASELINE_FILE, Change, ChangeKind, Field, Flow, GRAPH_FILE, Graph, Node, Reference, Subject};
 use crate::projects::Project;
 use crate::reference::{self, Refs};
@@ -353,7 +354,35 @@ pub fn draft_nodes(graph: &Graph, scope: Option<&str>, request: &str, selection:
     p
 }
 
-pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mode: ChatMode, refs: Option<&Refs>) -> String {
+/// Tells the agent which nodes and files other branches are also changing, so it keeps
+/// its edits to them small and reports them. `overlaps` come from `claims::overlaps`.
+fn claims_section(graph: &Graph, overlaps: &[BranchClaim]) -> String {
+    if overlaps.is_empty() {
+        return String::new();
+    }
+    let mut p = String::from(
+        "## Work on other branches\n\n\
+         Other git branches are changing some of the same nodes or files. Touch these only as much as the changes above need, \
+         and list every one you edited in your final summary so the user can sequence the merge.\n\n",
+    );
+    for b in overlaps {
+        let nodes: Vec<String> = b.claim.nodes.iter().chain(b.claim.dependents.iter()).map(|(scope, id)| {
+            graph.net(scope.as_deref()).map(|n| n.title_of(id)).unwrap_or_else(|| id.clone())
+        }).collect();
+        p.push_str(&format!("- `{}` by {}", b.branch, b.authors.join(", ")));
+        if !nodes.is_empty() {
+            p.push_str(&format!("; nodes: {}", nodes.join(", ")));
+        }
+        if !b.claim.files.is_empty() {
+            p.push_str(&format!("; files: {}", b.claim.files.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")));
+        }
+        p.push('\n');
+    }
+    p.push('\n');
+    p
+}
+
+pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mode: ChatMode, refs: Option<&Refs>, overlaps: &[BranchClaim]) -> String {
     let ids: Vec<String> = changes.iter().map(|c| c.id.clone()).collect();
     let rules = rules::relevant(rules, Some(&ids));
 
@@ -469,6 +498,8 @@ pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mo
             }
         }
     }
+
+    p.push_str(&claims_section(graph, overlaps));
 
     if !note.trim().is_empty() {
         p.push_str(&format!("## Extra instructions from the user\n\n{}\n\n", note.trim()));
@@ -847,7 +878,7 @@ mod tests {
         cur.node_mut("get-users").unwrap().description = "Lists users with pagination".into();
         cur.remove_node("db");
         let rules = vec![Rule { id: "r1".into(), title: "No unwrap".into(), body: String::new(), enabled: true, scope: None }];
-        let p = process(&cur, &diff(&base, &cur), &rules, "be careful", ChatMode::Auto, None);
+        let p = process(&cur, &diff(&base, &cur), &rules, "be careful", ChatMode::Auto, None, &[]);
         assert!(p.contains("Lists users with pagination"));
         assert!(p.contains("Removed node `db`"));
         assert!(p.contains("No unwrap"));
@@ -957,7 +988,7 @@ mod tests {
         base.remove_node("auth-ref");
         let mut cur = graph.clone();
         cur.node_mut("get-users").unwrap().links.push("auth-ref".into());
-        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, Some(&refs));
+        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, Some(&refs), &[]);
         assert!(p.contains("### New external reference `auth-ref` — Shared auth"));
         assert!(p.contains("Do not create code for the reference itself"));
         assert!(p.contains("Login route"));
@@ -983,7 +1014,7 @@ mod tests {
         let mut cur = with_github_module();
         cur.nodes.push(serde_json::from_str(r#"{"id":"gh","title":"GitHub","kind":"module","module":"github"}"#).unwrap());
         cur.node_mut("api").unwrap().links.push("gh".into());
-        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, None);
+        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, None, &[]);
         assert!(p.contains("### New module `github` — GitHub"));
         assert!(p.contains("Attached at: `gh` (GitHub) in the main network"));
         assert!(p.contains("New node `gh-service` — gh service (service) in module `github`"));

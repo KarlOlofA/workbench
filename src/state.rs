@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::activity::{self, AgentProc};
 use crate::claude::{ChatMode, McpStatus, PermissionDecision, PermissionRequest};
+use crate::claims;
 use crate::ghost::{self, GhostBranch, GhostPick};
 use crate::git;
 use crate::github;
@@ -817,6 +818,16 @@ impl AppState {
         self.ghosts.write().retain(|g| branches.contains(&g.branch));
         self.ghost_branches.set(branches);
         self.load_ghosts();
+    }
+
+    /// Ghosts every branch that has unmerged work (the team view).
+    pub fn show_team(&mut self) {
+        let cwd = self.cwd.peek().clone();
+        let mut st = *self;
+        spawn(async move {
+            let open = tokio::task::spawn_blocking(move || claims::open_claims(&cwd)).await.unwrap_or_default();
+            st.set_ghost_branches(open.into_iter().map(|c| c.branch).collect());
+        });
     }
 
     pub fn load_ghosts(&mut self) {

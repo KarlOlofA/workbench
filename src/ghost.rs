@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::claims::{self, Claim};
 use crate::git;
 use crate::graph::{self, ChangeKind, GRAPH_FILE, Graph, NODE_H, Node, Subject};
 
@@ -13,6 +14,8 @@ pub fn color(i: usize) -> &'static str {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhostBranch {
     pub branch: String,
+    /// Who committed to the branch since it split from HEAD.
+    pub authors: Vec<String>,
     pub base: Graph,
     pub graph: Graph,
     pub error: Option<String>,
@@ -30,6 +33,7 @@ fn parse(text: &str, what: &str) -> Result<Graph, String> {
 }
 
 pub fn load(cwd: &Path, branch: &str) -> GhostBranch {
+    let authors = git::authors_since_merge_base(cwd, branch);
     let result = (|| -> Result<(Graph, Graph), String> {
         let text = git::show_file(cwd, branch, GRAPH_FILE)?.ok_or("no Workbench graph on this branch")?;
         let g = parse(&text, branch)?;
@@ -43,8 +47,8 @@ pub fn load(cwd: &Path, branch: &str) -> GhostBranch {
         Ok((base, g))
     })();
     match result {
-        Ok((base, graph)) => GhostBranch { branch: branch.into(), base, graph, error: None },
-        Err(e) => GhostBranch { branch: branch.into(), base: Graph::default(), graph: Graph::default(), error: Some(e) },
+        Ok((base, graph)) => GhostBranch { branch: branch.into(), authors, base, graph, error: None },
+        Err(e) => GhostBranch { branch: branch.into(), authors, base: Graph::default(), graph: Graph::default(), error: Some(e) },
     }
 }
 
@@ -61,6 +65,15 @@ fn same(a: &Node, b: &Node) -> bool {
 }
 
 impl GhostBranch {
+    /// "feature/auth (Anna, Bob)", or just the branch when nobody committed to it yet.
+    pub fn who(&self) -> String {
+        if self.authors.is_empty() { self.branch.clone() } else { format!("{} ({})", self.branch, self.authors.join(", ")) }
+    }
+
+    pub fn claim(&self) -> Claim {
+        claims::claim(&self.base, &self.graph, &graph::diff(&self.base, &self.graph))
+    }
+
     pub fn change(&self, scope: Option<&str>, id: &str) -> Option<ChangeKind> {
         let base = self.base.net(scope).and_then(|n| n.node(id));
         let cur = self.graph.net(scope).and_then(|n| n.node(id));
@@ -179,6 +192,21 @@ pub fn layer(net: &Graph, scope: Option<&str>, branches: &[GhostBranch], positio
     out
 }
 
+/// Nodes in `scope` with pending local edits (`mine`) that a branch also changes or
+/// depends on, with the indexes of those branches.
+pub fn invalidated(mine: &Claim, branches: &[GhostBranch], scope: Option<&str>) -> HashMap<String, Vec<usize>> {
+    let mut out: HashMap<String, Vec<usize>> = HashMap::new();
+    for (bi, b) in branches.iter().enumerate() {
+        let o = mine.overlap(&b.claim());
+        for (s, id) in o.nodes.iter().chain(o.dependents.iter()) {
+            if s.as_deref() == scope && mine.nodes.iter().any(|(ms, mid)| ms == s && mid == id) {
+                out.entry(id.clone()).or_default().push(bi);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +238,7 @@ mod tests {
         let mut mine = base.clone();
         mine.nodes.push(node("mine", &[]));
         let mut positions = mine.positions();
-        let b = GhostBranch { branch: "feature".into(), base, graph: theirs, error: None };
+        let b = GhostBranch { branch: "feature".into(), authors: Vec::new(), base, graph: theirs, error: None };
         let l = layer(&mine, None, std::slice::from_ref(&b), &mut positions);
 
         assert_eq!(l.nodes.len(), 1);
@@ -227,13 +255,30 @@ mod tests {
     }
 
     #[test]
+    fn branch_work_invalidates_the_nodes_i_am_editing() {
+        let base = graph(vec![node("api", &["db"]), node("db", &[]), node("ui", &[])]);
+        let mut theirs = base.clone();
+        theirs.node_mut("db").unwrap().description = "db stores less".into();
+        let b = GhostBranch { branch: "feature".into(), authors: vec!["Anna".into()], base: base.clone(), graph: theirs, error: None };
+
+        let mut mine = base.clone();
+        mine.node_mut("api").unwrap().description = "api caches".into();
+        mine.node_mut("ui").unwrap().description = "ui is dark".into();
+        let my_claim = claims::claim(&base, &mine, &graph::diff(&base, &mine));
+
+        let hit = invalidated(&my_claim, &[b], None);
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit["api"], vec![0]);
+    }
+
+    #[test]
     fn work_already_in_the_working_tree_is_not_ghosted() {
         let base = graph(vec![node("api", &[])]);
         let mut theirs = base.clone();
         theirs.nodes.push(node("cache", &[]));
         let mine = theirs.clone();
         let mut positions = mine.positions();
-        let b = GhostBranch { branch: "feature".into(), base, graph: theirs, error: None };
+        let b = GhostBranch { branch: "feature".into(), authors: Vec::new(), base, graph: theirs, error: None };
         let l = layer(&mine, None, &[b], &mut positions);
         assert!(l.nodes.is_empty() && l.marks.is_empty() && l.edges.is_empty());
     }

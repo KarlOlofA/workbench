@@ -165,6 +165,38 @@ pub fn merge_base(cwd: &Path, a: &str, b: &str) -> Option<String> {
     run_git(cwd, &["merge-base", a, b]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+fn unique_lines(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !out.iter().any(|o| o == l) {
+            out.push(l.to_string());
+        }
+    }
+    out
+}
+
+/// Who committed to `branch` since it split from HEAD, newest first. Empty when HEAD has it all.
+pub fn authors_since_merge_base(cwd: &Path, branch: &str) -> Vec<String> {
+    run_git(cwd, &["log", "--format=%an", &format!("HEAD..{branch}")]).map(|s| unique_lines(&s)).unwrap_or_default()
+}
+
+/// The files `branch` changed since it split from HEAD.
+pub fn changed_since_merge_base(cwd: &Path, branch: &str) -> Vec<String> {
+    run_git(cwd, &["diff", "--name-only", &format!("HEAD...{branch}")]).map(|s| unique_lines(&s)).unwrap_or_default()
+}
+
+/// Whether `path` has an unresolved merge conflict.
+pub fn unmerged(cwd: &Path, path: &str) -> bool {
+    run_git(cwd, &["ls-files", "--unmerged", "--", path]).is_ok_and(|s| !s.trim().is_empty())
+}
+
+/// Marks `paths` as resolved by staging them.
+pub fn add(cwd: &Path, paths: &[&str]) -> Result<(), String> {
+    let mut args = vec!["add", "--"];
+    args.extend_from_slice(paths);
+    run_git(cwd, &args).map(|_| ())
+}
+
 pub fn show_file(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>, String> {
     let spec = format!("{rev}:{path}");
     if run_git(cwd, &["cat-file", "-e", &spec]).is_err() {

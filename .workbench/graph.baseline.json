@@ -98,7 +98,7 @@
       "id": "prompt-builder",
       "title": "Prompt builder",
       "kind": "service",
-      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply.",
+      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create, and is told which nodes and files other branches are also changing), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply.",
       "files": [
         "src/prompts.rs"
       ],
@@ -107,7 +107,8 @@
         "rules-model",
         "github-context",
         "external-references",
-        "project-view"
+        "project-view",
+        "claims"
       ]
     },
     {
@@ -177,7 +178,8 @@
         "project-view",
         "history-pane",
         "chat-dock",
-        "theme"
+        "theme",
+        "intent-merge"
       ]
     },
     {
@@ -252,14 +254,15 @@
       "id": "changes-pane",
       "title": "Changes pane (commit graph)",
       "kind": "component",
-      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated.",
+      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. Before processing it reads the claims of the other git branches and warns when they change the same nodes or files, or nodes these changes depend on; the user can process anyway or process only the changes no other branch touches. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated.",
       "files": [
         "src/graph_view.rs"
       ],
       "links": [
         "app-state",
         "prompt-builder",
-        "session-loop"
+        "session-loop",
+        "claims"
       ]
     },
     {
@@ -346,7 +349,7 @@
       "id": "git-service",
       "title": "Git service",
       "kind": "service",
-      "description": "Thin wrapper over the git CLI: repo detection, current branch, branch listing, switching and creating branches, porcelain status, ls-files, pushing the current branch, and a diff against a base that includes untracked files. It parses the output into FileDiff, Hunk and DiffLine values, and each hunk can be turned back into a patch. For the node history it reads git log -p of the history file and maps each entry's uid to the commit, reachable from HEAD, that first added its line.",
+      "description": "Thin wrapper over the git CLI: repo detection, current branch, branch listing, switching and creating branches, porcelain status, ls-files, pushing the current branch, and a diff against a base that includes untracked files. It parses the output into FileDiff, Hunk and DiffLine values, and each hunk can be turned back into a patch. For the node history it reads git log -p of the history file and maps each entry's uid to the commit, reachable from HEAD, that first added its line. For coordination it lists the authors and changed files of a branch since it split from HEAD, detects unmerged files and stages resolved ones.",
       "files": [
         "src/git.rs"
       ],
@@ -451,7 +454,7 @@
       "id": "ghost-branches",
       "title": "Ghost branches",
       "kind": "service",
-      "description": "Shows the graph work on other git branches as read-only ghost nodes on the canvas. For each branch the user picks from the Ghosts toggle, it reads the branch's .workbench/graph.json and the one at the merge base with HEAD, and diffs them so only that branch's own work appears: added nodes become dashed ghosts with dashed links, and nodes it changed or removed get a coloured ring. Clicking a ghost puts it into Workbench's context next to the selected nodes, with a note to read its code via git show instead of checking the branch out.",
+      "description": "Shows the graph work on other git branches as read-only ghost nodes on the canvas. For each branch the user picks from the Ghosts toggle, or every branch with unmerged work when they press Team, it reads the branch's .workbench/graph.json and the one at the merge base with HEAD, and diffs them so only that branch's own work appears: added nodes become dashed ghosts with dashed links, and nodes it changed or removed get a coloured ring. Each branch is labelled with the people who committed to it. A node with pending local edits that a branch also changes or depends on gets a warning ring that says the branch invalidates the edit. Clicking a ghost puts it into Workbench's context next to the selected nodes, with a note to read its code via git show instead of checking the branch out.",
       "files": [
         "src/ghost.rs",
         "src/git.rs",
@@ -462,7 +465,8 @@
       ],
       "links": [
         "git-service",
-        "graph-model"
+        "graph-model",
+        "claims"
       ]
     },
     {
@@ -662,6 +666,39 @@
       ],
       "links": [
         "session-loop"
+      ]
+    },
+    {
+      "id": "claims",
+      "title": "Claims (branch work overlap)",
+      "kind": "service",
+      "description": "Derives the blast radius of intent work from git, without storing anything: the nodes a graph diff changes, the files those nodes own, and the nodes that link to them. open_claims reads every other branch with commits HEAD doesn't have, and builds each branch's claim from its graph diffed against the merge base plus the code files it changed, together with the branch's authors. overlaps compares the local pending changes with those claims, so contention shows up before any agent runs.",
+      "files": [
+        "src/claims.rs",
+        "src/git.rs"
+      ],
+      "links": [
+        "graph-model",
+        "git-service",
+        "ghost-branches"
+      ]
+    },
+    {
+      "id": "intent-merge",
+      "title": "Intent-conflict review",
+      "kind": "screen",
+      "description": "Shown instead of the graph while .workbench/graph.json has an unresolved git merge conflict. It merges the three merge stages per node: intent changed on one side only is taken as is, and a node or module whose intent both sides changed differently is listed as a conflict with both versions side by side (description, links, files) and the nodes that use it. A person picks mine or theirs for each one; nothing is merged automatically. Saving writes and stages the graph, resets conflicting nodes in the baseline to the common base so they show up as pending work, and offers a commit message with an Intent-Resolution trailer.",
+      "files": [
+        "src/intent_merge.rs",
+        "src/merge_view.rs",
+        "src/workbench.rs",
+        "src/git.rs",
+        "src/style.css"
+      ],
+      "links": [
+        "graph-model",
+        "git-service",
+        "app-state"
       ]
     }
   ],

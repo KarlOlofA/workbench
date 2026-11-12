@@ -14,7 +14,10 @@ use crate::logos::{Logo, LogoIcon};
 use crate::projects::Project;
 use crate::chat::{self, ChatPane, ChatTabs, NewSessionButton};
 use crate::code::CodePane;
+use crate::git;
+use crate::graph::GRAPH_FILE;
 use crate::graph_view::GraphTab;
+use crate::merge_view::IntentMergeView;
 use crate::project_view::{ProjectView, create_project, pick_repo};
 use crate::rules_view::RulesView;
 use crate::settings_view::SettingsView;
@@ -405,6 +408,15 @@ fn Workbench() -> Element {
     let view = *st.view.read();
     let error = st.workbench_error.read().clone();
     let project_view = st.project_view.read().clone();
+    // A merge conflict in graph.json is an intent conflict: review it instead of the graph.
+    // Checked again whenever loading the graph reports an error or the folder changes.
+    let conflicted = use_resource(move || async move {
+        let _ = st.workbench_error.read();
+        let cwd = st.cwd.read().clone();
+        tokio::task::spawn_blocking(move || git::unmerged(&cwd, GRAPH_FILE)).await.unwrap_or(false)
+    });
+    let mut reviewing = use_signal(|| false);
+    let show_merge = *reviewing.read() || conflicted.read().unwrap_or(false);
 
     rsx! {
         div { class: "workbench",
@@ -426,6 +438,9 @@ fn Workbench() -> Element {
                 }
             }
             match (view, project_view) {
+                (WorkbenchView::Graph, _) if show_merge => rsx! {
+                    IntentMergeView { on_resolved: move |_| reviewing.set(true), on_close: move |_| reviewing.set(false) }
+                },
                 (WorkbenchView::Graph, Some(id)) => rsx! { ProjectView { key: "{id}", id } },
                 (WorkbenchView::Graph, None) => rsx! { GraphTab {} },
                 (WorkbenchView::Code, _) => rsx! { CodePane {} },

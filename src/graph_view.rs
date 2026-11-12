@@ -4,6 +4,7 @@ use std::rc::Rc;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
+use crate::claims;
 use crate::claude::ChatMode;
 use crate::dropdown::{Choice, ComboBox, Dropdown};
 use crate::ghost::{self, GhostPick};
@@ -782,6 +783,15 @@ fn GraphCanvas() -> Element {
     let ghost_picks = st.ghost_picks.read().clone();
     let ghost_layer = ghost::layer(&g, scope.as_deref(), &ghosts, &mut positions);
     let ghost_svg = ghost_edges_svg(&ghost_layer.edges, &positions);
+    // Nodes I'm editing that a ghost branch also changes or depends on.
+    let invalid = {
+        let empty = Graph::default();
+        let base = st.baseline.read();
+        let base = base.as_ref().unwrap_or(&empty);
+        let root = st.graph.read();
+        let mine = claims::claim(base, &root, &graph::diff(base, &root));
+        ghost::invalidated(&mine, &ghosts, scope.as_deref())
+    };
     let picked_branches = st.ghost_branches.read().clone();
     let branch_status: HashMap<String, (usize, Result<usize, String>)> = ghosts
         .iter()
@@ -962,7 +972,10 @@ fn GraphCanvas() -> Element {
                         let dim = if lit.as_ref().is_some_and(|l| !l.contains(&n.id)) { "dim" } else { "" };
                         let hub = hub_count.get(&n.id).copied();
                         let marks = ghost_layer.marks.get(&n.id).cloned().unwrap_or_default();
-                        let ghost_class = if marks.iter().any(|m| m.kind == ChangeKind::Removed) {
+                        let invalid_by = invalid.get(&n.id).cloned().unwrap_or_default();
+                        let ghost_class = if !invalid_by.is_empty() {
+                            "ghost-conflict"
+                        } else if marks.iter().any(|m| m.kind == ChangeKind::Removed) {
                             "ghost-removed"
                         } else if !marks.is_empty() {
                             "ghost-touched"
@@ -972,7 +985,8 @@ fn GraphCanvas() -> Element {
                         let mark_color = marks.first().map(|m| ghost::color(m.branch)).unwrap_or("");
                         let mark_tip = marks
                             .iter()
-                            .map(|m| format!("{}: {}", ghosts[m.branch].branch, mark_text(&m.kind)))
+                            .map(|m| format!("{}: {}", ghosts[m.branch].who(), mark_text(&m.kind)))
+                            .chain(invalid_by.iter().map(|bi| format!("{}: invalidates your edit to this node", ghosts[*bi].who())))
                             .collect::<Vec<_>>()
                             .join("\n");
                         let n_marks = marks.len();
@@ -1094,12 +1108,13 @@ fn GraphCanvas() -> Element {
                     {
                         let [x, y] = positions.get(&gn.key).copied().unwrap_or([0.0, 0.0]);
                         let branch = ghosts[gn.branch].branch.clone();
+                        let who = ghosts[gn.branch].who();
                         let bcolor = ghost::color(gn.branch);
                         let color = graph::kind_color(&gn.node.kind);
                         let pick = GhostPick { branch: branch.clone(), scope: scope.clone(), id: gn.node.id.clone() };
                         let sel = if ghost_picks.contains(&pick) { "selected" } else { "" };
                         let tip = format!(
-                            "{}\n\nWork in progress on branch {branch}. Click to send it to Workbench as context, Shift+click to add it to the context.",
+                            "{}\n\nWork in progress on {who}. Click to send it to Workbench as context, Shift+click to add it to the context.",
                             gn.node.description
                         );
                         rsx! {
@@ -1125,7 +1140,7 @@ fn GraphCanvas() -> Element {
                                 div { class: "gnode-title", "{gn.node.title}" }
                                 div { class: "gnode-meta",
                                     span { class: "gnode-kind", "{gn.node.kind}" }
-                                    span { class: "gnode-branch", "⧉ {branch}" }
+                                    span { class: "gnode-branch", title: "{who}", "⧉ {who}" }
                                 }
                             }
                         }
@@ -1197,6 +1212,12 @@ fn GraphCanvas() -> Element {
                                 st.load_ghosts();
                             },
                             "↻"
+                        }
+                        button {
+                            class: "small",
+                            title: "Show every branch that has work this branch doesn't have yet",
+                            onclick: move |_| st.show_team(),
+                            "Team"
                         }
                         button { class: "small", onclick: move |_| ghost_menu.set(false), "✕" }
                     }
@@ -2321,6 +2342,26 @@ fn PromptPane() -> Element {
     }
 }
 
+/// The other branches whose claims overlap the claim of `changes` (pending since the baseline).
+fn claim_overlaps(st: AppState, changes: &[graph::Change], open: &[claims::BranchClaim]) -> Vec<claims::BranchClaim> {
+    let empty = Graph::default();
+    let base = st.baseline.peek();
+    let mine = claims::claim(base.as_ref().unwrap_or(&empty), &st.graph.peek(), changes);
+    claims::overlaps(&mine, open)
+}
+
+/// One line per overlapping branch, e.g. "feature/auth (Anna): Auth, depends on DB · 2 files".
+fn overlap_text(st: AppState, o: &claims::BranchClaim) -> String {
+    let g = st.graph.peek();
+    let title = |(scope, id): &claims::NodeKey| g.net(scope.as_deref()).map(|n| n.title_of(id)).unwrap_or_else(|| id.clone());
+    let mut parts: Vec<String> = o.claim.nodes.iter().map(title).collect();
+    parts.extend(o.claim.dependents.iter().map(|k| format!("depends on {}", title(k))));
+    if !o.claim.files.is_empty() {
+        parts.push(format!("{} file{}", o.claim.files.len(), plural(o.claim.files.len())));
+    }
+    format!("{} ({}): {}", o.branch, o.authors.join(", "), parts.join(" · "))
+}
+
 #[component]
 fn ChangesPane() -> Element {
     let mut st = use_context::<AppState>();
@@ -2330,14 +2371,28 @@ fn ChangesPane() -> Element {
     let changes = st.changes();
     let has_baseline = st.baseline.read().is_some();
     let has_nodes = !st.graph.read().nodes.is_empty();
+    // Claims of the other branches, read from git so overlaps show before anything runs.
+    let mut open_claims = use_resource(move || async move {
+        let cwd = st.cwd.read().clone();
+        tokio::task::spawn_blocking(move || claims::open_claims(&cwd)).await.unwrap_or_default()
+    });
+    let overlaps = open_claims.read().as_ref().map(|open| claim_overlaps(st, &changes, open)).unwrap_or_default();
+    let free = changes.iter().filter(|c| !overlaps.iter().any(|o| o.claim.touches(c))).count();
 
-    let process = move |_| {
-        let changes = st.changes();
+    // `only_free` leaves out the changes that overlap another branch's claim.
+    let mut process = move |only_free: bool| {
+        let mut changes = st.changes();
+        let open = open_claims.peek().clone().unwrap_or_default();
+        if only_free {
+            let taken = claim_overlaps(st, &changes, &open);
+            changes.retain(|c| !taken.iter().any(|o| o.claim.touches(c)));
+        }
         if changes.is_empty() || st.chat_busy() || st.job.peek().is_some() {
             return;
         }
+        let overlaps = claim_overlaps(st, &changes, &open);
         let mode = st.start_job(JobKind::Process);
-        let text = st.with_refs(|refs| prompts::process(&st.graph.peek(), &changes, &st.rules.peek(), &note.peek(), mode, Some(refs)));
+        let text = st.with_refs(|refs| prompts::process(&st.graph.peek(), &changes, &st.rules.peek(), &note.peek(), mode, Some(refs), &overlaps));
         let label = format!("Process {} graph change{} ({})", changes.len(), plural(changes.len()), mode.label());
         note.set(String::new());
         st.chat_or_new().send(Cmd::Prompt { label, text });
@@ -2410,6 +2465,21 @@ fn ChangesPane() -> Element {
                     }
                 }
             }
+            if !overlaps.is_empty() {
+                div { class: "hint-box claim-warning",
+                    div { class: "claim-warning-head",
+                        b { "Other branches are working on this too" }
+                        div { class: "spacer" }
+                        button { class: "small", title: "Read the other branches again", onclick: move |_| open_claims.restart(), "↻" }
+                    }
+                    for o in overlaps.iter() {
+                        div { key: "{o.branch}", class: "small-text", "{overlap_text(st, o)}" }
+                    }
+                    div { class: "small-text",
+                        "Process anyway to go first, process only the changes no one else touches, or wait until that branch is merged."
+                    }
+                }
+            }
             textarea {
                 class: "note",
                 placeholder: "Extra instructions for this commit (optional)",
@@ -2422,8 +2492,16 @@ fn ChangesPane() -> Element {
                     class: "primary",
                     disabled: busy || locked,
                     title: "Send the diff between the graph and the code to Workbench and let it change the code",
-                    onclick: process,
-                    "Commit & process"
+                    onclick: move |_| process(false),
+                    if overlaps.is_empty() { "Commit & process" } else { "Process anyway" }
+                }
+                if !overlaps.is_empty() {
+                    button {
+                        disabled: busy || locked || free == 0,
+                        title: "Process only the changes that no other branch touches",
+                        onclick: move |_| process(true),
+                        "Process {free} without overlap"
+                    }
                 }
                 button {
                     disabled: busy || locked,
