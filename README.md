@@ -14,14 +14,21 @@ You open a project folder, and Workbench shows how the code fits together as a g
   - **Plan** only reads and proposes.
   - **Accept edits** may edit files.
   - **Auto** and **Full auto** let the agent run more steps without asking you.
+
+  A chat session can hold more than one agent, and each agent has its own conversation. Sessions are saved, and they resume after a restart. You can close an agent from its chat tab.
 - **Code view.** It has a file list, a CodeMirror editor with vim keys, git diffs against any base, a branch picker and GitHub pull requests through `gh`.
 - **Projects.** A project groups the local clones of related repositories, for example a frontend and a backend. Each repository has its own graph, and the agent may read the other repositories for context.
-- **Node history, ghost branches and MCP connections.** Node history shows who changed a node and when. Ghost branches show graph work on other branches. You can manage MCP servers that are passed to the agent.
+- **Node history and ghost branches.** Node history shows who changed a node and when. Ghost branches show graph work on other branches.
+- **Team coordination over git.** No server is needed. Everything comes from plain git branches.
+  - **Claims.** Workbench works out a branch's claim from git. The claim is the nodes the branch changed in its graph, the files those nodes own, the code files the branch changed and the nodes that depend on them. If another branch's claim overlaps your changes, the Changes pane warns you before anything runs. It can also process only the changes that no other branch touches.
+  - **Team view.** The **Team** button in the graph toolbar shows every branch with unmerged work and who committed to it. If another branch changes a node you are editing, or depends on it, the node gets a warning ring.
+  - **Intent-conflict review.** While `graph.json` has a merge conflict, a review screen takes the place of the graph. Changes made on only one side are merged node by node. For each node that both sides changed in different ways, you see the two versions side by side and pick one. Saving stages the graph and suggests a commit message.
+- **MCP servers.** Every provider can use MCP servers. You can add servers for all your projects or for one project (`.workbench/mcp.json`). Presets such as Linear show as switches in the MCP tab. If a remote server uses OAuth, you sign in from the MCP tab. The tokens are kept in your config folder and never in the project.
 - **Self-updater (Linux and macOS).** The app checks GitHub for newer commits on `main` and can rebuild itself.
 
 ### LLM providers
 
-Pick a provider and model in the header. The CLI agents can read and edit files. The API providers only answer in the chat.
+Pick a provider and model in the header. The CLI agents can read and edit files. The API providers answer in the chat and can call tools on your MCP servers, but they do not edit files.
 
 | Provider | What you need |
 | --- | --- |
@@ -42,11 +49,12 @@ The default provider is Claude Code. To install it, follow the [Claude Code docs
 3. Use the chat at the bottom of the window. Start in **Plan** mode, read the plan, then approve it in the mode you want the agent to use.
 4. Edit nodes in the node inspector, add nodes with the toolbar, or describe new behaviour in the **Prompt** pane. Then open **Changes** and send the changes to the agent.
 5. Add rules in the **Rules** view, for example "keep functions small". The agent follows the enabled rules in every session.
-6. Commit `.workbench/` together with your code, so the graph, the baseline and the rules are shared with your team.
+6. Commit `.workbench/` together with your code. This shares the graph, the baseline, the rules and the project MCP servers with your team.
+7. When several people work on branches, click **Team** to see what each branch is changing. If merging a branch gives a conflict in `graph.json`, decide each conflicting node in the review screen.
 
 You can also open a file directly: `wbrs <dir> <file>`.
 
-Settings are stored in `~/.config/workbench/` (on Windows, `%APPDATA%\workbench\`). They include `providers.json` and `projects.json`.
+Settings are stored in `~/.config/workbench/` (on Windows, `%APPDATA%\workbench\`). They include `providers.json`, `projects.json`, `chat_sessions.json` (saved chat sessions) and `mcp-oauth.json` (MCP sign-in tokens).
 
 ## Install and run
 
@@ -143,4 +151,5 @@ make editor   # rebuild the CodeMirror bundle (needs Node.js and npm)
 - `src/` contains the Rust app. `src/main.rs` is the entry point and `src/app.rs` is the root component.
 - `editor-js/` is the source of the CodeMirror editor. It is bundled into `src/editor.bundle.js`. The bundle is committed, so you only need npm if you change the editor.
 - `scripts/install.sh` is the Linux and macOS installer.
+- `unsafe` Rust is not allowed. `#![forbid(unsafe_code)]` in `src/main.rs` enforces this. The project rules for this repository are in `.workbench/rules.json`.
 - `.workbench/graph.json` is this repository's own architecture graph. Open the repository in Workbench to explore it.
