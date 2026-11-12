@@ -357,7 +357,8 @@
       "description": "Makefile targets for run, test, install, open, uninstall and the editor bundle build. install.sh builds a release binary, packages it as ~/Applications/Workbench.app and installs a `wbrs` launcher in ~/.local/bin. `make editor` uses esbuild to bundle editor-js into src/editor.bundle.js. Before building it checks for git, curl, cargo and, on Linux, make, a C compiler, pkg-config and the GUI libraries. It lists what's missing with the exact install commands (pacman, apt, dnf, zypper, apk or xbps; rustup for Rust; Xcode Command Line Tools on macOS) and runs them only after the user confirms on the terminal. It stops with an explanation on Debian/Ubuntu releases too old to have WebKitGTK 4.1. If the folder isn't a git checkout (a ZIP download), it offers to link it to the GitHub repo so the update check works, stashing any files that differ from main.",
       "files": [
         "Makefile",
-        "scripts/install.sh"
+        "scripts/install.sh",
+        "README.md"
       ],
       "links": [
         "desktop-entry",
