@@ -11,7 +11,7 @@ use crate::app::open_folder;
 use crate::github;
 use crate::graph_view::{View, zoom_at};
 use crate::projects::{self, NOTE_GAP, NOTE_W, Project, REPO_H, REPO_W, RepoInfo};
-use crate::state::{AppState, Cmd, Layout};
+use crate::state::{AppState, Layout};
 use crate::worktree_view::{AgentChips, WorktreeList, agents_in_repo, other_worktrees};
 
 const NOTE_H: f64 = 96.0;
@@ -98,7 +98,6 @@ pub fn create_project(mut st: AppState, name: &str) {
 #[component]
 pub fn ProjectView(id: String) -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     let project = st.projects.read().iter().find(|p| p.id == id).cloned();
     let all: Vec<(String, String)> = st.projects.read().iter().map(|p| (p.id.clone(), p.name.clone())).collect();
     let mut new_name = use_signal(String::new);
@@ -223,7 +222,7 @@ pub fn ProjectView(id: String) -> Element {
             if let Some(p) = project {
                 div { class: "node-menu", style: "flex: 0 0 {Layout::DEFAULT_NODE_MENU_PCT}%;",
                     div { class: "pane-body",
-                        ProjectInspector { project: p, open: move |dir: PathBuf| open_folder(st, claude, dir) }
+                        ProjectInspector { project: p, open: move |dir: PathBuf| open_folder(st, dir) }
                     }
                 }
             }
@@ -235,7 +234,6 @@ pub fn ProjectView(id: String) -> Element {
 #[component]
 fn ProjectCanvas(project: Project) -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     let mut view = use_signal(|| (40.0f64, 40.0f64, 1.0f64));
     let mut drag = use_signal(|| None::<Drag>);
     let mut mounted = use_signal(|| None::<Rc<MountedData>>);
@@ -428,7 +426,7 @@ fn ProjectCanvas(project: Project) -> Element {
                                     },
                                     ondoubleclick: move |e: MouseEvent| {
                                         e.stop_propagation();
-                                        open_folder(st, claude, open_dir.clone());
+                                        open_folder(st, open_dir.clone());
                                     },
                                     div { class: "gnode-title", "{label}" }
                                     if let Some((text, class)) = agent_badge {

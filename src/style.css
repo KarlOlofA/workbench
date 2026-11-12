@@ -105,6 +105,14 @@
 .chat-dock .chat-input textarea { min-height: 38px; }
 .chat-dock-bar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: move; user-select: none; }
 .chat-grip { color: var(--muted); }
+/* The agents of the chat session, as tabs in the chat's top bar. */
+.chat-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; cursor: default; }
+.chat-tabs-session { white-space: nowrap; margin-right: 2px; }
+.chat-tab { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 12px; white-space: nowrap; background: transparent; border-color: transparent; color: var(--muted); }
+.chat-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.chat-tab .agent-dot { margin-left: 4px; }
+.chat-tab-flag { margin-left: 4px; color: var(--warn); font-weight: bold; }
+.chat-tab-add { padding: 0 6px; }
 .chat-edge { position: absolute; z-index: 1; }
 .chat-edge.n, .chat-edge.s { left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
 .chat-edge.e, .chat-edge.w { top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
@@ -199,7 +207,7 @@
 }
 .chat-input textarea:focus { outline: none; border-color: var(--accent); }
 
-.code { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.code { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .tabs { display: flex; gap: 2px; padding: 6px 8px 0; background: var(--panel); border-bottom: 1px solid var(--border); }
 .tab { border: none; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); padding: 6px 14px; }
 .tab.active { background: var(--bg); color: var(--text); }
@@ -213,6 +221,8 @@
 .file-list { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 12px; }
 .file-list li { padding: 3px 6px; border-radius: 4px; cursor: pointer; display: flex; gap: 8px; }
 .file-list li:hover { background: var(--panel-2); }
+.file-list li.folder { gap: 6px; align-items: center; }
+.file-list .folder-icon { display: flex; color: var(--accent); }
 .file-list .file-relation { flex: none; min-width: 72px; color: var(--accent); }
 .status { width: 18px; font-weight: 600; }
 .status-added { color: var(--add); }
@@ -220,7 +230,8 @@
 .status-modified { color: var(--warn); }
 
 .editor { display: flex; flex-direction: column; height: 100%; }
-.tab-body:has(> .editor:not([style*=none])) { overflow: hidden; }
+.editor.hidden { display: none; }
+.tab-body:has(> .editor:not(.hidden)) { overflow: hidden; }
 .editor-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .editor-bar .path { font-family: var(--mono); }
 .dirty { color: var(--warn); font-size: 11px; }
@@ -548,6 +559,16 @@ label.check input { width: auto; padding: 0; }
 .sidebar-repos li { display: flex; align-items: center; gap: 6px; }
 .sidebar-repos li.sidebar-worktree { padding-left: 18px; font-size: 12px; }
 .sidebar-repos li.sidebar-worktree.missing { opacity: 0.5; cursor: default; }
+.sidebar-repos li.sidebar-session { padding-left: 18px; font-size: 12px; }
+.sidebar-repos li.sidebar-session.in-worktree { padding-left: 30px; }
+.sidebar-repos li.sidebar-session-agent { padding-left: 30px; font-size: 12px; }
+.session-close { margin-left: auto; padding: 0 5px; visibility: hidden; }
+.sidebar-repos li.sidebar-session:hover .session-close { visibility: visible; }
+.session-name.editable:hover { cursor: text; text-decoration: underline dotted; }
+.session-rename { flex: 1; min-width: 0; padding: 1px 4px; font-size: 12px; }
+.sidebar-repos li.sidebar-session-agent.in-worktree { padding-left: 42px; }
+.sidebar-repos li.sidebar-session-agent.working .agent-state { color: var(--accent); }
+.sidebar-repos li.sidebar-session-agent.needs-you .agent-state { color: var(--warn); }
 .agent-dot { flex: none; font-size: 10px; color: var(--muted); }
 .agent-dot.working { color: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
 @keyframes agent-pulse { 50% { opacity: 0.35; } }

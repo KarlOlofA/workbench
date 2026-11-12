@@ -10,16 +10,16 @@ use dioxus::prelude::*;
 
 use crate::activity::AgentProc;
 use crate::app::open_folder;
-use crate::logos::LogoIcon;
+use crate::logos::{Logo, LogoIcon};
 use crate::projects::Project;
-use crate::chat::{self, ChatPane};
+use crate::chat::{self, ChatPane, ChatTabs};
 use crate::code::CodePane;
 use crate::graph_view::GraphTab;
 use crate::project_view::{ProjectView, create_project, pick_repo};
 use crate::rules_view::RulesView;
 use crate::settings_view::SettingsView;
 use crate::worktree_view::{AgentDot, other_worktrees};
-use crate::state::{AppState, ChatFocus, ChatItem, ChatRect, Cmd, WorkbenchView};
+use crate::state::{AppState, ChatFocus, ChatItem, ChatRect, WorkbenchView};
 
 const PEEK_CHARS: usize = 180;
 
@@ -39,7 +39,6 @@ pub fn Body() -> Element {
 #[component]
 fn ProjectSidebar() -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     let mut new_name = use_signal(|| None::<String>);
 
     if !st.layout.read().projects_open {
@@ -126,11 +125,12 @@ fn ProjectSidebar() -> Element {
                                             title: "{r.path}",
                                             onclick: move |_| {
                                                 st.view.set(WorkbenchView::Graph);
-                                                open_folder(st, claude, dir.clone());
+                                                open_folder(st, dir.clone());
                                             },
                                             span { class: "sidebar-label", "{r.label()}" }
                                             AgentDot { agents }
                                         }
+                                        SessionRows { dir: r.dir(), in_worktree: false }
                                         for w in worktrees {
                                             {
                                                 let agents = activity.get(&w.path).cloned().unwrap_or_default();
@@ -149,12 +149,13 @@ fn ProjectSidebar() -> Element {
                                                         onclick: move |_| {
                                                             if !missing {
                                                                 st.view.set(WorkbenchView::Graph);
-                                                                open_folder(st, claude, dir.clone());
+                                                                open_folder(st, dir.clone());
                                                             }
                                                         },
                                                         span { class: "sidebar-label", "⑂ {w.label()}" }
                                                         AgentDot { agents }
                                                     }
+                                                    SessionRows { dir: w.path.clone(), in_worktree: true }
                                                 }
                                             }
                                         }
@@ -163,6 +164,128 @@ fn ProjectSidebar() -> Element {
                             }
                         }
                         ProjectAgents { agents: project_agents(&st, &p, &activity) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The chat sessions in one folder, under its repository or worktree row: the session's title
+/// (with a dot while one of its agents works) and a ✕ to close it, then each of its agents and
+/// its state. Clicking a session or an agent shows it in the chat; clicking the name of the open
+/// session renames it.
+#[component]
+fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
+    let mut st = use_context::<AppState>();
+    let active_chat = st.chat();
+    let active = active_chat.session.cloned();
+    // Every agent runs on the provider picked in the header.
+    let provider = st.provider_settings.read().provider;
+    // The session being renamed and the name typed so far.
+    let mut renaming = use_signal(|| None::<(String, String)>);
+    let mut save_name = move || {
+        if let Some((id, title)) = renaming.take() {
+            st.rename_session(&id, title);
+        }
+    };
+    rsx! {
+        for session in st.sessions_in(&dir) {
+            {
+                let chats = st.session_chats(&session.id);
+                let working = chats.iter().any(|c| *c.busy.read());
+                let id = session.id.clone();
+                let close_id = session.id.clone();
+                let rename_id = session.id.clone();
+                let is_open = session.id == active;
+                let draft = renaming.read().as_ref().filter(|(r, _)| *r == session.id).map(|(_, t)| t.clone());
+                let close_tip = if working { "Close this session, stopping its working agents" } else { "Close this session" };
+                let current = if is_open { "current" } else { "" };
+                let nested = if in_worktree { "in-worktree" } else { "" };
+                rsx! {
+                    li {
+                        key: "{session.id}",
+                        class: "sidebar-session {nested} {current}",
+                        title: "Chat session in {session.dir.display()}\nClick to open it in the chat",
+                        onclick: move |_| {
+                            st.view.set(WorkbenchView::Graph);
+                            st.open_session(&id);
+                        },
+                        match draft {
+                            Some(text) => rsx! {
+                                input {
+                                    class: "session-rename",
+                                    value: "{text}",
+                                    onmounted: chat::focus,
+                                    onclick: move |e| e.stop_propagation(),
+                                    oninput: move |e| renaming.with_mut(|r| if let Some((_, t)) = r { *t = e.value() }),
+                                    onblur: move |_| save_name(),
+                                    onkeydown: move |e: KeyboardEvent| match e.key() {
+                                        Key::Enter => save_name(),
+                                        Key::Escape => renaming.set(None),
+                                        _ => {}
+                                    },
+                                }
+                            },
+                            None => rsx! {
+                                span { class: "sidebar-label",
+                                    "💬 "
+                                    span {
+                                        class: if is_open { "session-name editable" } else { "session-name" },
+                                        title: if is_open { "Click to rename" } else { "" },
+                                        onclick: move |e: MouseEvent| {
+                                            if is_open {
+                                                e.stop_propagation();
+                                                renaming.set(Some((rename_id.clone(), session.title.clone())));
+                                            }
+                                        },
+                                        "{session.title}"
+                                    }
+                                }
+                            },
+                        }
+                        if working { span { class: "agent-dot working", "●" } }
+                        button {
+                            class: "small session-close",
+                            title: "{close_tip}",
+                            onclick: move |e: MouseEvent| {
+                                e.stop_propagation();
+                                st.close_session(&close_id);
+                            },
+                            "✕"
+                        }
+                    }
+                    for agent in session.agents.clone() {
+                        if let Some(chat) = chats.iter().copied().find(|c| c.is(&agent.id)) {
+                            {
+                                let (state, state_class, tip) = if chat.waiting() {
+                                    ("needs you", "needs-you", "Waiting for you to answer a permission request or approve a plan")
+                                } else if *chat.busy.read() {
+                                    ("working", "working", "Working")
+                                } else {
+                                    ("waiting", "", "Waiting for a prompt")
+                                };
+                                let current = if chat == active_chat { "current" } else { "" };
+                                rsx! {
+                                    li {
+                                        key: "{agent.id}",
+                                        class: "sidebar-session-agent {nested} {current} {state_class}",
+                                        title: "{agent.name} · {tip}\nClick to show it in the chat",
+                                        onclick: move |_| {
+                                            st.view.set(WorkbenchView::Graph);
+                                            st.open_agent(chat);
+                                        },
+                                        LogoIcon { logo: Logo::of(provider) }
+                                        span { class: "sidebar-label",
+                                            "{agent.name}"
+                                            span { class: "muted", " · {provider.label()}" }
+                                        }
+                                        if state == "working" { span { class: "agent-dot working", "●" } }
+                                        span { class: "agent-state", "{state}" }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -202,7 +325,6 @@ fn project_agents(st: &AppState, project: &Project, activity: &HashMap<PathBuf, 
 #[component]
 fn ProjectAgents(agents: Vec<ProjectAgent>) -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     if agents.is_empty() {
         return rsx! {};
     }
@@ -212,16 +334,15 @@ fn ProjectAgents(agents: Vec<ProjectAgent>) -> Element {
                 {
                     let a = pa.agent.clone();
                     let state = if a.working { "working" } else { "waiting for a prompt" };
-                    let who = if a.in_app { "Workbench's own session".to_string() } else { format!("Running outside Workbench, pid {}", a.pid) };
                     let folder = pa.folder.clone();
                     rsx! {
                         li {
                             key: "{a.pid}-{pa.folder.display()}",
                             class: if a.working { "working" } else { "" },
-                            title: "{a.kind.label()} in {pa.folder.display()}\n{who} · {state}\nClick to open this folder",
+                            title: "{a.kind.label()} in {pa.folder.display()}\nRunning outside Workbench, pid {a.pid} · {state}\nClick to open this folder",
                             onclick: move |_| {
                                 st.view.set(WorkbenchView::Graph);
-                                open_folder(st, claude, folder.clone());
+                                open_folder(st, folder.clone());
                             },
                             LogoIcon { logo: a.kind.logo() }
                             span { class: "sidebar-label",
@@ -382,10 +503,10 @@ pub fn ChatDock() -> Element {
     let mut el = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let mut drag = use_signal(|| None::<ChatDrag>);
     let layout = *st.layout.read();
-    let waiting_for_permission = !st.permissions.read().is_empty() || st.plan_approval.read().is_some();
-    let focus = if waiting_for_permission { ChatFocus::Active } else { *st.chat_focus.read() };
-    let peek = latest_reply(&st.items.read());
-    let busy = *st.busy.read();
+    let chat = st.chat();
+    let focus = if chat.waiting() { ChatFocus::Active } else { *st.chat_focus.read() };
+    let peek = latest_reply(&chat.items.read());
+    let busy = *chat.busy.read();
     let dragging = *drag.read();
     if layout.chat_detached {
         return rsx! {
@@ -455,6 +576,7 @@ pub fn ChatDock() -> Element {
                 ondoubleclick: move |_| st.set_layout(|l| l.chat_rect = None),
                 span { class: "chat-grip", "⠿" }
                 span { class: "muted small-text", "Chat" }
+                ChatTabs {}
                 div { class: "spacer" }
                 button {
                     class: "small",

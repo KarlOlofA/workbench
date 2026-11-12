@@ -33,6 +33,7 @@ mod reference;
 mod rules;
 mod rules_view;
 mod session;
+mod sessions;
 mod settings_view;
 mod state;
 mod update;

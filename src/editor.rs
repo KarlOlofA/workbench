@@ -115,7 +115,8 @@ pub fn EditorView(visible: bool) -> Element {
     let dirty = file.as_ref().is_some_and(|f| f.dirty());
 
     rsx! {
-        div { class: "editor", style: if visible { "" } else { "display: none" },
+        // A class, not `style: ""`: Dioxus never applied the empty style, so the editor stayed display:none.
+        div { class: if visible { "editor" } else { "editor hidden" },
             div { class: "editor-bar",
                 match &file {
                     Some(f) => rsx! { span { class: "path", "{f.rel}" } },

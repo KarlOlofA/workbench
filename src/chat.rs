@@ -2,13 +2,15 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::claude::{ChatMode, PermissionDecision, PermissionRequest, tool_summary};
+use crate::logos::{Logo, LogoIcon};
 use crate::markdown;
-use crate::state::{AppState, ChatItem, Cmd, PlanApproval};
+use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
 
 #[component]
 pub fn ChatPane() -> Element {
     let st = use_context::<AppState>();
-    let items = st.items.read();
+    let chat = st.chat();
+    let items = chat.items.read();
 
     rsx! {
         div { class: "chat",
@@ -19,7 +21,7 @@ pub fn ChatPane() -> Element {
                             "Craft something with "
                             span { class: "accent", "Workbench" }
                             " about "
-                            code { "{st.cwd.read().display()}" }
+                            code { "{chat.dir.read().display()}" }
                         }
                     }
                     for row in rows(&items) {
@@ -28,10 +30,10 @@ pub fn ChatPane() -> Element {
                             Row::Tools(idx, tools) => rsx! { ToolGroup { key: "g{idx}", tools } },
                         }
                     }
-                    if st.plan_approval.read().is_some() {
+                    if chat.plan_approval.read().is_some() {
                         div { class: "thinking", "Waiting for you to approve the plan…" }
-                    } else if *st.busy.read() {
-                        if st.permissions.read().is_empty() {
+                    } else if *chat.busy.read() {
+                        if chat.permissions.read().is_empty() {
                             div { class: "thinking", "Workbench is working…" }
                         } else {
                             div { class: "thinking", "Waiting for your permission…" }
@@ -40,11 +42,11 @@ pub fn ChatPane() -> Element {
                     QueuedMessages {}
                 }
             }
-            if let Some(approval) = st.plan_approval.read().clone() {
+            if let Some(approval) = chat.plan_approval.read().clone() {
                 PlanPrompt { approval }
             }
-            if let Some(req) = st.permissions.read().first().cloned() {
-                PermissionPrompt { key: "{req.request_id}", req, more: st.permissions.read().len() - 1 }
+            if let Some(req) = chat.permissions.read().first().cloned() {
+                PermissionPrompt { key: "{req.request_id}", req, more: chat.permissions.read().len() - 1 }
             }
             ChatInput {}
         }
@@ -140,7 +142,7 @@ pub fn focus(e: MountedEvent) {
 #[component]
 fn PermissionPrompt(req: PermissionRequest, more: usize) -> Element {
     let st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
+    let chat = st.chat();
     let mut cursor = use_signal(|| 0usize);
     let mut note = use_signal(|| None::<String>);
     let choices = permission_choices(&req);
@@ -151,7 +153,7 @@ fn PermissionPrompt(req: PermissionRequest, more: usize) -> Element {
     let answer = {
         let req = req.clone();
         move |decision: PermissionDecision| {
-            claude.send(Cmd::Permission { request_id: req.request_id.clone(), decision });
+            chat.send(Cmd::Permission { request_id: req.request_id.clone(), decision });
         }
     };
     let choose = {
@@ -371,8 +373,9 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[component]
 fn QueuedMessages() -> Element {
-    let mut st = use_context::<AppState>();
-    let queued: Vec<(String, String, usize)> = st.queued.read().iter().map(|m| (m.text.clone(), m.context.join(", "), m.context.len())).collect();
+    let st = use_context::<AppState>();
+    let mut chat = st.chat();
+    let queued: Vec<(String, String, usize)> = chat.queued.read().iter().map(|m| (m.text.clone(), m.context.join(", "), m.context.len())).collect();
 
     rsx! {
         for (idx, (text, context, n_context)) in queued.into_iter().enumerate() {
@@ -387,7 +390,7 @@ fn QueuedMessages() -> Element {
                         class: "small queued-x",
                         title: "Remove from queue",
                         onclick: move |_| {
-                            let mut q = st.queued.write();
+                            let mut q = chat.queued.write();
                             if idx < q.len() {
                                 q.remove(idx);
                             }
@@ -405,9 +408,10 @@ fn QueuedMessages() -> Element {
 /// follow it at once.
 #[component]
 fn ModeToggle() -> Element {
-    let mut st = use_context::<AppState>();
+    let st = use_context::<AppState>();
+    let mut chat = st.chat();
     let provider = st.provider_settings.peek().provider;
-    let current = *st.chat_mode.read();
+    let current = *chat.chat_mode.read();
 
     rsx! {
         div { class: "mode-toggle", title: "{provider.mode_hint(current)}",
@@ -419,7 +423,7 @@ fn ModeToggle() -> Element {
                         _ => "mode-btn",
                     },
                     title: "{provider.mode_hint(m)}",
-                    onclick: move |_| st.chat_mode.set(m),
+                    onclick: move |_| chat.chat_mode.set(m),
                     "{provider.mode_label(m)}"
                 }
             }
@@ -432,13 +436,13 @@ fn ModeToggle() -> Element {
 #[component]
 fn PlanPrompt(approval: PlanApproval) -> Element {
     let st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
+    let chat = st.chat();
     let provider = st.provider_settings.peek().provider;
     // Only the run modes the current provider supports (API providers just answer).
     let run_modes: Vec<ChatMode> = ChatMode::RUN_PLAN.into_iter().filter(|m| provider.modes().contains(m)).collect();
     let key_modes = run_modes.clone();
     let html = markdown::to_html(&approval.plan);
-    let answer = move |mode: Option<ChatMode>| claude.send(Cmd::ApprovePlan { mode });
+    let answer = move |mode: Option<ChatMode>| chat.send(Cmd::ApprovePlan { mode });
 
     rsx! {
         div {
@@ -484,17 +488,17 @@ fn PlanPrompt(approval: PlanApproval) -> Element {
 #[component]
 fn ChatInput() -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
-    let busy = *st.busy.read();
+    let mut chat = st.chat();
+    let busy = *chat.busy.read();
 
     let mut send = move |now: bool| {
-        let text = st.chat_input.peek().trim().to_string();
+        let text = chat.input.peek().trim().to_string();
         if text.is_empty() {
             return;
         }
-        st.chat_input.set(String::new());
+        chat.input.set(String::new());
         let msg = st.message(text);
-        claude.send(if now { Cmd::SendNow(msg) } else { Cmd::Send(msg) });
+        chat.send(if now { Cmd::SendNow(msg) } else { Cmd::Send(msg) });
     };
     let context = st.selected_titles();
     let context_tip = context.join("\n");
@@ -531,18 +535,72 @@ fn ChatInput() -> Element {
         div { class: "chat-input",
             textarea {
                 placeholder: "{placeholder}",
-                value: "{st.chat_input}",
-                oninput: move |e| st.chat_input.set(e.value()),
+                value: "{chat.input}",
+                oninput: move |e| chat.input.set(e.value()),
                 onkeydown: move |e: KeyboardEvent| {
                     let m = e.modifiers();
                     if e.key() == Key::Enter && !m.shift() {
                         e.prevent_default();
                         send(m.ctrl());
-                    } else if m.ctrl() && !m.meta() && e.code() == Code::KeyC && *st.busy.peek() {
+                    } else if m.ctrl() && !m.meta() && e.code() == Code::KeyC && *chat.busy.peek() {
                         e.prevent_default();
-                        claude.send(Cmd::Interrupt);
+                        chat.send(Cmd::Interrupt);
                     }
                 },
+            }
+        }
+    }
+}
+
+/// The agents of the active chat session as tabs, for the chat's top bar. Clicking a tab shows
+/// that agent's chat; `+` adds an agent to the session.
+#[component]
+pub fn ChatTabs() -> Element {
+    let mut st = use_context::<AppState>();
+    let session_id = st.chat().session.cloned();
+    let Some(session) = st.session(&session_id) else { return rsx! {} };
+    let chats = st.session_chats(&session_id);
+
+    rsx! {
+        div {
+            class: "chat-tabs",
+            // The bar around the tabs drags the chat; the tabs themselves don't.
+            onmousedown: move |e| e.stop_propagation(),
+            span { class: "chat-tabs-session muted small-text", title: "{session.dir.display()}", "{session.title}" }
+            for agent in session.agents {
+                if let Some(chat) = chats.iter().copied().find(|c| c.is(&agent.id)) {
+                    ChatTab { key: "{agent.id}", chat, name: agent.name }
+                }
+            }
+            button {
+                class: "small chat-tab-add",
+                title: "Add an agent to this session",
+                onclick: move |_| st.request_chat(ChatRequest::NewAgent { session: session_id.clone(), name: None, task: None, activate: true }),
+                "+"
+            }
+        }
+    }
+}
+
+#[component]
+fn ChatTab(chat: Chat, name: String) -> Element {
+    let mut st = use_context::<AppState>();
+    let active = st.chat() == chat;
+    let busy = *chat.busy.read();
+    let waiting = chat.waiting();
+    let provider = st.provider_settings.read().provider;
+
+    rsx! {
+        button {
+            class: if active { "chat-tab active" } else { "chat-tab" },
+            title: if waiting { "{provider.label()} · waiting for your answer" } else if busy { "{provider.label()} · working" } else { "{provider.label()} · waiting for a prompt" },
+            onclick: move |_| st.active_chat.set(Some(chat)),
+            LogoIcon { logo: Logo::of(provider) }
+            "{name}"
+            if waiting {
+                span { class: "chat-tab-flag", "!" }
+            } else if busy {
+                span { class: "agent-dot working", "●" }
             }
         }
     }

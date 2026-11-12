@@ -16,6 +16,40 @@ pub fn strip_marker(text: &str) -> String {
     text.replace(QUESTIONS_MARKER, "").trim_end().to_string()
 }
 
+/// An agent starts another agent in its chat session with a block like:
+/// `[[workbench:spawn-agent name="Tests"]]Write tests for the parser[[/workbench:spawn-agent]]`
+const SPAWN_OPEN: &str = "[[workbench:spawn-agent name=\"";
+const SPAWN_NAME_END: &str = "\"]]";
+const SPAWN_CLOSE: &str = "[[/workbench:spawn-agent]]";
+
+/// Told to every agent, so it can start other agents when the user asks for them.
+pub fn spawn_agent_instructions() -> String {
+    format!(
+        "\n\nYou are one agent in a Workbench chat session, and you can start more agents in the same session and folder. \
+         Do this only when the user asks for another agent (or agents). For each one, end your reply with a block: \
+         `{SPAWN_OPEN}<short name>{SPAWN_NAME_END}<the complete task for that agent>{SPAWN_CLOSE}`. \
+         The new agent sees only that task, so include everything it needs to know.\n"
+    )
+}
+
+/// The reply without its spawn blocks, and the (name, task) of every agent it asks to start.
+pub fn spawn_requests(text: &str) -> (String, Vec<(String, String)>) {
+    let mut shown = String::new();
+    let mut spawns = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(SPAWN_OPEN) {
+        let after_open = &rest[start + SPAWN_OPEN.len()..];
+        let Some(name_end) = after_open.find(SPAWN_NAME_END) else { break };
+        let body = &after_open[name_end + SPAWN_NAME_END.len()..];
+        let Some(close) = body.find(SPAWN_CLOSE) else { break };
+        shown.push_str(&rest[..start]);
+        spawns.push((after_open[..name_end].trim().to_string(), body[..close].trim().to_string()));
+        rest = &body[close + SPAWN_CLOSE.len()..];
+    }
+    shown.push_str(rest);
+    (shown.trim_end().to_string(), spawns)
+}
+
 fn mode_section(mode: ChatMode, action: &str) -> String {
     match mode {
         ChatMode::Plan => format!(
@@ -831,6 +865,15 @@ mod tests {
         assert!(p.contains("`get-users` — GET /users (route)"));
         assert!(p.contains(QUESTIONS_MARKER));
         assert!(p.contains("Do NOT change any source code"));
+    }
+
+    #[test]
+    fn spawn_blocks_are_parsed_and_removed() {
+        let reply = format!("Starting two.\n{SPAWN_OPEN}Tests{SPAWN_NAME_END}\nWrite tests\n{SPAWN_CLOSE}\n{SPAWN_OPEN}Docs{SPAWN_NAME_END}Update docs{SPAWN_CLOSE}");
+        let (shown, spawns) = spawn_requests(&reply);
+        assert_eq!(shown, "Starting two.");
+        assert_eq!(spawns, vec![("Tests".into(), "Write tests".into()), ("Docs".into(), "Update docs".into())]);
+        assert_eq!(spawn_requests("no blocks"), ("no blocks".into(), vec![]));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use dioxus::prelude::*;
 
 use crate::git::{self, FileDiff, LineKind};
@@ -65,12 +67,13 @@ fn FilesView() -> Element {
     };
 
     let needle = filter.read().to_lowercase();
-    let visible: Vec<String> = files
+    let matching: Vec<String> = files
         .unwrap_or_default()
         .into_iter()
         .filter(|f| needle.is_empty() || f.to_lowercase().contains(&needle))
-        .take(400)
         .collect();
+    let tree = build_tree(&matching);
+    let filtering = !needle.is_empty();
 
     rsx! {
         div { class: "files",
@@ -101,17 +104,80 @@ fn FilesView() -> Element {
                 value: "{filter}",
                 oninput: move |e| filter.set(e.value()),
             }
-            ul { class: "file-list",
-                for f in visible {
+            ul { class: "file-list", {folder_rows(st, &tree, "", 0, filtering)} }
+        }
+    }
+}
+
+/// A folder in the Files tree: its sub-folders by name and the full paths of the files directly in it.
+#[derive(Default)]
+struct Folder {
+    folders: BTreeMap<String, Folder>,
+    files: Vec<String>,
+}
+
+/// Turns repo-relative paths like `src/code.rs` into a folder tree.
+fn build_tree(paths: &[String]) -> Folder {
+    let mut root = Folder::default();
+    for path in paths {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        parts.pop();
+        let mut folder = &mut root;
+        for part in parts {
+            folder = folder.folders.entry(part.to_string()).or_default();
+        }
+        folder.files.push(path.clone());
+    }
+    root
+}
+
+/// Folder icons for the Files tree, drawn as SVG because no emoji font is guaranteed.
+const FOLDER_CLOSED_SVG: &str = r#"<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.5 3.5a1 1 0 0 1 1-1h3.6l1.5 1.5h5.9a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>"#;
+const FOLDER_OPEN_SVG: &str = r#"<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.5 3.5a1 1 0 0 1 1-1h3.6l1.5 1.5h5.4a1 1 0 0 1 1 1V6H4.2a1 1 0 0 0-.95.68L1.5 12z"/><path d="M3.6 7h11.2a.5.5 0 0 1 .47.66l-1.8 5.5a1 1 0 0 1-.95.69H1.9z"/></svg>"#;
+
+/// The rows of one folder: sub-folders first (click to open/close), then files (click to open in the editor).
+/// While filtering, every folder is shown open so all matches are visible.
+fn folder_rows(mut st: AppState, folder: &Folder, prefix: &str, depth: usize, force_open: bool) -> Element {
+    let indent = format!("padding-left: {}px", 6 + depth * 20);
+    rsx! {
+        for (name, sub) in folder.folders.iter() {
+            {
+                let dir = format!("{prefix}{name}/");
+                let open = force_open || st.files_open_dirs.read().contains(&dir);
+                rsx! {
                     li {
-                        key: "{f}",
+                        key: "{dir}",
+                        class: "folder",
+                        style: "{indent}",
                         onclick: {
-                            let p = f.clone();
-                            move |_| st.open(&p)
+                            let dir = dir.clone();
+                            move |_| {
+                                let mut open_dirs = st.files_open_dirs.write();
+                                if !open_dirs.remove(&dir) {
+                                    open_dirs.insert(dir.clone());
+                                }
+                            }
                         },
-                        "{f}"
+                        span {
+                            class: "folder-icon",
+                            dangerous_inner_html: if open { FOLDER_OPEN_SVG } else { FOLDER_CLOSED_SVG },
+                        }
+                        "{name}"
                     }
+                    if open { {folder_rows(st, sub, &dir, depth + 1, force_open)} }
                 }
+            }
+        }
+        for path in folder.files.iter() {
+            li {
+                key: "{path}",
+                style: "{indent}",
+                title: "{path}",
+                onclick: {
+                    let p = path.clone();
+                    move |_| st.open(&p)
+                },
+                {path.rsplit('/').next().unwrap_or(path)}
             }
         }
     }

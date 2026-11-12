@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::activity::{self, AgentKind, AgentProc};
+use crate::activity::{self, AgentProc};
 use crate::claude::{ChatMode, McpStatus, PermissionDecision, PermissionRequest};
 use crate::ghost::{self, GhostBranch, GhostPick};
 use crate::git;
@@ -18,6 +18,7 @@ use crate::node_history::{self, NodeHistory, Source};
 use crate::reference::{self, RefGraphs, RefState, Refs};
 use crate::rules::{self, Rule};
 use crate::config;
+use crate::sessions::{self, SavedAgent, SavedSession};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatItem {
@@ -68,6 +69,8 @@ pub enum Cmd {
     Permission { request_id: String, decision: PermissionDecision },
     /// Answers the pending `PlanApproval`: run the plan in `mode`, or keep planning when `None`.
     ApprovePlan { mode: Option<ChatMode> },
+    /// Stops the agent process and ends the agent's session loop.
+    Close,
 }
 
 /// A finished plan waiting for the user to pick how to run it.
@@ -77,6 +80,84 @@ pub struct PlanApproval {
     /// Workbench's `ExitPlanMode` permission request, answered when the user picks.
     /// `None` for providers without plan mode: picking sends a message to implement the plan.
     pub request: Option<PermissionRequest>,
+}
+
+/// The live chat of one agent: its conversation, its state and the channel to its session loop
+/// (`session::run`). Its values belong to the main window's root component, so they live as long as the app.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Chat {
+    pub agent_id: CopyValue<String>,
+    /// The id of the chat session (`SavedSession`) the agent belongs to.
+    pub session: CopyValue<String>,
+    /// The folder the agent works in: its session's folder.
+    pub dir: CopyValue<PathBuf>,
+    tx: CopyValue<tokio::sync::mpsc::UnboundedSender<Cmd>>,
+    pub items: Signal<Vec<ChatItem>>,
+    pub busy: Signal<bool>,
+    pub queued: Signal<Vec<Message>>,
+    pub permissions: Signal<Vec<PermissionRequest>>,
+    /// The provider's session id of the conversation, used to resume it.
+    pub session_id: Signal<Option<String>>,
+    pub model: Signal<String>,
+    pub last_cost: Signal<Option<f64>>,
+    /// Every agent starts in Plan.
+    pub chat_mode: Signal<ChatMode>,
+    pub plan_approval: Signal<Option<PlanApproval>>,
+    pub input: Signal<String>,
+}
+
+impl Chat {
+    /// Creates the agent's chat and starts its session loop, both owned by the app's root
+    /// component (like `AppState`), so they live as long as the app. Call from the main window only.
+    pub fn launch(st: AppState, session: &SavedSession, agent: &SavedAgent) -> Chat {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let root = ScopeId::APP;
+        let chat = Chat {
+            agent_id: CopyValue::new_in_scope(agent.id.clone(), root),
+            session: CopyValue::new_in_scope(session.id.clone(), root),
+            dir: CopyValue::new_in_scope(session.dir.clone(), root),
+            tx: CopyValue::new_in_scope(tx, root),
+            items: Signal::new_in_scope(Vec::new(), root),
+            busy: Signal::new_in_scope(false, root),
+            queued: Signal::new_in_scope(Vec::new(), root),
+            permissions: Signal::new_in_scope(Vec::new(), root),
+            session_id: Signal::new_in_scope(None, root),
+            model: Signal::new_in_scope(String::new(), root),
+            last_cost: Signal::new_in_scope(None, root),
+            chat_mode: Signal::new_in_scope(ChatMode::Plan, root),
+            plan_approval: Signal::new_in_scope(None, root),
+            input: Signal::new_in_scope(String::new(), root),
+        };
+        dioxus::core::Runtime::current().spawn(root, crate::session::run(st, chat, rx));
+        if let Some(id) = &agent.transcript {
+            chat.send(Cmd::Resume { id: id.clone() });
+        }
+        chat
+    }
+
+    pub fn send(&self, cmd: Cmd) {
+        let _ = self.tx.peek().send(cmd);
+    }
+
+    pub fn is(&self, agent_id: &str) -> bool {
+        *self.agent_id.peek() == agent_id
+    }
+
+    /// Waiting for the user to answer a permission request or approve a plan.
+    pub fn waiting(&self) -> bool {
+        !self.permissions.read().is_empty() || self.plan_approval.read().is_some()
+    }
+}
+
+/// The name of an agent added by hand; agents started by another agent get the name it gives.
+const AGENT_NAME: &str = "Agent";
+
+/// A session or agent to create; see `AppState::chat_requests`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatRequest {
+    NewSession { dir: PathBuf },
+    /// `task` is sent to the new agent as its first prompt. `activate` shows it in the chat.
+    NewAgent { session: String, name: Option<String>, task: Option<String>, activate: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,22 +307,24 @@ pub struct AppState {
     pub active_flow: Signal<Option<String>>,
     pub fit_request: Signal<u64>,
     pub cwd: Signal<PathBuf>,
-    pub items: Signal<Vec<ChatItem>>,
-    pub busy: Signal<bool>,
-    pub queued: Signal<Vec<Message>>,
-    pub permissions: Signal<Vec<PermissionRequest>>,
-    pub session_id: Signal<Option<String>>,
-    pub model: Signal<String>,
-    pub last_cost: Signal<Option<f64>>,
-    /// The chat's mode; every app start is in Plan.
-    pub chat_mode: Signal<ChatMode>,
-    pub plan_approval: Signal<Option<PlanApproval>>,
     pub repo_version: Signal<u64>,
-    pub chat_input: Signal<String>,
+    /// Every chat session with its agents, as saved. See `sessions`.
+    pub sessions: Signal<Vec<SavedSession>>,
+    /// The live chat of every agent in `sessions`.
+    pub chats: Signal<Vec<Chat>>,
+    /// The chat shown in the chat window; always set once the app has started.
+    pub active_chat: Signal<Option<Chat>>,
+    /// Sessions and agents to create. The main window's root creates them (`app::create_chats`)
+    /// so their signals and loops belong to the main window, even when the chat window asks.
+    pub chat_requests: Signal<Vec<ChatRequest>>,
+    /// The agent whose turn or job the graph tracks (see `begin_chat_turn`).
+    pub turn_owner: Signal<Option<String>>,
     pub tab: Signal<Tab>,
     pub open_file: Signal<Option<OpenFile>>,
     pub editor_error: Signal<Option<String>>,
     pub editor_load: Signal<(u64, bool)>,
+    /// Folder paths the user has opened in the Files tree; kept here so they stay open across tab switches.
+    pub files_open_dirs: Signal<HashSet<String>>,
 }
 
 impl AppState {
@@ -280,21 +363,17 @@ impl AppState {
             active_flow: Signal::new(None),
             fit_request: Signal::new(0),
             cwd: Signal::new(cwd),
-            items: Signal::new(Vec::new()),
-            busy: Signal::new(false),
-            queued: Signal::new(Vec::new()),
-            permissions: Signal::new(Vec::new()),
-            session_id: Signal::new(None),
-            model: Signal::new(String::new()),
-            last_cost: Signal::new(None),
-            chat_mode: Signal::new(ChatMode::Plan),
-            plan_approval: Signal::new(None),
             repo_version: Signal::new(0),
-            chat_input: Signal::new(String::new()),
+            sessions: Signal::new(sessions::load()),
+            chats: Signal::new(Vec::new()),
+            active_chat: Signal::new(None),
+            chat_requests: Signal::new(Vec::new()),
+            turn_owner: Signal::new(None),
             tab: Signal::new(Tab::Files),
             open_file: Signal::new(None),
             editor_error: Signal::new(None),
             editor_load: Signal::new((0, false)),
+            files_open_dirs: Signal::new(HashSet::new()),
         }
     }
 
@@ -545,7 +624,7 @@ impl AppState {
     }
 
     fn disk_source(&self) -> Source {
-        if *self.busy.peek() || self.job.peek().is_some() || self.turn_start.peek().is_some() {
+        if self.job.peek().is_some() || self.turn_start.peek().is_some() {
             Source::Workbench
         } else {
             Source::Outside
@@ -601,7 +680,7 @@ impl AppState {
     /// unless its size is locked.
     pub fn fade_chat(&mut self) {
         let layout = *self.layout.peek();
-        let waiting_for_answer = !self.permissions.peek().is_empty() || self.plan_approval.peek().is_some();
+        let waiting_for_answer = self.chat().waiting();
         if !layout.chat_locked && !waiting_for_answer {
             self.chat_focus.set(ChatFocus::Faded);
         }
@@ -882,8 +961,10 @@ impl AppState {
     /// can't run it (e.g. Full auto on an API provider, which only answers).
     pub fn set_provider(&mut self, provider: Provider) {
         self.update_provider_settings(|s| s.provider = provider);
-        if !provider.modes().contains(&self.chat_mode.peek()) {
-            self.chat_mode.set(ChatMode::Plan);
+        for mut chat in self.chats.peek().iter().copied() {
+            if !provider.modes().contains(&chat.chat_mode.peek()) {
+                chat.chat_mode.set(ChatMode::Plan);
+            }
         }
     }
 
@@ -904,20 +985,13 @@ impl AppState {
         projects.iter().find(|p| p.repo(&repo).is_some()).cloned()
     }
 
-    /// Every known agent (the ones found on the machine plus Workbench's own session) by the
-    /// project repository or worktree folder it runs in. Agents outside them are left out.
+    /// Every agent found running on the machine by the project repository or worktree folder
+    /// it runs in. Agents outside them are left out. Workbench's own agents are listed with
+    /// their chat sessions instead.
     pub fn agent_activity(&self) -> HashMap<PathBuf, Vec<AgentProc>> {
         let mut dirs: Vec<PathBuf> = self.projects.read().iter().flat_map(|p| p.repos.iter().map(|r| r.dir())).collect();
         dirs.extend(self.worktrees.read().values().flatten().map(|w| w.path.clone()));
-        let mut agents = self.agents.read().clone();
-        let kind = match self.provider_settings.read().provider {
-            Provider::ClaudeCode => AgentKind::Workbench,
-            Provider::Codex => AgentKind::Codex,
-            Provider::Vibe => AgentKind::Vibe,
-            api => AgentKind::Api(api),
-        };
-        agents.push(AgentProc { pid: 0, kind, cwd: self.cwd.read().clone(), working: *self.busy.read(), in_app: true });
-        activity::assign(&agents, &dirs)
+        activity::assign(&self.agents.read(), &dirs)
     }
 
     pub fn update_projects(&mut self, f: impl FnOnce(&mut Vec<Project>)) {
@@ -954,8 +1028,10 @@ impl AppState {
     }
 
     pub fn start_job(&mut self, kind: JobKind) -> ChatMode {
-        let mode = *self.chat_mode.peek();
+        let chat = self.chat();
+        let mode = *chat.chat_mode.peek();
         self.job.set(Some(Job { kind, mode, awaiting: false }));
+        self.turn_owner.set(Some(chat.agent_id.cloned()));
         mode
     }
 
@@ -976,10 +1052,12 @@ impl AppState {
         self.job.read().is_some_and(|j| j.awaiting)
     }
 
-    pub fn begin_chat_turn(&mut self) {
+    /// Starts tracking the graph edits of `agent_id`'s turn, unless another turn or job is tracked.
+    pub fn begin_chat_turn(&mut self, agent_id: &str) {
         if self.job.peek().is_some() || self.turn_start.peek().is_some() {
             return;
         }
+        self.turn_owner.set(Some(agent_id.to_string()));
         self.sync_workbench_from_disk();
         let g = self.graph.peek().clone();
         self.turn_start.set(Some(g));
@@ -1016,8 +1094,14 @@ impl AppState {
         }
     }
 
+    /// Whether the graph tracks this agent's turn or job.
+    pub fn owns_turn(&self, chat: &Chat) -> bool {
+        self.turn_owner.peek().as_deref().is_some_and(|id| chat.is(id))
+    }
+
     pub fn finish_job(&mut self, success: bool) {
         self.end_chat_turn(success);
+        self.turn_owner.set(None);
         let Some(job) = *self.job.peek() else { return };
         // Sync while the job is still set so its graph edits are credited to Workbench.
         self.sync_workbench_from_disk();
@@ -1037,10 +1121,149 @@ impl AppState {
     }
 
     pub fn append_to_input(&mut self, text: &str) {
-        let mut input = self.chat_input.write();
+        let mut chat = self.chat();
+        let mut input = chat.input.write();
         if !input.is_empty() && !input.ends_with('\n') {
             input.push('\n');
         }
         input.push_str(text);
+    }
+
+    /// The chat shown in the chat window.
+    pub fn chat(&self) -> Chat {
+        self.active_chat.read().expect("a chat is active once the app has started")
+    }
+
+    pub fn session(&self, id: &str) -> Option<SavedSession> {
+        self.sessions.read().iter().find(|s| s.id == id).cloned()
+    }
+
+    /// The live chats of a session's agents, in the session's order.
+    pub fn session_chats(&self, session_id: &str) -> Vec<Chat> {
+        self.chats.read().iter().copied().filter(|c| *c.session.peek() == session_id).collect()
+    }
+
+    pub fn sessions_in(&self, dir: &Path) -> Vec<SavedSession> {
+        self.sessions.read().iter().filter(|s| projects::same_dir(&s.dir, dir)).cloned().collect()
+    }
+
+    pub fn request_chat(&mut self, request: ChatRequest) {
+        self.chat_requests.write().push(request);
+    }
+
+    /// Shows a session's first agent in the chat and opens the session's folder.
+    pub fn open_session(&mut self, session_id: &str) {
+        let Some(chat) = self.session_chats(session_id).first().copied() else { return };
+        self.open_agent(chat);
+    }
+
+    /// Closes a session: stops its agents and removes it. Their transcripts stay on disk, so the
+    /// History menu can still resume them. When the chat showed it, it shows another session
+    /// in the open folder (or a new one).
+    pub fn close_session(&mut self, session_id: &str) {
+        let closing = self.session_chats(session_id);
+        for chat in &closing {
+            chat.send(Cmd::Close);
+        }
+        self.chats.write().retain(|c| !closing.contains(c));
+        self.sessions.write().retain(|s| s.id != session_id);
+        self.save_sessions();
+        if self.active_chat.peek().is_some_and(|c| closing.contains(&c)) {
+            self.active_chat.set(None);
+            self.show_chat_for_cwd();
+        }
+    }
+
+    pub fn rename_session(&mut self, session_id: &str, title: String) {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        if let Some(session) = self.sessions.write().iter_mut().find(|s| s.id == session_id) {
+            session.title = title;
+        }
+        self.save_sessions();
+    }
+
+    /// Shows an agent in the chat and opens its session's folder.
+    pub fn open_agent(&mut self, chat: Chat) {
+        self.active_chat.set(Some(chat));
+        crate::app::open_folder(*self, chat.dir.cloned());
+    }
+
+    fn save_sessions(&mut self) {
+        if let Err(e) = sessions::save(&self.sessions.peek()) {
+            self.workbench_error.set(Some(e));
+        }
+    }
+
+    /// Remembers the provider session of an agent's conversation, to resume it after a restart.
+    pub fn save_transcript(&mut self, agent_id: &str, transcript: Option<String>) {
+        let mut list = self.sessions.write();
+        let Some(agent) = list.iter_mut().flat_map(|s| s.agents.iter_mut()).find(|a| a.id == agent_id) else { return };
+        if agent.transcript == transcript {
+            return;
+        }
+        agent.transcript = transcript;
+        drop(list);
+        self.save_sessions();
+    }
+
+    /// Creates a session with one agent in `dir`. Call from the main window only (see `chat_requests`).
+    pub fn create_session(&mut self, dir: PathBuf) -> Chat {
+        // Named after the worktree's branch, like the worktree in the sidebar; else the folder.
+        let name = git::current_branch(&dir)
+            .or_else(|| dir.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "Session".into());
+        let agent = SavedAgent { id: sessions::new_id("agent"), name: AGENT_NAME.into(), transcript: None };
+        let session = SavedSession { id: sessions::new_id("session"), title: name, dir, agents: vec![agent.clone()] };
+        self.sessions.write().push(session.clone());
+        self.save_sessions();
+        let chat = Chat::launch(*self, &session, &agent);
+        self.chats.write().push(chat);
+        chat
+    }
+
+    /// Adds an agent to a session. Call from the main window only (see `chat_requests`).
+    pub fn create_agent(&mut self, session_id: &str, name: Option<String>) -> Option<Chat> {
+        let session = self.sessions.peek().iter().find(|s| s.id == session_id).cloned()?;
+        let name = name.unwrap_or_else(|| AGENT_NAME.into());
+        let agent = SavedAgent { id: sessions::new_id("agent"), name, transcript: None };
+        self.sessions.write().iter_mut().find(|s| s.id == session_id)?.agents.push(agent.clone());
+        self.save_sessions();
+        let chat = Chat::launch(*self, &session, &agent);
+        self.chats.write().push(chat);
+        Some(chat)
+    }
+
+    /// Starts the chats of every saved session and shows one in the open folder, creating a
+    /// session there when it has none. Called once, from the main window's root.
+    pub fn start_chats(&mut self) {
+        let saved = self.sessions.peek().clone();
+        let chats: Vec<Chat> = saved.iter().flat_map(|s| s.agents.iter().map(|a| Chat::launch(*self, s, a))).collect();
+        self.chats.set(chats);
+        self.show_chat_for_cwd();
+    }
+
+    /// Makes sure the chat shows a session of the open folder: keeps the current one when it is
+    /// there, otherwise shows the folder's latest session or creates one.
+    pub fn show_chat_for_cwd(&mut self) {
+        let cwd = self.cwd.peek().clone();
+        if self.active_chat.peek().is_some_and(|c| projects::same_dir(&c.dir.peek(), &cwd)) {
+            return;
+        }
+        let latest = self.sessions.peek().iter().rev().find(|s| projects::same_dir(&s.dir, &cwd)).map(|s| s.id.clone());
+        let first_agent = latest.and_then(|id| self.chats.peek().iter().copied().find(|c| *c.session.peek() == id));
+        let chat = match first_agent {
+            Some(chat) => chat,
+            None => {
+                let chat = self.create_session(cwd.clone());
+                if let Some(id) = crate::history::last_session(&cwd) {
+                    chat.send(Cmd::Resume { id });
+                }
+                chat
+            }
+        };
+        self.active_chat.set(Some(chat));
     }
 }

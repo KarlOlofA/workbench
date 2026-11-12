@@ -6,22 +6,19 @@
 //! An agent waiting for your input uses next to none.
 //!
 //! Only Linux is supported (it reads `/proc`); elsewhere the scan finds nothing.
-//! Workbench's own session is skipped here: the app knows its state directly.
+//! Workbench's own agents are skipped here: the app shows them with their chat sessions.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::logos::Logo;
-use crate::providers::Provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentKind {
     Workbench,
     Codex,
     Vibe,
-    /// Workbench's own session on an API provider: chat only, no process.
-    Api(Provider),
 }
 
 impl AgentKind {
@@ -30,32 +27,25 @@ impl AgentKind {
             AgentKind::Workbench => "Workbench",
             AgentKind::Codex => "Codex",
             AgentKind::Vibe => "Vibe",
-            AgentKind::Api(provider) => provider.label(),
         }
     }
 
     /// The logo of the company whose models the agent runs.
     pub fn logo(self) -> Logo {
         match self {
-            AgentKind::Workbench | AgentKind::Api(Provider::AnthropicApi) => Logo::Claude,
-            AgentKind::Codex | AgentKind::Api(Provider::OpenAiApi) => Logo::OpenAi,
-            AgentKind::Vibe | AgentKind::Api(Provider::MistralApi) => Logo::Mistral,
-            AgentKind::Api(Provider::OpenRouterApi) => Logo::OpenRouter,
-            // Workbench never reports a CLI provider as an API session.
-            AgentKind::Api(Provider::ClaudeCode | Provider::Codex | Provider::Vibe) => Logo::Claude,
+            AgentKind::Workbench => Logo::Claude,
+            AgentKind::Codex => Logo::OpenAi,
+            AgentKind::Vibe => Logo::Mistral,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentProc {
-    /// 0 for Workbench's own session.
     pub pid: u32,
     pub kind: AgentKind,
     pub cwd: PathBuf,
     pub working: bool,
-    /// Workbench's own session rather than one found on the machine.
-    pub in_app: bool,
 }
 
 /// CPU use (agent plus its commands) above this, in percent of one core, counts as working.
@@ -105,7 +95,7 @@ impl Scanner {
                     _ => false,
                 };
                 next.insert(pid, ticks);
-                AgentProc { pid, kind, cwd, working, in_app: false }
+                AgentProc { pid, kind, cwd, working }
             })
             .collect();
         self.last = next;
@@ -274,7 +264,7 @@ mod tests {
 
     #[test]
     fn assigns_agents_to_the_deepest_folder() {
-        let a = |cwd: &str| AgentProc { pid: 1, kind: AgentKind::Workbench, cwd: PathBuf::from(cwd), working: true, in_app: false };
+        let a = |cwd: &str| AgentProc { pid: 1, kind: AgentKind::Workbench, cwd: PathBuf::from(cwd), working: true };
         let dirs = vec![PathBuf::from("/nope/app"), PathBuf::from("/nope/app/.worktrees/x")];
         let got = assign(&[a("/nope/app/src"), a("/nope/app/.worktrees/x/lib"), a("/elsewhere")], &dirs);
         assert_eq!(got[&dirs[0]].len(), 1);

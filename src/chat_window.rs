@@ -12,8 +12,8 @@ use dioxus::desktop::tao::window::{ResizeDirection, WindowId};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder, WindowEvent, use_wry_event_handler, window};
 use dioxus::prelude::*;
 
-use crate::chat::ChatPane;
-use crate::state::{AppState, Cmd};
+use crate::chat::{ChatPane, ChatTabs};
+use crate::state::AppState;
 
 const LINUX: bool = cfg!(target_os = "linux");
 
@@ -30,7 +30,7 @@ fn config() -> Config {
 
 /// Opens and closes the chat window to follow `Layout::chat_detached`. Call once, from the
 /// main window's root component.
-pub fn use_chat_window(mut st: AppState, claude: Coroutine<Cmd>) {
+pub fn use_chat_window(mut st: AppState) {
     let main_id: WindowId = use_hook(|| window().window.id());
     let mut opening = use_signal(|| false);
 
@@ -40,7 +40,7 @@ pub fn use_chat_window(mut st: AppState, claude: Coroutine<Cmd>) {
         match (detached, open) {
             (true, None) if !*opening.peek() => {
                 opening.set(true);
-                let dom = VirtualDom::new(DetachedChat).with_root_context(st).with_root_context(claude);
+                let dom = VirtualDom::new(DetachedChat).with_root_context(st);
                 let pending = window().new_window(dom, config());
                 spawn(async move {
                     let ctx = pending.await;
@@ -89,8 +89,7 @@ const EDGES: [(ResizeDirection, &str); 8] = [
 #[component]
 fn DetachedChat() -> Element {
     let mut st = use_context::<AppState>();
-    let busy = *st.busy.read();
-    let cwd = st.cwd.read().display().to_string();
+    let cwd = st.chat().dir.read().display().to_string();
     let attach = move |_| st.set_layout(|l| l.chat_detached = false);
 
     rsx! {
@@ -110,7 +109,7 @@ fn DetachedChat() -> Element {
                 },
                 span { class: "chat-grip", "⠿" }
                 b { "Chat" }
-                if busy { span { class: "agent-dot working", "●" } }
+                ChatTabs {}
                 span { class: "cwd small-text", title: "{cwd}", "{cwd}" }
                 div { class: "spacer" }
                 button {

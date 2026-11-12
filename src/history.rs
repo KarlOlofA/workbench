@@ -41,27 +41,11 @@ fn transcript(cwd: &Path, id: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// The session a folder had before chat sessions were saved (in `sessions.json`). A folder's
+/// first chat session resumes it, so updating the app keeps the conversation.
 pub fn last_session(cwd: &Path) -> Option<String> {
     let map: HashMap<String, String> = config::load_json(LAST_FILE);
     map.get(&cwd.to_string_lossy().to_string()).filter(|id| transcript(cwd, id).is_some()).cloned()
-}
-
-pub fn remember(cwd: &Path, id: &str) -> Result<(), String> {
-    let key = cwd.to_string_lossy().to_string();
-    let mut map: HashMap<String, String> = config::load_json(LAST_FILE);
-    if map.get(&key).map(String::as_str) == Some(id) {
-        return Ok(());
-    }
-    map.insert(key, id.to_string());
-    config::save_json(LAST_FILE, &map)
-}
-
-pub fn forget(cwd: &Path) -> Result<(), String> {
-    let mut map: HashMap<String, String> = config::load_json(LAST_FILE);
-    if map.remove(&cwd.to_string_lossy().to_string()).is_some() {
-        config::save_json(LAST_FILE, &map)?;
-    }
-    Ok(())
 }
 
 fn is_noise(text: &str) -> bool {

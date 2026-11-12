@@ -4,6 +4,8 @@
 
 use dioxus::prelude::*;
 
+use crate::providers::Provider;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Logo {
     Claude,
@@ -13,6 +15,16 @@ pub enum Logo {
 }
 
 impl Logo {
+    /// The logo of the company whose models a provider runs.
+    pub fn of(provider: Provider) -> Logo {
+        match provider {
+            Provider::ClaudeCode | Provider::AnthropicApi => Logo::Claude,
+            Provider::Codex | Provider::OpenAiApi => Logo::OpenAi,
+            Provider::Vibe | Provider::MistralApi => Logo::Mistral,
+            Provider::OpenRouterApi => Logo::OpenRouter,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Logo::Claude => "Claude",
@@ -22,10 +34,11 @@ impl Logo {
         }
     }
 
-    /// The brand colour; OpenAI and OpenRouter use the text colour as their marks are black and white.
+    /// The brand colour (Claude orange, Mistral orange). OpenAI's and OpenRouter's marks are
+    /// black and white, so they use the text colour.
     fn color(self) -> &'static str {
         match self {
-            Logo::Claude => "#c8b8a4",
+            Logo::Claude => "#d97757",
             Logo::OpenAi | Logo::OpenRouter => "currentColor",
             Logo::Mistral => "#fa520f",
         }

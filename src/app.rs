@@ -7,9 +7,7 @@ use crate::chat;
 use crate::claude::ChatMode;
 use crate::git;
 use crate::history::{self, SessionInfo};
-use crate::providers::Provider;
-use crate::session;
-use crate::state::{AppState, Cmd, Tab, WorkbenchView};
+use crate::state::{AppState, ChatRequest, Cmd, Tab, WorkbenchView};
 use crate::update_view::UpdateMenu;
 use crate::workbench::{Body, ChatDock};
 
@@ -28,7 +26,8 @@ pub fn initial_cwd() -> PathBuf {
     }
 }
 
-pub fn open_folder(mut st: AppState, claude: Coroutine<Cmd>, dir: PathBuf) {
+/// Opens a folder's graph and files. The chat switches to a session in that folder (see `App`).
+pub fn open_folder(mut st: AppState, dir: PathBuf) {
     st.project_view.set(None);
     if !dir.is_dir() {
         st.workbench_error.set(Some(format!("{} is not a folder", dir.display())));
@@ -40,7 +39,6 @@ pub fn open_folder(mut st: AppState, claude: Coroutine<Cmd>, dir: PathBuf) {
     st.cwd.set(dir);
     st.open_file.set(None);
     st.tab.set(Tab::Files);
-    claude.send(Cmd::Restart { keep_session: false });
     st.bump_repo();
 }
 
@@ -98,9 +96,10 @@ pub fn App() -> Element {
             st.open(&rel);
         }
     });
-    let claude = use_coroutine(move |rx: UnboundedReceiver<Cmd>| session::run(st, rx));
+    use_hook(move || st.start_chats());
+    use_effect(move || create_requested_chats(st));
     use_hook(move || watch_activity(st));
-    crate::chat_window::use_chat_window(st, claude);
+    crate::chat_window::use_chat_window(st);
     // Pick up new or removed repositories, and worktrees made by git commands, straight away.
     use_effect(move || {
         let _ = st.projects.read();
@@ -109,12 +108,9 @@ pub fn App() -> Element {
     });
 
     use_effect(move || {
-        let cwd = st.cwd.read().clone();
+        let _ = st.cwd.read();
         st.load_workbench();
-        let uses_claude_code = st.provider_settings.peek().provider == Provider::ClaudeCode;
-        if uses_claude_code && let Some(id) = history::last_session(&cwd) {
-            claude.send(Cmd::Resume { id });
-        }
+        st.show_chat_for_cwd();
     });
 
     use_effect(move || {
@@ -133,22 +129,51 @@ pub fn App() -> Element {
     }
 }
 
+/// Creates the sessions and agents asked for in `AppState::chat_requests`. Runs in the main
+/// window, so their signals and session loops live as long as the app.
+fn create_requested_chats(mut st: AppState) {
+    if st.chat_requests.read().is_empty() {
+        return;
+    }
+    let requests = std::mem::take(&mut *st.chat_requests.write());
+    for request in requests {
+        match request {
+            ChatRequest::NewSession { dir } => {
+                let in_open_folder = crate::projects::same_dir(&dir, &st.cwd.peek());
+                let chat = st.create_session(dir);
+                if in_open_folder {
+                    st.active_chat.set(Some(chat));
+                }
+            }
+            ChatRequest::NewAgent { session, name, task, activate } => {
+                let Some(chat) = st.create_agent(&session, name) else { continue };
+                if let Some(text) = task {
+                    chat.send(Cmd::Prompt { label: "Task from the session".into(), text });
+                }
+                if activate {
+                    st.active_chat.set(Some(chat));
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn Header() -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     let cwd = st.cwd.read().display().to_string();
     let project = st.current_project();
     let is_repo = git::is_repo(&st.cwd.read());
-    let model = st.model.read().clone();
-    let mode = *st.chat_mode.read();
-    let cost = *st.last_cost.read();
+    let chat = st.chat();
+    let model = chat.model.read().clone();
+    let mode = *chat.chat_mode.read();
+    let cost = *chat.last_cost.read();
 
     let pick_folder = move |_| {
         spawn(async move {
             let start = st.cwd.peek().clone();
             if let Some(handle) = rfd::AsyncFileDialog::new().set_directory(start).pick_folder().await {
-                open_folder(st, claude, handle.path().to_path_buf());
+                open_folder(st, handle.path().to_path_buf());
             }
         });
     };
@@ -199,12 +224,10 @@ fn Header() -> Element {
             }
             HistoryMenu {}
             button {
+                title: "Start a new chat session in this folder",
                 onclick: move |_| {
-                    let cwd = st.cwd.peek().clone();
-                    if let Err(e) = history::forget(&cwd) {
-                        st.workbench_error.set(Some(e));
-                    }
-                    claude.send(Cmd::Restart { keep_session: false });
+                    let dir = st.cwd.peek().clone();
+                    st.request_chat(ChatRequest::NewSession { dir });
                 },
                 "New session"
             }
@@ -229,7 +252,7 @@ fn BranchMenu() -> Element {
     let mut error = use_signal(|| None::<String>);
     let _ = st.repo_version.read();
     let current = git::current_branch(&st.cwd.read()).unwrap_or_else(|| "?".into());
-    let busy = *st.busy.read();
+    let busy = *st.chat().busy.read();
     let is_open = *open.read();
     let is_working = *working.read();
 
@@ -265,13 +288,16 @@ fn BranchMenu() -> Element {
     };
 
     let mut pick = move |p: BranchPick| {
-        if *st.busy.peek() || *working.peek() {
+        if *st.chat().busy.peek() || *working.peek() {
             return;
         }
         working.set(true);
         error.set(None);
         let cwd = st.cwd.peek().clone();
+        // A new branch starts a new chat session.
+        let created = matches!(p, BranchPick::Create(_));
         spawn(async move {
+            let session_dir = cwd.clone();
             let r = tokio::task::spawn_blocking(move || match &p {
                 BranchPick::Switch(t) => git::switch_branch(&cwd, t),
                 BranchPick::Create(name) => git::create_branch(&cwd, name),
@@ -284,6 +310,9 @@ fn BranchMenu() -> Element {
                     open.set(false);
                     st.bump_repo();
                     st.reload_open_file_if_clean();
+                    if created {
+                        st.request_chat(ChatRequest::NewSession { dir: session_dir });
+                    }
                 }
                 Err(e) => error.set(Some(e)),
             }
@@ -397,12 +426,12 @@ fn BranchMenu() -> Element {
 #[component]
 fn HistoryMenu() -> Element {
     let st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
+    let chat = st.chat();
     let mut open = use_signal(|| false);
     let mut sessions = use_signal(|| None::<Vec<SessionInfo>>);
     let mut cursor = use_signal(|| 0usize);
-    let current = st.session_id.read().clone();
-    let busy = *st.busy.read();
+    let current = chat.session_id.read().clone();
+    let busy = *chat.busy.read();
     let is_open = *open.read();
 
     let mut toggle = move || {
@@ -413,7 +442,7 @@ fn HistoryMenu() -> Element {
         open.set(true);
         sessions.set(None);
         let cwd = st.cwd.peek().clone();
-        let current = st.session_id.peek().clone();
+        let current = chat.session_id.peek().clone();
         spawn(async move {
             let list = tokio::task::spawn_blocking(move || history::list(&cwd)).await.unwrap_or_default();
             let at = current.and_then(|c| list.iter().position(|s| s.id == c)).unwrap_or(0);
@@ -422,12 +451,12 @@ fn HistoryMenu() -> Element {
         });
     };
     let mut pick = move |id: String| {
-        if *st.busy.peek() {
+        if *chat.busy.peek() {
             return;
         }
         open.set(false);
-        if st.session_id.peek().as_deref() != Some(id.as_str()) {
-            claude.send(Cmd::Resume { id });
+        if chat.session_id.peek().as_deref() != Some(id.as_str()) {
+            chat.send(Cmd::Resume { id });
         }
     };
     let list = sessions.read().clone();

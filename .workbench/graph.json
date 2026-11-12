@@ -20,7 +20,7 @@
       "id": "app-root",
       "title": "App root & header",
       "kind": "ui",
-      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context and starts the Workbench session coroutine. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), the provider and model picker, model and cost badges, a warning badge in Full auto mode, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it. open_folder switches the working folder (used by the folder picker and the project view), and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
+      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context, starts the session loop of every saved agent and creates the sessions and agents other parts of the app ask for. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), the provider and model picker, model and cost badges, a warning badge in Full auto mode, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it, which also starts a new chat session. New session starts a chat session in the open folder. open_folder switches the working folder (used by the folder picker and the project view) and the chat to a session in it, creating one when the folder has none, and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
       "files": [
         "src/app.rs"
       ],
@@ -31,14 +31,15 @@
         "new-node",
         "project-view",
         "self-updater",
-        "llm-providers"
+        "llm-providers",
+        "chat-sessions"
       ]
     },
     {
       "id": "app-state",
       "title": "AppState (signals store)",
       "kind": "store",
-      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP connections and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), chat items, session id, model, cost, the chat mode and a plan waiting for approval, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Also defines the Cmd enum sent to the session loop.",
+      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP connections and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), the chat sessions with every agent's live Chat and which one the chat shows, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns of an agent in the open folder it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Only one agent's turn or job is tracked at a time. Also defines the Cmd enum sent to the session loop.",
       "files": [
         "src/state.rs",
         "src/config.rs"
@@ -50,14 +51,15 @@
         "project-files",
         "external-references",
         "ghost-branches",
-        "node-history"
+        "node-history",
+        "chat-sessions"
       ]
     },
     {
       "id": "session-loop",
       "title": "Workbench session loop",
       "kind": "service",
-      "description": "Long-running coroutine that receives Cmd values (Send, Prompt, Interrupt, Restart) and owns the live agent. With Workbench it spawns the agent process lazily, respawns it when the rules version changes, and resumes the stored session id. A generation counter drops events from killed processes. Streamed events become chat items; file-touching tool results bump repo_version and reload the open file, and Done finishes the current graph job. Every delivered message outside a job starts a chat turn in app-state, which Done settles against the baseline. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench sessions are remembered for the session history.",
+      "description": "One long-running loop per agent that receives that agent's Cmd values (Send, Prompt, Interrupt, Restart, Resume, Close; Close stops the agent and ends the loop) and owns its live agent, so agents in a session work at the same time. With Workbench it spawns the agent process lazily in the agent's folder, respawns it when the rules version changes, and resumes the agent's stored session id. A generation counter drops events from killed processes. Streamed events become the agent's chat items; when the agent works in the open folder, file-touching tool results bump repo_version and reload the open file, and Done settles its chat turn or graph job against the baseline. A reply that ends with spawn-agent blocks starts those agents in the same session with their tasks. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench session ids are saved for resuming.",
       "files": [
         "src/session.rs",
         "src/history.rs"
@@ -66,7 +68,8 @@
         "agent-layer",
         "prompt-builder",
         "app-state",
-        "mcp-connections"
+        "mcp-connections",
+        "chat-sessions"
       ]
     },
     {
@@ -95,7 +98,7 @@
       "id": "prompt-builder",
       "title": "Prompt builder",
       "kind": "service",
-      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories.",
+      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply.",
       "files": [
         "src/prompts.rs"
       ],
@@ -294,7 +297,7 @@
       "id": "chat-pane",
       "title": "Chat pane",
       "kind": "screen",
-      "description": "Conversation view showing user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy.",
+      "description": "Conversation view of the agent the chat shows: user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy. ChatTabs, in the chat's top bar next to “Chat”, shows the session's title and one tab per agent with its provider's logo (and a dot while it works and ! while it waits for an answer); clicking a tab switches the chat to that agent and + adds an agent.",
       "files": [
         "src/chat.rs",
         "src/markdown.rs"
@@ -302,14 +305,15 @@
       "links": [
         "app-state",
         "session-loop",
-        "run-mode"
+        "run-mode",
+        "chat-sessions"
       ]
     },
     {
       "id": "code-pane",
       "title": "Code pane (Files / Editor / Diff)",
       "kind": "screen",
-      "description": "Right-hand tabs. Files lists tracked and untracked files with their git status. Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Workbench button that pastes it into the chat input. Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module, the MCP tab hosts the MCP module, and the Providers tab hosts the LLM providers module.",
+      "description": "Right-hand tabs. Files lists changed files with their git status, then all files as the project's folder tree with folders that open and close on click (open folders are kept in AppState, and typing in the filter opens every folder with a match). Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Workbench button that pastes it into the chat input. Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module, the MCP tab hosts the MCP module, and the Providers tab hosts the LLM providers module.",
       "files": [
         "src/code.rs",
         "src/highlight.rs"
@@ -584,7 +588,7 @@
       "id": "project-sidebar",
       "title": "Projects sidebar",
       "kind": "component",
-      "description": "Collapsible list on the left of every project with its repositories and worktrees, read from the projects saved in ~/.config/workbench/projects.json. Under each project it lists every agent running in it, with its provider's logo, the folder it runs in and whether it is working or waiting for a prompt. Clicking a project shows its project view; clicking a repository, worktree or agent opens that folder. It can create a project and add a repository to a project.",
+      "description": "Collapsible list on the left of every project with its repositories and worktrees, read from the projects saved in ~/.config/workbench/projects.json. Under each repository and worktree it lists its chat sessions, with a dot while one of their agents works and a ✕ on hover that closes the session; clicking the name of the open session renames it. Under each session it lists its agents with their provider's logo and name and their state (working, waiting, or needs you when a permission or plan waits for an answer). Clicking a session or an agent opens its folder and shows it in the chat. Under each project it also lists coding agents running outside Workbench, with their provider's logo, the folder they run in and whether they are working or waiting for a prompt. Clicking a project shows its project view; clicking a repository, worktree or agent opens that folder. It can create a project and add a repository to a project.",
       "files": [
         "src/workbench.rs",
         "src/projects.rs",
@@ -595,14 +599,16 @@
         "app-state",
         "app-root",
         "project-view",
-        "agent-activity"
+        "agent-activity",
+        "chat-sessions",
+        "llm-providers"
       ]
     },
     {
       "id": "chat-dock",
       "title": "Floating chat dock",
       "kind": "component",
-      "description": "The chat floats over the graph, code or rules view and can be anchored to the top, bottom, left or right. Top and bottom chats are centred and get their height from the focus: a press in the graph fades the chat to a peek at the latest reply, hovering shows it again and clicking it shows more of the conversation. The Expand toggle makes it larger and the Lock toggle stops graph clicks from fading it; left and right chats fill the height.",
+      "description": "The chat floats over the graph, code or rules view and can be anchored to the top, bottom, left or right. Top and bottom chats are centred and get their height from the focus: a press in the graph fades the chat to a peek at the latest reply, hovering shows it again and clicking it shows more of the conversation. The Expand toggle makes it larger and the Lock toggle stops graph clicks from fading it; left and right chats fill the height. Its top bar holds the agent tabs of the chat session it shows.",
       "files": [
         "src/workbench.rs",
         "src/state.rs",
@@ -617,7 +623,7 @@
       "id": "agent-activity",
       "title": "Agent activity",
       "kind": "service",
-      "description": "Finds the coding agents (Workbench Code, Codex, Vibe) running on this machine by reading /proc, which folder each runs in, and whether it is working (using CPU) or waiting for a prompt. Workbench's own session is added with the provider it uses, and every agent is given to the project repository or worktree it runs in. Each agent kind maps to its LLM company's logo (Workbench, OpenAI, Mistral, OpenRouter), drawn from Simple Icons path data.",
+      "description": "Finds the coding agents (Workbench Code, Codex, Vibe) running on this machine outside Workbench by reading /proc, which folder each runs in, and whether it is working (using CPU) or waiting for a prompt. Every agent is given to the project repository or worktree it runs in; Workbench's own agents are shown with their chat sessions instead. Each agent kind and each provider maps to its LLM company's logo (Claude, OpenAI, Mistral, OpenRouter), drawn from Simple Icons path data. The worktree list in the project view can add a worktree, which also starts a new chat session in it.",
       "files": [
         "src/activity.rs",
         "src/worktree_view.rs",
@@ -626,7 +632,8 @@
       ],
       "links": [
         "app-state",
-        "llm-providers"
+        "llm-providers",
+        "chat-sessions"
       ]
     },
     {
@@ -641,6 +648,19 @@
         "src/main.rs"
       ],
       "links": []
+    },
+    {
+      "id": "chat-sessions",
+      "title": "Chat sessions & agents",
+      "kind": "store",
+      "description": "Chat sessions, each bound to one folder (a repository checkout or a worktree) and holding one or more agents. A new session is named after the folder's checked-out branch, like its worktree in the sidebar (or the folder name without one), and can be renamed. Agents added by hand are called Agent; agents started by another agent get the name it gives. Closing a session stops its agents and removes it; their transcripts stay on disk for the History menu. Each agent is its own conversation with its own agent process and session loop; its live state (messages, busy, queued messages, permissions, plan, mode, model, cost, input) is a Chat in app-state. Sessions, agent names and each agent's provider session id are saved in ~/.config/workbench/chat_sessions.json, so the conversations resume after a restart; a folder's first session resumes the conversation it had before sessions existed. Creating a worktree or a branch, or pressing New session, starts a new session, and agents are added with the chat's + tab or started by another agent.",
+      "files": [
+        "src/sessions.rs",
+        "src/state.rs"
+      ],
+      "links": [
+        "session-loop"
+      ]
     }
   ],
   "flows": [

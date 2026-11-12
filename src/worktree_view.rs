@@ -10,7 +10,7 @@ use crate::app::{open_folder, refresh_worktrees};
 use crate::git::{self, Worktree};
 use crate::logos::LogoIcon;
 use crate::projects::same_dir;
-use crate::state::{AppState, Cmd};
+use crate::state::{AppState, ChatRequest};
 
 /// The worktrees of a project repository, without the checkout the project points at
 /// (that one is the repository itself).
@@ -46,7 +46,7 @@ pub fn AgentDot(agents: Vec<AgentProc>) -> Element {
 
 fn describe(a: &AgentProc) -> String {
     let state = if a.working { "working" } else { "idle" };
-    if a.in_app { format!("{} (Workbench) · {state}", a.kind.label()) } else { format!("{} · {state} · pid {}", a.kind.label(), a.pid) }
+    format!("{} · {state} · pid {}", a.kind.label(), a.pid)
 }
 
 /// One chip per agent, saying what it is and whether it's working.
@@ -56,12 +56,11 @@ pub fn AgentChips(agents: Vec<AgentProc>) -> Element {
         div { class: "chips",
             for a in agents {
                 span {
-                    key: "{a.pid}-{a.in_app}",
+                    key: "{a.pid}",
                     class: if a.working { "chip agent working" } else { "chip agent" },
-                    title: if a.in_app { "Workbench's own session".to_string() } else { format!("Running outside Workbench, pid {}. Working means it or its commands are using CPU.", a.pid) },
+                    title: "Running outside Workbench, pid {a.pid}. Working means it or its commands are using CPU.",
                     LogoIcon { logo: a.kind.logo() }
                     "{a.kind.label()}"
-                    if a.in_app { " (Workbench)" }
                     span { class: "muted", if a.working { " · working" } else { " · idle" } }
                 }
             }
@@ -72,8 +71,7 @@ pub fn AgentChips(agents: Vec<AgentProc>) -> Element {
 /// The worktrees of one project repository, with their agents, and a form to add one.
 #[component]
 pub fn WorktreeList(repo_path: String) -> Element {
-    let st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
+    let mut st = use_context::<AppState>();
     let mut branch = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
     let mut working = use_signal(|| false);
@@ -90,6 +88,7 @@ pub fn WorktreeList(repo_path: String) -> Element {
         let Some(b) = branch.peek().clone() else { return };
         let path = git::default_worktree_path(&main_dir, &b);
         let repo = create_repo.clone();
+        let session_dir = path.clone();
         working.set(true);
         error.set(None);
         spawn(async move {
@@ -98,6 +97,8 @@ pub fn WorktreeList(repo_path: String) -> Element {
             match r {
                 Ok(()) => {
                     branch.set(None);
+                    // A new worktree starts a new chat session in it.
+                    st.request_chat(ChatRequest::NewSession { dir: session_dir });
                     refresh_worktrees(st).await;
                 }
                 Err(e) => error.set(Some(e)),
@@ -138,7 +139,7 @@ pub fn WorktreeList(repo_path: String) -> Element {
                                                 class: "small",
                                                 disabled: w.prunable,
                                                 title: "Open this worktree's graph",
-                                                onclick: move |_| open_folder(st, claude, dir.clone()),
+                                                onclick: move |_| open_folder(st, dir.clone()),
                                                 "Open"
                                             }
                                         }

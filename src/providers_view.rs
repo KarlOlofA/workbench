@@ -9,7 +9,6 @@ use crate::state::{AppState, Cmd};
 #[component]
 pub fn ProviderPicker() -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     let settings = st.provider_settings.read().clone();
     let provider = settings.provider;
     let model = settings.model(provider);
@@ -24,7 +23,7 @@ pub fn ProviderPicker() -> Element {
                 let next = Provider::from_id(&id);
                 st.set_provider(next);
                 // Sessions can't move between providers, so switching starts a new one.
-                claude.send(Cmd::Restart { keep_session: false });
+                st.chat().send(Cmd::Restart { keep_session: false });
             },
         }
         ComboBox {
@@ -37,7 +36,7 @@ pub fn ProviderPicker() -> Element {
                 st.update_provider_settings(|s| {
                     s.models.insert(provider.id().to_string(), value);
                 });
-                claude.send(Cmd::Restart { keep_session: true });
+                st.chat().send(Cmd::Restart { keep_session: true });
             },
         }
     }
@@ -67,7 +66,6 @@ pub fn ProvidersView() -> Element {
 #[component]
 fn ProviderCard(provider: Provider, active: bool) -> Element {
     let mut st = use_context::<AppState>();
-    let claude = use_coroutine_handle::<Cmd>();
     let mut loading = use_signal(|| false);
     let mut load_error = use_signal(|| None::<String>);
     let settings = st.provider_settings.read().clone();
@@ -102,7 +100,7 @@ fn ProviderCard(provider: Provider, active: bool) -> Element {
                         class: "small",
                         onclick: move |_| {
                             st.set_provider(provider);
-                            claude.send(Cmd::Restart { keep_session: false });
+                            st.chat().send(Cmd::Restart { keep_session: false });
                         },
                         "Use"
                     }
