@@ -12,7 +12,7 @@ use crate::activity::AgentProc;
 use crate::app::open_folder;
 use crate::logos::{Logo, LogoIcon};
 use crate::projects::Project;
-use crate::chat::{self, ChatPane, ChatTabs};
+use crate::chat::{self, ChatPane, ChatTabs, NewSessionButton};
 use crate::code::CodePane;
 use crate::graph_view::GraphTab;
 use crate::project_view::{ProjectView, create_project, pick_repo};
@@ -179,8 +179,8 @@ fn ProjectSidebar() -> Element {
 #[component]
 fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
     let mut st = use_context::<AppState>();
-    let active_chat = st.chat();
-    let active = active_chat.session.cloned();
+    let active_chat = *st.active_chat.read();
+    let active = active_chat.map(|c| c.session.cloned()).unwrap_or_default();
     // Every agent runs on the provider picked in the header.
     let provider = st.provider_settings.read().provider;
     // The session being renamed and the name typed so far.
@@ -190,8 +190,17 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
             st.rename_session(&id, title);
         }
     };
+    let sessions = st.sessions_in(&dir);
+    let nested = if in_worktree { "in-worktree" } else { "" };
+    if sessions.is_empty() {
+        return rsx! {
+            li { class: "sidebar-session sidebar-no-session {nested}",
+                NewSessionButton { dir: Some(dir.clone()) }
+            }
+        };
+    }
     rsx! {
-        for session in st.sessions_in(&dir) {
+        for session in sessions {
             {
                 let chats = st.session_chats(&session.id);
                 let working = chats.iter().any(|c| *c.busy.read());
@@ -202,7 +211,6 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                 let draft = renaming.read().as_ref().filter(|(r, _)| *r == session.id).map(|(_, t)| t.clone());
                 let close_tip = if working { "Close this session, stopping its working agents" } else { "Close this session" };
                 let current = if is_open { "current" } else { "" };
-                let nested = if in_worktree { "in-worktree" } else { "" };
                 rsx! {
                     li {
                         key: "{session.id}",
@@ -266,7 +274,7 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                                 } else {
                                     ("waiting", "", "Waiting for a prompt")
                                 };
-                                let current = if chat == active_chat { "current" } else { "" };
+                                let current = if Some(chat) == active_chat { "current" } else { "" };
                                 rsx! {
                                     li {
                                         key: "{agent.id}",
@@ -503,7 +511,14 @@ pub fn ChatDock() -> Element {
     let mut el = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let mut drag = use_signal(|| None::<ChatDrag>);
     let layout = *st.layout.read();
-    let chat = st.chat();
+    let Some(chat) = *st.active_chat.read() else {
+        return rsx! {
+            div { class: "chat-detached-pill",
+                span { "No chat session in this folder" }
+                NewSessionButton {}
+            }
+        };
+    };
     let focus = if chat.waiting() { ChatFocus::Active } else { *st.chat_focus.read() };
     let peek = latest_reply(&chat.items.read());
     let busy = *chat.busy.read();

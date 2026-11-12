@@ -12,7 +12,7 @@ use dioxus::desktop::tao::window::{ResizeDirection, WindowId};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder, WindowEvent, use_wry_event_handler, window};
 use dioxus::prelude::*;
 
-use crate::chat::{ChatPane, ChatTabs};
+use crate::chat::{ChatPane, ChatTabs, NewSessionButton};
 use crate::state::AppState;
 
 const LINUX: bool = cfg!(target_os = "linux");
@@ -89,7 +89,7 @@ const EDGES: [(ResizeDirection, &str); 8] = [
 #[component]
 fn DetachedChat() -> Element {
     let mut st = use_context::<AppState>();
-    let cwd = st.chat().dir.read().display().to_string();
+    let cwd = (*st.active_chat.read()).map(|c| c.dir.read().display().to_string()).unwrap_or_default();
     let attach = move |_| st.set_layout(|l| l.chat_detached = false);
 
     rsx! {
@@ -109,7 +109,7 @@ fn DetachedChat() -> Element {
                 },
                 span { class: "chat-grip", "⠿" }
                 b { "Chat" }
-                ChatTabs {}
+                if st.has_chat() { ChatTabs {} }
                 span { class: "cwd small-text", title: "{cwd}", "{cwd}" }
                 div { class: "spacer" }
                 button {
@@ -136,7 +136,11 @@ fn DetachedChat() -> Element {
                     }
                 }
             }
-            ChatPane {}
+            if st.has_chat() {
+                ChatPane {}
+            } else {
+                div { class: "empty", "No chat session in this folder " NewSessionButton {} }
+            }
             if LINUX {
                 for (dir, name) in EDGES {
                     div {

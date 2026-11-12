@@ -5,6 +5,12 @@
       "title": "",
       "body": "- We want to write as little code as possible to makedebugging easier.\n- We want to write explicit code that explains itself.",
       "enabled": true
+    },
+    {
+      "id": "r2",
+      "title": "No unsafe Rust",
+      "body": "- Never use `unsafe` in Rust code. `#![forbid(unsafe_code)]` in src/main.rs enforces it, so don't remove it.\n- When something seems to need `unsafe` (for example `std::env::set_var` in tests), change the code instead, for example by passing the value in as a parameter.",
+      "enabled": true
     }
   ]
 }

@@ -1,3 +1,6 @@
+// Workbench is written in safe Rust only: the compiler rejects any `unsafe` block.
+#![forbid(unsafe_code)]
+
 mod activity;
 mod agent;
 mod api_chat;
@@ -21,6 +24,8 @@ mod history;
 mod logos;
 mod markdown;
 mod mcp;
+mod mcp_manager;
+mod mcp_oauth;
 mod mcp_view;
 mod node_history;
 mod platform;

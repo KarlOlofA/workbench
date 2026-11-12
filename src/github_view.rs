@@ -342,7 +342,7 @@ fn PrDetailView(number: u64) -> Element {
     let ask_claude = move |_| {
         let repo = ctx.repo.peek().clone();
         let text = prompts::pr_review(repo.as_deref(), number, &title);
-        st.chat().send(Cmd::Prompt { label: format!("Review PR #{number}"), text });
+        st.chat_or_new().send(Cmd::Prompt { label: format!("Review PR #{number}"), text });
     };
 
     let diff_view = match diff.read().clone() {
@@ -410,7 +410,7 @@ fn PrDetailView(number: u64) -> Element {
             h4 { class: "gh-section", "Review" }
             div { class: "inspector-actions",
                 button {
-                    disabled: *st.chat().busy.read(),
+                    disabled: st.chat_busy(),
                     title: "Let Workbench read the PR and its diff and report back in the chat. Nothing is posted.",
                     onclick: ask_claude,
                     "Ask Workbench to review"
@@ -539,7 +539,7 @@ fn NewPrTab() -> Element {
              Read `git log {draft_base}..HEAD` and `git diff {draft_base}...HEAD`, and use the architecture graph in `.workbench/graph.json` to explain which parts of the system change. \
              Reply with the title on the first line, then the description in markdown (summary, notable changes, how to test). Do not change any files and do not run gh."
         );
-        st.chat().send(Cmd::Prompt { label: "Draft a PR description".into(), text });
+        st.chat_or_new().send(Cmd::Prompt { label: "Draft a PR description".into(), text });
     };
 
     rsx! {
@@ -577,7 +577,7 @@ fn NewPrTab() -> Element {
                 }
                 div { class: "spacer" }
                 button {
-                    disabled: *st.chat().busy.read() || branch.is_empty(),
+                    disabled: st.chat_busy() || branch.is_empty(),
                     title: "Workbench writes a title and description from the branch's commits; copy them from the chat",
                     onclick: ask_claude,
                     "Draft with Workbench"

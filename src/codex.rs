@@ -33,7 +33,7 @@ pub fn configure(cmd: &mut Command, opts: &TurnOptions) {
     if !opts.system_prompt.is_empty() {
         cmd.arg("-c").arg(format!("developer_instructions={}", toml_value(&json!(opts.system_prompt))));
     }
-    for server in opts.mcp_servers.iter().filter(|s| s.is_usable()) {
+    for server in crate::mcp::active(&opts.mcp_servers) {
         cmd.arg("-c").arg(format!("mcp_servers.{}={}", toml_value(&json!(server.name.trim())), toml_value(&mcp_entry(server))));
     }
     if let Some(id) = &opts.resume {

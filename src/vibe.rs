@@ -30,7 +30,7 @@ pub fn configure(cmd: &mut Command, opts: &TurnOptions) {
     if !opts.model.trim().is_empty() {
         cmd.env("VIBE_ACTIVE_MODEL", opts.model.trim());
     }
-    let servers: Vec<Value> = opts.mcp_servers.iter().filter(|s| s.is_usable()).map(mcp_entry).collect();
+    let servers: Vec<Value> = crate::mcp::active(&opts.mcp_servers).into_iter().map(mcp_entry).collect();
     if !servers.is_empty() {
         cmd.env("VIBE_MCP_SERVERS", Value::Array(servers).to_string());
     }

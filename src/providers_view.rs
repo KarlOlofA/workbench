@@ -23,7 +23,9 @@ pub fn ProviderPicker() -> Element {
                 let next = Provider::from_id(&id);
                 st.set_provider(next);
                 // Sessions can't move between providers, so switching starts a new one.
-                st.chat().send(Cmd::Restart { keep_session: false });
+                if let Some(chat) = *st.active_chat.peek() {
+                    chat.send(Cmd::Restart { keep_session: false });
+                }
             },
         }
         ComboBox {
@@ -36,7 +38,9 @@ pub fn ProviderPicker() -> Element {
                 st.update_provider_settings(|s| {
                     s.models.insert(provider.id().to_string(), value);
                 });
-                st.chat().send(Cmd::Restart { keep_session: true });
+                if let Some(chat) = *st.active_chat.peek() {
+                    chat.send(Cmd::Restart { keep_session: true });
+                }
             },
         }
     }
@@ -51,7 +55,7 @@ pub fn ProvidersView() -> Element {
         div { class: "rules",
             div { class: "rules-intro muted small-text",
                 "CLI providers (Workbench, Codex, Vibe) are agents: they edit files, run commands and use your MCP servers. "
-                "API providers only chat: they can't change the project, so graph commits and other code changes need a CLI provider. "
+                "API providers can call the tools of your MCP servers (see the MCP tab), but can't change the project themselves, so graph commits and other code changes need a CLI provider. "
                 "Settings and keys are stored in your user config, not in the project. An API key in the environment wins over one typed here."
             }
             div { class: "rules-list",
@@ -100,7 +104,9 @@ fn ProviderCard(provider: Provider, active: bool) -> Element {
                         class: "small",
                         onclick: move |_| {
                             st.set_provider(provider);
-                            st.chat().send(Cmd::Restart { keep_session: false });
+                            if let Some(chat) = *st.active_chat.peek() {
+                                chat.send(Cmd::Restart { keep_session: false });
+                            }
                         },
                         "Use"
                     }

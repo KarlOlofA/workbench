@@ -41,7 +41,7 @@ pub fn UpdateMenu() -> Element {
         return rsx! {};
     };
     let current = phase.read().clone();
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let is_open = *open.read();
     let n = info.behind_by;
     let plural = if n == 1 { "" } else { "s" };
@@ -74,7 +74,7 @@ pub fn UpdateMenu() -> Element {
     };
 
     let restart = move |_| {
-        if *st.chat().busy.peek() {
+        if st.chat_busy() {
             return;
         }
         let Phase::Ready(dir) = phase.peek().clone() else { return };

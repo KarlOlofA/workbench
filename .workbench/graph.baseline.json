@@ -20,7 +20,7 @@
       "id": "app-root",
       "title": "App root & header",
       "kind": "ui",
-      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context, starts the session loop of every saved agent and creates the sessions and agents other parts of the app ask for. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), the provider and model picker, model and cost badges, a warning badge in Full auto mode, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it, which also starts a new chat session. New session starts a chat session in the open folder. open_folder switches the working folder (used by the folder picker and the project view) and the chat to a session in it, creating one when the folder has none, and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
+      "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context, starts the session loop of every saved agent and creates the sessions and agents other parts of the app ask for. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), the provider and model picker, model and cost badges, a warning badge in Full auto mode, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it, which also starts a new chat session. New session starts a chat session in the open folder. open_folder switches the working folder (used by the folder picker and the project view) and the chat to a session in it, or to no chat when the folder has none, and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
       "files": [
         "src/app.rs"
       ],
@@ -39,7 +39,7 @@
       "id": "app-state",
       "title": "AppState (signals store)",
       "kind": "store",
-      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP connections and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), the chat sessions with every agent's live Chat and which one the chat shows, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns of an agent in the open folder it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Only one agent's turn or job is tracked at a time. Also defines the Cmd enum sent to the session loop.",
+      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP servers (the user's and the project's) and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), the chat sessions with every agent's live Chat and which one the chat shows, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns of an agent in the open folder it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Only one agent's turn or job is tracked at a time. Also defines the Cmd enum sent to the session loop.",
       "files": [
         "src/state.rs",
         "src/config.rs"
@@ -297,7 +297,7 @@
       "id": "chat-pane",
       "title": "Chat pane",
       "kind": "screen",
-      "description": "Conversation view of the agent the chat shows: user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy. ChatTabs, in the chat's top bar next to “Chat”, shows the session's title and one tab per agent with its provider's logo (and a dot while it works and ! while it waits for an answer); clicking a tab switches the chat to that agent and + adds an agent.",
+      "description": "Conversation view of the agent the chat shows: user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy. ChatTabs, in the chat's top bar next to “Chat”, shows the session's title and one tab per agent with its provider's logo (and a dot while it works and ! while it waits for an answer); clicking a tab switches the chat to that agent, hovering it shows an ✕ on its left that closes the agent (closing the last one closes the session), and + adds an agent.",
       "files": [
         "src/chat.rs",
         "src/markdown.rs"
@@ -536,14 +536,17 @@
       "id": "mcp-connections",
       "title": "MCP connections",
       "kind": "module",
-      "description": "The Code pane's MCP tab and the MCP config passed to the agent CLI in use. The user manages MCP server connections in the tab, and every enabled one goes to Workbench Code (--mcp-config), Codex (-c mcp_servers) or Vibe (VIBE_MCP_SERVERS) so the agent can call their tools. Workbench's reported connection status is shown back in the tab.",
+      "description": "The Code pane's MCP tab and the MCP servers every provider can call. The user manages MCP servers at two levels in the tab: their own servers, used in every project, and the project's servers. Every active one goes to Workbench Code (--mcp-config), Codex (-c mcp_servers) or Vibe (VIBE_MCP_SERVERS), and the API providers call them through Workbench's own MCP manager. The reported connection status is shown back in the tab. Remote servers that use OAuth (such as Linear) are signed in from the tab, and each turn passes their token on as a header.",
       "files": [
+        "src/api_chat.rs",
         "src/code.rs",
-        "src/mcp_view.rs",
-        "src/mcp.rs",
-        "src/session.rs",
         "src/codex.rs",
-        "src/vibe.rs"
+        "src/mcp.rs",
+        "src/mcp_manager.rs",
+        "src/mcp_view.rs",
+        "src/session.rs",
+        "src/vibe.rs",
+        "src/mcp_oauth.rs"
       ],
       "links": [
         "app-state",
@@ -555,7 +558,7 @@
       "id": "agent-layer",
       "title": "Agent layer",
       "kind": "service",
-      "description": "One interface over every LLM provider for the session loop. Workbench runs as the long-lived agent process; every other provider runs one turn per message, either a fresh Codex or Vibe process that resumes the previous session or one API request with the conversation so far. All of them report back as the same chat events. Only Workbench can be interrupted mid-turn or ask for permissions; other turns are stopped by killing them.",
+      "description": "One interface over every LLM provider for the session loop. Workbench runs as the long-lived agent process; every other provider runs one turn per message, either a fresh Codex or Vibe process that resumes the previous session or one API request with the conversation so far, plus one more per round of MCP tool calls the model makes. All of them report back as the same chat events. Only Workbench can be interrupted mid-turn or ask for permissions; other turns are stopped by killing them.",
       "files": [
         "src/agent.rs"
       ],
@@ -588,7 +591,7 @@
       "id": "project-sidebar",
       "title": "Projects sidebar",
       "kind": "component",
-      "description": "Collapsible list on the left of every project with its repositories and worktrees, read from the projects saved in ~/.config/workbench/projects.json. Under each repository and worktree it lists its chat sessions, with a dot while one of their agents works and a ✕ on hover that closes the session; clicking the name of the open session renames it. Under each session it lists its agents with their provider's logo and name and their state (working, waiting, or needs you when a permission or plan waits for an answer). Clicking a session or an agent opens its folder and shows it in the chat. Under each project it also lists coding agents running outside Workbench, with their provider's logo, the folder they run in and whether they are working or waiting for a prompt. Clicking a project shows its project view; clicking a repository, worktree or agent opens that folder. It can create a project and add a repository to a project.",
+      "description": "Collapsible list on the left of every project with its repositories and worktrees, read from the projects saved in ~/.config/workbench/projects.json. Under each repository and worktree it lists its chat sessions, with a dot while one of their agents works and a ✕ on hover that closes the session; clicking the name of the open session renames it. Any session can be closed, and a folder without sessions shows a New session button instead. Under each session it lists its agents with their provider's logo and name and their state (working, waiting, or needs you when a permission or plan waits for an answer). Clicking a session or an agent opens its folder and shows it in the chat. Under each project it also lists coding agents running outside Workbench, with their provider's logo, the folder they run in and whether they are working or waiting for a prompt. Clicking a project shows its project view; clicking a repository, worktree or agent opens that folder. It can create a project and add a repository to a project.",
       "files": [
         "src/workbench.rs",
         "src/projects.rs",
@@ -608,7 +611,7 @@
       "id": "chat-dock",
       "title": "Floating chat dock",
       "kind": "component",
-      "description": "The chat floats over the graph, code or rules view and can be anchored to the top, bottom, left or right. Top and bottom chats are centred and get their height from the focus: a press in the graph fades the chat to a peek at the latest reply, hovering shows it again and clicking it shows more of the conversation. The Expand toggle makes it larger and the Lock toggle stops graph clicks from fading it; left and right chats fill the height. Its top bar holds the agent tabs of the chat session it shows.",
+      "description": "The chat floats over the graph, code or rules view and can be anchored to the top, bottom, left or right. Top and bottom chats are centred and get their height from the focus: a press in the graph fades the chat to a peek at the latest reply, hovering shows it again and clicking it shows more of the conversation. The Expand toggle makes it larger and the Lock toggle stops graph clicks from fading it; left and right chats fill the height. Its top bar holds the agent tabs of the chat session it shows; when the open folder has no session it shows a New session button instead.",
       "files": [
         "src/workbench.rs",
         "src/state.rs",
@@ -652,7 +655,7 @@
       "id": "chat-sessions",
       "title": "Chat sessions & agents",
       "kind": "store",
-      "description": "Chat sessions, each bound to one folder (a repository checkout or a worktree) and holding one or more agents. A new session is named after the folder's checked-out branch, like its worktree in the sidebar (or the folder name without one), and can be renamed. Agents added by hand are called Agent; agents started by another agent get the name it gives. Closing a session stops its agents and removes it; their transcripts stay on disk for the History menu. Each agent is its own conversation with its own agent process and session loop; its live state (messages, busy, queued messages, permissions, plan, mode, model, cost, input) is a Chat in app-state. Sessions, agent names and each agent's provider session id are saved in ~/.config/workbench/chat_sessions.json, so the conversations resume after a restart; a folder's first session resumes the conversation it had before sessions existed. Creating a worktree or a branch, or pressing New session, starts a new session, and agents are added with the chat's + tab or started by another agent.",
+      "description": "Chat sessions, each bound to one folder (a repository checkout or a worktree) and holding one or more agents. A new session is named after the folder's checked-out branch, like its worktree in the sidebar (or the folder name without one), and can be renamed. Agents added by hand are called Agent; agents started by another agent get the name it gives. Closing a session stops its agents and removes it; their transcripts stay on disk for the History menu. Each agent is its own conversation with its own agent process and session loop; its live state (messages, busy, queued messages, permissions, plan, mode, model, cost, input) is a Chat in app-state. Sessions, agent names and each agent's provider session id are saved in ~/.config/workbench/chat_sessions.json, so the conversations resume after a restart; a folder can have no session, and then the chat shows a New session button and actions that prompt the agent start one. Creating a worktree or a branch, or pressing New session, starts a new session, and agents are added with the chat's + tab or started by another agent.",
       "files": [
         "src/sessions.rs",
         "src/state.rs"
@@ -873,31 +876,34 @@
     {
       "id": "mcp",
       "title": "MCP connections",
-      "description": "Lets Workbench call tools on MCP servers. The user configures servers (local stdio programs or remote http/sse URLs) in the MCP tab, they are saved to .workbench/mcp.json, and every enabled server is passed to the agent CLI in use (Workbench Code, Codex or Vibe). Its interface is the MCP tab plus the mcp_servers list in AppState.",
+      "description": "Lets every provider call tools on MCP servers. The user configures servers (local stdio programs or remote http/sse URLs) in the MCP tab at two levels: their own servers in the user config folder, used in every project and kept across updates, and the project's servers in .workbench/mcp.json. A project server replaces a user server of the same name. The agent CLIs (Workbench Code, Codex, Vibe) get the active servers in their own config, and the API providers reach them through the MCP manager. Its interface is the MCP tab, the mcp_servers list in AppState and the MCP manager.",
       "nodes": [
         {
           "id": "mcp-tab",
           "title": "MCP tab",
           "kind": "screen",
-          "description": "Lists the project's MCP servers as cards. Each card has an enabled toggle, a name, a transport (stdio, http or sse), and either a command with arguments and environment lines or a URL with header lines. It shows the status Workbench reported for the server, or why it is not passed to Workbench yet.",
+          "description": "Lists the MCP servers in three parts. Integrations shows each preset server (such as Linear) as an on/off switch with its logo; on adds it as a project server and shows its sign-in and status. Below are your servers (all projects) and this project's custom servers, each with its own add button. A custom card is collapsed to its head row (enabled toggle, name, scope and delete buttons, status) and expands to its transport and either a command with arguments and environment lines or a URL with header lines and OAuth sign-in. A card can move between the two levels.",
           "files": [
             "src/mcp_view.rs",
-            "src/code.rs"
+            "src/code.rs",
+            "src/logos.rs"
           ],
           "links": [
-            "mcp-config"
+            "mcp-config",
+            "mcp-oauth"
           ]
         },
         {
           "id": "mcp-config",
           "title": "MCP server model",
           "kind": "model",
-          "description": "The Server type and its transport, loading and saving of the MCP file, and claude_config, which turns the usable servers (enabled, named, with a command or URL) into the mcpServers JSON for --mcp-config. KEY=value and Name: value lines become env and header objects, which the Codex and Vibe runners reuse for their own config formats.",
+          "description": "The Server type with its transport and scope (user or project), loading the user and project files into one list and saving each server back to its own file, and active(), the usable servers where a project server replaces a user server of the same name. claude_config turns the active servers into the mcpServers JSON for --mcp-config. KEY=value and Name: value lines become env and header objects, which the Codex and Vibe runners reuse for their own config formats. expand_env fills in ${VAR} references for the MCP manager. PRESETS lists the remote servers Workbench knows (name, URL and logo); a project server with a preset's name is shown as that preset's toggle.",
           "files": [
             "src/mcp.rs"
           ],
           "links": [
             "mcp-file",
+            "mcp-user-file",
             "mcp-servers"
           ]
         },
@@ -905,16 +911,48 @@
           "id": "mcp-file",
           "title": "MCP connections file",
           "kind": "db",
-          "description": ".workbench/mcp.json holds the list of MCP servers. It is loaded with the rest of the workbench data and is committed with the project, so secrets should be written as ${ENV_VAR} references that Workbench expands.",
+          "description": "The project's MCP servers in .workbench/mcp.json. It is loaded with the rest of the workbench data and is committed with the project, so secrets should be written as ${ENV_VAR} references. It is only created once the project has a server.",
           "files": [
             ".workbench/mcp.json"
           ]
+        },
+        {
+          "id": "mcp-user-file",
+          "title": "User MCP servers file",
+          "kind": "db",
+          "description": "mcp.json in the user's Workbench config folder holds the user's own MCP servers. It sits outside every project and outside the self-update checkout, so these servers are used in every project and survive app updates."
         },
         {
           "id": "mcp-servers",
           "title": "MCP servers",
           "kind": "external",
           "description": "The external MCP servers. The agent CLI in use starts the stdio ones as subprocesses and connects to the http/sse ones, then exposes their tools to the agent."
+        },
+        {
+          "id": "mcp-manager",
+          "title": "MCP manager",
+          "kind": "service",
+          "description": "Workbench's own MCP client, used by the API providers, which have no MCP support of their own. It keeps one connection per active server, shared by every chat, opens it the first time a turn asks for tools and reopens it when the server's config or project changes. It lists the tools as mcp__<server>__<tool> with their schemas and read-only hints, calls a tool and returns its text output. It uses the rmcp crate for stdio and streamable http servers; sse servers only work through the agent CLIs.",
+          "files": [
+            "src/mcp_manager.rs"
+          ],
+          "links": [
+            "mcp-config",
+            "mcp-servers"
+          ]
+        },
+        {
+          "id": "mcp-oauth",
+          "title": "MCP OAuth sign-in",
+          "kind": "service",
+          "description": "Signs in to remote MCP servers that use OAuth. sign_in opens the server's login page in the browser and waits for the redirect on a one-shot listener on 127.0.0.1; rmcp handles discovery, client registration, PKCE and the code exchange. Tokens are kept per server URL in mcp-oauth.json in the user's config folder, never in the project. Before each turn, with_tokens adds an Authorization: Bearer header to every signed-in server (refreshing the token when it is about to expire), so every provider gets a plain URL with a header.",
+          "files": [
+            "src/mcp_oauth.rs"
+          ],
+          "links": [
+            "mcp-config",
+            "mcp-servers"
+          ]
         }
       ],
       "flows": []
@@ -999,12 +1037,13 @@
           "id": "api-chat",
           "title": "API chat client",
           "kind": "service",
-          "description": "Sends the conversation to the Anthropic Messages API or an OpenAI-style chat completions API (OpenAI, Mistral, OpenRouter) in one request and returns the answer. Also lists a provider's models. API providers only chat: no file edits, tools or MCP.",
+          "description": "Sends the conversation to the Anthropic Messages API or an OpenAI-style chat completions API (OpenAI, Mistral, OpenRouter) and returns the answer. It offers the model the tools of the user's MCP servers (only read-only ones in Plan mode), runs each tool call through the MCP manager and sends the results back until the model answers, reporting the calls as tool events in the chat. Also lists a provider's models. API providers can't edit files or run commands themselves.",
           "files": [
             "src/api_chat.rs"
           ],
           "links": [
-            "provider-apis"
+            "provider-apis",
+            "providers-mcp"
           ]
         },
         {
@@ -1024,6 +1063,17 @@
           "title": "Provider APIs",
           "kind": "external",
           "description": "The HTTP APIs of Anthropic, OpenAI, Mistral and OpenRouter, called with the user's API keys."
+        },
+        {
+          "id": "providers-mcp",
+          "title": "MCP tools for API providers",
+          "kind": "module",
+          "description": "The API chat client gets the tools of the active MCP servers from the MCP manager, offers them to the model and calls them when the model asks.",
+          "files": [
+            "src/api_chat.rs",
+            "src/mcp_manager.rs"
+          ],
+          "module": "mcp"
         }
       ],
       "flows": []

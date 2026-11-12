@@ -680,7 +680,7 @@ impl AppState {
     /// unless its size is locked.
     pub fn fade_chat(&mut self) {
         let layout = *self.layout.peek();
-        let waiting_for_answer = self.chat().waiting();
+        let waiting_for_answer = self.active_chat.peek().is_some_and(|c| c.waiting());
         if !layout.chat_locked && !waiting_for_answer {
             self.chat_focus.set(ChatFocus::Faded);
         }
@@ -1028,7 +1028,7 @@ impl AppState {
     }
 
     pub fn start_job(&mut self, kind: JobKind) -> ChatMode {
-        let chat = self.chat();
+        let chat = self.chat_or_new();
         let mode = *chat.chat_mode.peek();
         self.job.set(Some(Job { kind, mode, awaiting: false }));
         self.turn_owner.set(Some(chat.agent_id.cloned()));
@@ -1121,7 +1121,7 @@ impl AppState {
     }
 
     pub fn append_to_input(&mut self, text: &str) {
-        let mut chat = self.chat();
+        let mut chat = self.chat_or_new();
         let mut input = chat.input.write();
         if !input.is_empty() && !input.ends_with('\n') {
             input.push('\n');
@@ -1129,9 +1129,32 @@ impl AppState {
         input.push_str(text);
     }
 
-    /// The chat shown in the chat window.
+    /// The chat shown in the chat window. Only for the chat's own parts (`ChatPane`, `ChatTabs`),
+    /// which are drawn only while a chat is shown; elsewhere use `active_chat`, `chat_busy` or
+    /// `chat_or_new`, since a folder can have no session.
     pub fn chat(&self) -> Chat {
-        self.active_chat.read().expect("a chat is active once the app has started")
+        self.active_chat.read().expect("the chat's parts are only drawn while a chat is shown")
+    }
+
+    pub fn has_chat(&self) -> bool {
+        self.active_chat.read().is_some()
+    }
+
+    /// Whether the chat shown is working. False when no chat is shown.
+    pub fn chat_busy(&self) -> bool {
+        self.active_chat.read().is_some_and(|c| *c.busy.read())
+    }
+
+    /// The chat shown, or, when the open folder has no session, a new session there, shown in
+    /// the chat. For actions that send the agent a prompt. Call from the main window only.
+    pub fn chat_or_new(&mut self) -> Chat {
+        if let Some(chat) = *self.active_chat.peek() {
+            return chat;
+        }
+        let cwd = self.cwd.peek().clone();
+        let chat = self.create_session(cwd);
+        self.active_chat.set(Some(chat));
+        chat
     }
 
     pub fn session(&self, id: &str) -> Option<SavedSession> {
@@ -1159,7 +1182,7 @@ impl AppState {
 
     /// Closes a session: stops its agents and removes it. Their transcripts stay on disk, so the
     /// History menu can still resume them. When the chat showed it, it shows another session
-    /// in the open folder (or a new one).
+    /// in the open folder, if it has one.
     pub fn close_session(&mut self, session_id: &str) {
         let closing = self.session_chats(session_id);
         for chat in &closing {
@@ -1171,6 +1194,28 @@ impl AppState {
         if self.active_chat.peek().is_some_and(|c| closing.contains(&c)) {
             self.active_chat.set(None);
             self.show_chat_for_cwd();
+        }
+    }
+
+    /// Closes one agent: stops it and removes it from its session. Its transcript stays on disk.
+    /// Closing a session's last agent closes the session. When the chat showed it, it shows
+    /// the session's first remaining agent.
+    pub fn close_agent(&mut self, chat: Chat) {
+        let session_id = chat.session.cloned();
+        let others: Vec<Chat> = self.session_chats(&session_id).into_iter().filter(|c| *c != chat).collect();
+        let Some(next) = others.first().copied() else {
+            self.close_session(&session_id);
+            return;
+        };
+        chat.send(Cmd::Close);
+        self.chats.write().retain(|c| *c != chat);
+        let agent_id = chat.agent_id.cloned();
+        if let Some(session) = self.sessions.write().iter_mut().find(|s| s.id == session_id) {
+            session.agents.retain(|a| a.id != agent_id);
+        }
+        self.save_sessions();
+        if *self.active_chat.peek() == Some(chat) {
+            self.active_chat.set(Some(next));
         }
     }
 
@@ -1236,8 +1281,7 @@ impl AppState {
         Some(chat)
     }
 
-    /// Starts the chats of every saved session and shows one in the open folder, creating a
-    /// session there when it has none. Called once, from the main window's root.
+    /// Starts the chats of every saved session and shows one in the open folder. Called once, from the main window's root.
     pub fn start_chats(&mut self) {
         let saved = self.sessions.peek().clone();
         let chats: Vec<Chat> = saved.iter().flat_map(|s| s.agents.iter().map(|a| Chat::launch(*self, s, a))).collect();
@@ -1246,7 +1290,8 @@ impl AppState {
     }
 
     /// Makes sure the chat shows a session of the open folder: keeps the current one when it is
-    /// there, otherwise shows the folder's latest session or creates one.
+    /// there, otherwise shows the folder's latest session, or nothing when the folder has none
+    /// (the chat and the sidebar then offer a New session button).
     pub fn show_chat_for_cwd(&mut self) {
         let cwd = self.cwd.peek().clone();
         if self.active_chat.peek().is_some_and(|c| projects::same_dir(&c.dir.peek(), &cwd)) {
@@ -1254,16 +1299,6 @@ impl AppState {
         }
         let latest = self.sessions.peek().iter().rev().find(|s| projects::same_dir(&s.dir, &cwd)).map(|s| s.id.clone());
         let first_agent = latest.and_then(|id| self.chats.peek().iter().copied().find(|c| *c.session.peek() == id));
-        let chat = match first_agent {
-            Some(chat) => chat,
-            None => {
-                let chat = self.create_session(cwd.clone());
-                if let Some(id) = crate::history::last_session(&cwd) {
-                    chat.send(Cmd::Resume { id });
-                }
-                chat
-            }
-        };
-        self.active_chat.set(Some(chat));
+        self.active_chat.set(first_agent);
     }
 }

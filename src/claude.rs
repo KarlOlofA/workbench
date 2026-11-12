@@ -12,6 +12,8 @@ use tokio::sync::mpsc::UnboundedSender;
 #[derive(Debug, Clone)]
 pub enum ClaudeEvent {
     Init { session_id: String, model: String, mcp_servers: Vec<McpStatus> },
+    /// The status of the MCP servers Workbench's own MCP client connected to for an API turn.
+    McpStatus(Vec<McpStatus>),
     TextDelta(String),
     AssistantText(String),
     ToolUse { id: String, name: String, input: Value },

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-fn config_path(name: &str) -> Option<PathBuf> {
+pub fn config_path(name: &str) -> Option<PathBuf> {
     crate::platform::config_dir().map(|d| d.join(name))
 }
 

@@ -4,6 +4,7 @@ use std::rc::Rc;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
+use crate::claude::ChatMode;
 use crate::dropdown::{Choice, ComboBox, Dropdown};
 use crate::ghost::{self, GhostPick};
 use crate::git;
@@ -118,7 +119,7 @@ fn add_node(mut st: AppState, parent: Option<String>) {
 pub fn GraphTab() -> Element {
     let mut st = use_context::<AppState>();
     let job = *st.job.read();
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let has_nodes = !st.graph.read().nodes.is_empty();
     let n_changes = st.changes().len();
     let net = st.net();
@@ -156,14 +157,14 @@ pub fn GraphTab() -> Element {
     };
 
     let generate = move |_| {
-        if *st.chat().busy.peek() || st.job.peek().is_some() {
+        if st.chat_busy() || st.job.peek().is_some() {
             return;
         }
         let existing = st.graph.peek().clone();
         let text = prompts::generate(Some(&existing), &st.rules.peek());
         let label = if existing.nodes.is_empty() { "Map this codebase into a graph" } else { "Rescan codebase and update the graph" };
         st.start_job(JobKind::Generate);
-        st.chat().send(Cmd::Prompt { label: label.into(), text });
+        st.chat_or_new().send(Cmd::Prompt { label: label.into(), text });
     };
 
     let rescan_blocked = has_nodes && n_changes > 0;
@@ -2260,16 +2261,16 @@ fn HistoryPane() -> Element {
 fn PromptPane() -> Element {
     let mut st = use_context::<AppState>();
     let mut request = use_signal(String::new);
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let locked = st.graph_locked();
     let awaiting = st.awaiting_answers();
-    let mode = *st.chat().chat_mode.read();
+    let mode = (*st.active_chat.read()).map(|c| *c.chat_mode.read()).unwrap_or(ChatMode::Plan);
     let empty = request.read().trim().is_empty();
     let context = st.selected_titles().join(", ");
 
     let draft = move |_| {
         let text = request.peek().trim().to_string();
-        if text.is_empty() || *st.chat().busy.peek() || st.job.peek().is_some() {
+        if text.is_empty() || st.chat_busy() || st.job.peek().is_some() {
             return;
         }
         let mode = st.start_job(JobKind::Draft);
@@ -2285,7 +2286,7 @@ fn PromptPane() -> Element {
             None => format!("Add nodes from prompt ({})", mode.label()),
         };
         request.set(String::new());
-        st.chat().send(Cmd::Prompt { label, text: prompt });
+        st.chat_or_new().send(Cmd::Prompt { label, text: prompt });
     };
 
     rsx! {
@@ -2324,7 +2325,7 @@ fn PromptPane() -> Element {
 fn ChangesPane() -> Element {
     let mut st = use_context::<AppState>();
     let mut note = use_signal(String::new);
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let locked = st.graph_locked();
     let changes = st.changes();
     let has_baseline = st.baseline.read().is_some();
@@ -2332,14 +2333,14 @@ fn ChangesPane() -> Element {
 
     let process = move |_| {
         let changes = st.changes();
-        if changes.is_empty() || *st.chat().busy.peek() || st.job.peek().is_some() {
+        if changes.is_empty() || st.chat_busy() || st.job.peek().is_some() {
             return;
         }
         let mode = st.start_job(JobKind::Process);
         let text = st.with_refs(|refs| prompts::process(&st.graph.peek(), &changes, &st.rules.peek(), &note.peek(), mode, Some(refs)));
         let label = format!("Process {} graph change{} ({})", changes.len(), plural(changes.len()), mode.label());
         note.set(String::new());
-        st.chat().send(Cmd::Prompt { label, text });
+        st.chat_or_new().send(Cmd::Prompt { label, text });
     };
 
     if changes.is_empty() {
@@ -2441,14 +2442,14 @@ fn FlowsPane() -> Element {
     let mut debugging = use_signal(|| None::<String>);
     let mut mode = use_signal(|| DebugMode::Trace);
     let mut symptom = use_signal(String::new);
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let locked = st.graph_locked();
     let g = st.net();
     let active = st.active_flow.read().clone();
     let open_debug = debugging.read().clone();
 
     let mut start_debug = move |flow: Flow| {
-        if *st.chat().busy.peek() {
+        if st.chat_busy() {
             return;
         }
         let m = *mode.peek();
@@ -2457,7 +2458,7 @@ fn FlowsPane() -> Element {
         st.active_flow.set(Some(flow.id.clone()));
         symptom.set(String::new());
         debugging.set(None);
-        st.chat().send(Cmd::Prompt { label, text });
+        st.chat_or_new().send(Cmd::Prompt { label, text });
     };
 
     rsx! {

@@ -1,3 +1,10 @@
 {
-  "servers": []
+  "servers": [
+    {
+      "name": "linear",
+      "enabled": true,
+      "transport": "http",
+      "url": "https://mcp.linear.app/mcp"
+    }
+  ]
 }

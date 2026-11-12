@@ -3,7 +3,7 @@
 //! Workbench runs as one long-lived process that receives every message.
 //! Every other provider runs one turn per message: Codex and Vibe start a new
 //! process that resumes the previous session, and API providers make one HTTP
-//! request with the conversation so far. Every provider reports back with the
+//! request with the conversation so far, plus one more per round of MCP tool calls. Every provider reports back with the
 //! same `ClaudeEvent` values, tagged with the session loop's generation number.
 
 use std::path::PathBuf;
@@ -118,9 +118,10 @@ pub fn start_turn(provider: Provider, settings: &Settings, opts: TurnOptions, ge
             let key = settings.api_key(provider).with_context(|| format!("no API key: set {key_env} or add one in the Providers tab"))?;
             let request = api_chat::Request { base_url, style, key, opts };
             tokio::spawn(async move {
-                for ev in api_chat::run(request).await {
+                api_chat::run(request, |ev| {
                     let _ = tx.send((generation, ev));
-                }
+                })
+                .await;
                 let _ = tx.send((generation, ClaudeEvent::Exited));
             })
         }

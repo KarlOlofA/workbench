@@ -552,6 +552,26 @@ fn ChatInput() -> Element {
     }
 }
 
+/// Starts a new chat session in `dir` (the open folder when not given), opens that folder and
+/// shows the session in the chat. For places where a folder has no session.
+#[component]
+pub fn NewSessionButton(dir: Option<std::path::PathBuf>) -> Element {
+    let mut st = use_context::<AppState>();
+    rsx! {
+        button {
+            class: "small",
+            title: "Start a new chat session in this folder",
+            onclick: move |e: MouseEvent| {
+                e.stop_propagation();
+                let dir = dir.clone().unwrap_or_else(|| st.cwd.peek().clone());
+                crate::app::open_folder(st, dir.clone());
+                st.request_chat(ChatRequest::NewSession { dir });
+            },
+            "New session"
+        }
+    }
+}
+
 /// The agents of the active chat session as tabs, for the chat's top bar. Clicking a tab shows
 /// that agent's chat; `+` adds an agent to the session.
 #[component]
@@ -595,6 +615,15 @@ fn ChatTab(chat: Chat, name: String) -> Element {
             class: if active { "chat-tab active" } else { "chat-tab" },
             title: if waiting { "{provider.label()} · waiting for your answer" } else if busy { "{provider.label()} · working" } else { "{provider.label()} · waiting for a prompt" },
             onclick: move |_| st.active_chat.set(Some(chat)),
+            span {
+                class: "chat-tab-close",
+                title: if busy { "Close this agent, stopping its work" } else { "Close this agent" },
+                onclick: move |e: MouseEvent| {
+                    e.stop_propagation();
+                    st.close_agent(chat);
+                },
+                "✕"
+            }
             LogoIcon { logo: Logo::of(provider) }
             "{name}"
             if waiting {

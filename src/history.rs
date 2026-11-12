@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -6,10 +5,8 @@ use std::time::SystemTime;
 use serde_json::Value;
 
 use crate::claude::tool_summary;
-use crate::config;
 use crate::state::{ChatItem, Message};
 
-const LAST_FILE: &str = "sessions.json";
 const MAX_SESSIONS: usize = 60;
 const TITLE_SCAN_LINES: usize = 400;
 const LONG_PROMPT: usize = 600;
@@ -39,13 +36,6 @@ fn transcripts_dir(cwd: &Path) -> Option<PathBuf> {
 fn transcript(cwd: &Path, id: &str) -> Option<PathBuf> {
     let p = transcripts_dir(cwd)?.join(format!("{id}.jsonl"));
     p.is_file().then_some(p)
-}
-
-/// The session a folder had before chat sessions were saved (in `sessions.json`). A folder's
-/// first chat session resumes it, so updating the app keeps the conversation.
-pub fn last_session(cwd: &Path) -> Option<String> {
-    let map: HashMap<String, String> = config::load_json(LAST_FILE);
-    map.get(&cwd.to_string_lossy().to_string()).filter(|id| transcript(cwd, id).is_some()).cloned()
 }
 
 fn is_noise(text: &str) -> bool {
@@ -104,8 +94,12 @@ fn title_of(path: &Path) -> Option<String> {
 }
 
 pub fn list(cwd: &Path) -> Vec<SessionInfo> {
-    let Some(dir) = transcripts_dir(cwd) else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    transcripts_dir(cwd).map(|dir| list_in(&dir)).unwrap_or_default()
+}
+
+/// The sessions in one transcripts folder, newest first.
+fn list_in(dir: &Path) -> Vec<SessionInfo> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<(PathBuf, SystemTime)> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -128,7 +122,11 @@ pub fn list(cwd: &Path) -> Vec<SessionInfo> {
 }
 
 pub fn load(cwd: &Path, id: &str) -> Vec<ChatItem> {
-    let Some(path) = transcript(cwd, id) else { return Vec::new() };
+    transcript(cwd, id).map(|path| load_from(&path, cwd)).unwrap_or_default()
+}
+
+/// The chat items of one transcript file. `cwd` is the project, used to shorten paths in tool summaries.
+fn load_from(path: &Path, cwd: &Path) -> Vec<ChatItem> {
     let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
     let mut items: Vec<ChatItem> = Vec::new();
     for line in BufReader::new(file).lines() {
@@ -238,7 +236,7 @@ mod tests {
     fn loads_a_transcript_into_chat_items() {
         let dir = std::env::temp_dir().join(format!("wb-history-{}", std::process::id()));
         let cwd = Path::new("/tmp/wb-history-project");
-        let tdir = dir.join("projects").join(project_key(cwd));
+        let tdir = dir.join("projects");
         std::fs::create_dir_all(&tdir).unwrap();
         let lines = [
             r#"{"type":"session-owner","sessionId":"s1"}"#,
@@ -250,19 +248,16 @@ mod tests {
             r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent noise"}]}}"#,
         ];
         std::fs::write(tdir.join("s1.jsonl"), lines.join("\n")).unwrap();
-        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &dir) };
-
-        let sessions = list(cwd);
+        let sessions = list_in(&tdir);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "Fix the tests");
 
-        let items = load(cwd, "s1");
+        let items = load_from(&tdir.join("s1.jsonl"), cwd);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], ChatItem::User(m) if m.text == "Fix the tests"));
         assert!(matches!(&items[1], ChatItem::Assistant { text, .. } if text == "On it."));
         assert!(matches!(&items[2], ChatItem::Tool { summary, result: Some((out, false)), .. } if summary == "cargo test" && out == "ok"));
 
-        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

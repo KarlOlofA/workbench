@@ -164,10 +164,10 @@ fn Header() -> Element {
     let cwd = st.cwd.read().display().to_string();
     let project = st.current_project();
     let is_repo = git::is_repo(&st.cwd.read());
-    let chat = st.chat();
-    let model = chat.model.read().clone();
-    let mode = *chat.chat_mode.read();
-    let cost = *chat.last_cost.read();
+    let chat = *st.active_chat.read();
+    let model = chat.map(|c| c.model.read().clone()).unwrap_or_default();
+    let full_auto = chat.is_some_and(|c| *c.chat_mode.read() == ChatMode::FullAuto);
+    let cost = chat.and_then(|c| *c.last_cost.read());
 
     let pick_folder = move |_| {
         spawn(async move {
@@ -215,14 +215,15 @@ fn Header() -> Element {
             UpdateMenu {}
             if !model.is_empty() { span { class: "badge", "{model}" } }
             if let Some(c) = cost { span { class: "badge", "${c:.4}" } }
-            if mode == ChatMode::FullAuto {
+            if full_auto {
                 span {
                     class: "badge warn",
-                    title: "{mode.hint()}. Change the mode under the chat.",
+                    title: "{ChatMode::FullAuto.hint()}. Change the mode under the chat.",
                     "Full auto"
                 }
             }
-            HistoryMenu {}
+            // History resumes an earlier conversation in the chat shown, so it needs one.
+            if chat.is_some() { HistoryMenu {} }
             button {
                 title: "Start a new chat session in this folder",
                 onclick: move |_| {
@@ -252,7 +253,7 @@ fn BranchMenu() -> Element {
     let mut error = use_signal(|| None::<String>);
     let _ = st.repo_version.read();
     let current = git::current_branch(&st.cwd.read()).unwrap_or_else(|| "?".into());
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let is_open = *open.read();
     let is_working = *working.read();
 
@@ -288,7 +289,7 @@ fn BranchMenu() -> Element {
     };
 
     let mut pick = move |p: BranchPick| {
-        if *st.chat().busy.peek() || *working.peek() {
+        if st.chat_busy() || *working.peek() {
             return;
         }
         working.set(true);

@@ -5,7 +5,7 @@ use crate::api_chat;
 use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
 use crate::history;
 use crate::projects::same_dir;
-use crate::mcp;
+use crate::{mcp, mcp_oauth};
 use crate::providers::Provider;
 use crate::prompts;
 use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
@@ -15,6 +15,8 @@ struct Live {
     rules_version: u64,
     /// The mode the agent runs in; a different chat mode restarts it on the next message.
     mode: ChatMode,
+    /// The MCP config the Workbench process was started with; a new one (such as a refreshed sign-in token) restarts it.
+    mcp_config: Option<String>,
 }
 
 /// The session loop of one agent: receives its commands, owns its agent process and turns the
@@ -235,7 +237,9 @@ async fn deliver(
         return;
     }
     let mode = *chat.chat_mode.peek();
-    if live.as_ref().is_some_and(|l| l.rules_version != rules_version || l.mode != mode)
+    let servers = st.mcp_servers.peek().clone();
+    let mcp_config = mcp::claude_config(&mcp_oauth::with_tokens(&servers).await);
+    if live.as_ref().is_some_and(|l| l.rules_version != rules_version || l.mode != mode || l.mcp_config != mcp_config)
         && let Some(l) = live.take()
     {
         l.agent.kill().await;
@@ -250,11 +254,11 @@ async fn deliver(
             resume: chat.session_id.peek().clone(),
             mode,
             append_system_prompt: system_prompt(st, chat),
-            mcp_config: mcp::claude_config(&st.mcp_servers.peek()),
+            mcp_config: mcp_config.clone(),
             model: st.provider_settings.peek().model(Provider::ClaudeCode),
         };
         match ClaudeProcess::spawn(&opts, *generation, ev_tx.clone()) {
-            Ok(proc) => *live = Some(Live { agent: Agent::Workbench(proc), rules_version, mode }),
+            Ok(proc) => *live = Some(Live { agent: Agent::Workbench(proc), rules_version, mode, mcp_config }),
             Err(e) => {
                 chat.items.write().push(ChatItem::Error(format!("{e:#}")));
                 finish(st, chat, false);
@@ -324,6 +328,8 @@ async fn start_turn(
     *generation += 1;
     let settings = st.provider_settings.peek().clone();
     let mode = *chat.chat_mode.peek();
+    let servers = st.mcp_servers.peek().clone();
+    let mcp_servers = mcp_oauth::with_tokens(&servers).await;
     let mut instructions = system_prompt(st, chat).unwrap_or_default();
     if mode == ChatMode::Plan {
         instructions.push_str(prompts::plan_mode_instructions());
@@ -334,13 +340,13 @@ async fn start_turn(
         resume: chat.session_id.peek().clone(),
         mode,
         system_prompt: instructions,
-        mcp_servers: st.mcp_servers.peek().clone(),
+        mcp_servers,
         prompt: text,
         history: api_chat::history(&chat.items.peek()),
     };
     chat.model.set(if opts.model.is_empty() { provider.short_name().to_string() } else { opts.model.clone() });
     match agent::start_turn(provider, &settings, opts, *generation, ev_tx.clone()) {
-        Ok(agent) => *live = Some(Live { agent, rules_version: *st.rules_version.peek(), mode }),
+        Ok(agent) => *live = Some(Live { agent, rules_version: *st.rules_version.peek(), mode, mcp_config: None }),
         Err(e) => {
             chat.items.write().push(shown);
             chat.items.write().push(ChatItem::Error(format!("{e:#}")));
@@ -388,6 +394,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             chat.session_id.set(Some(session_id));
             chat.model.set(model);
         }
+        ClaudeEvent::McpStatus(statuses) => st.mcp_status.set(statuses),
         ClaudeEvent::TextDelta(delta) => {
             let mut items = chat.items.write();
             match items.last_mut() {

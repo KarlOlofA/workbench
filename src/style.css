@@ -113,6 +113,10 @@
 .chat-tab .agent-dot { margin-left: 4px; }
 .chat-tab-flag { margin-left: 4px; color: var(--warn); font-weight: bold; }
 .chat-tab-add { padding: 0 6px; }
+/* Hidden (but keeping its space, so tabs don't shift) until the tab is hovered. */
+.chat-tab-close { visibility: hidden; padding: 0 2px; border-radius: 4px; font-size: 10px; }
+.chat-tab:hover .chat-tab-close { visibility: visible; }
+.chat-tab-close:hover { background: var(--panel-2); color: var(--text); }
 .chat-edge { position: absolute; z-index: 1; }
 .chat-edge.n, .chat-edge.s { left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
 .chat-edge.e, .chat-edge.w { top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
@@ -424,6 +428,18 @@ textarea.note, .debug-form textarea, .rule textarea { min-height: 56px; }
 .rule-scope { display: flex; align-items: center; gap: 6px; }
 .rule-scope .dropdown { flex: 1; }
 .rule-scope .dropdown-trigger { width: 100%; }
+.rule .expand { width: 22px; padding: 0; }
+
+/* MCP integrations: one on/off pill per preset server, with its logo and a switch. */
+.mcp-presets { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.mcp-preset { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-preset-toggle { display: inline-flex; align-items: center; gap: 6px; border-radius: 16px; padding: 4px 6px 4px 10px; }
+.mcp-preset-toggle .logo { width: 15px; height: 15px; }
+.mcp-preset.on .mcp-preset-toggle { border-color: var(--accent); background: var(--accent-soft); }
+.switch { position: relative; width: 26px; height: 14px; border-radius: 7px; background: var(--border); margin-left: 4px; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--panel); transition: left 0.15s; }
+.mcp-preset.on .switch { background: var(--accent); }
+.mcp-preset.on .switch::after { left: 14px; }
 
 .bubble.prompt { padding: 6px 10px; white-space: normal; }
 .bubble.prompt summary { cursor: pointer; display: flex; gap: 6px; align-items: center; }
@@ -560,6 +576,8 @@ label.check input { width: auto; padding: 0; }
 .sidebar-repos li.sidebar-worktree { padding-left: 18px; font-size: 12px; }
 .sidebar-repos li.sidebar-worktree.missing { opacity: 0.5; cursor: default; }
 .sidebar-repos li.sidebar-session { padding-left: 18px; font-size: 12px; }
+.sidebar-repos li.sidebar-no-session { cursor: default; }
+.sidebar-repos li.sidebar-no-session:hover { background: none; }
 .sidebar-repos li.sidebar-session.in-worktree { padding-left: 30px; }
 .sidebar-repos li.sidebar-session-agent { padding-left: 30px; font-size: 12px; }
 .session-close { margin-left: auto; padding: 0 5px; visibility: hidden; }

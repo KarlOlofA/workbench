@@ -10,7 +10,7 @@ use crate::state::{AppState, Cmd};
 pub fn RulesView() -> Element {
     let mut st = use_context::<AppState>();
     let mut filter = use_signal(String::new);
-    let busy = *st.chat().busy.read();
+    let busy = st.chat_busy();
     let all = st.rules.read().clone();
     let nodes: Vec<(String, String)> = st.graph.read().nodes.iter().map(|n| (n.id.clone(), n.title.clone())).collect();
     let needle = filter.read().to_lowercase();
@@ -29,11 +29,11 @@ pub fn RulesView() -> Element {
     };
 
     let audit = move |_| {
-        if *st.chat().busy.peek() {
+        if st.chat_busy() {
             return;
         }
         let text = prompts::audit(&st.graph.peek(), &st.rules.peek());
-        st.chat().send(Cmd::Prompt { label: "Audit code against project rules".into(), text });
+        st.chat_or_new().send(Cmd::Prompt { label: "Audit code against project rules".into(), text });
     };
 
     rsx! {
