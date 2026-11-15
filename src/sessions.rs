@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::config;
+use crate::providers::Provider;
 
 const FILE: &str = "chat_sessions.json";
 
@@ -20,6 +21,12 @@ pub struct SavedAgent {
     /// The provider's session id, so the conversation can be resumed after a restart.
     #[serde(default)]
     pub transcript: Option<String>,
+    /// The provider the agent was started on, when the chat asked for one. `None` uses the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    /// The model the agent was started on, when the chat asked for one. `None` uses the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,6 +34,10 @@ pub struct SavedSession {
     pub id: String,
     pub title: String,
     pub dir: PathBuf,
+    /// Set for a project-level session: the id of its project. Its `dir` is then the folder
+    /// that holds the project's repositories (`Project::folder`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub agents: Vec<SavedAgent>,
 }
 

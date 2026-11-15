@@ -110,7 +110,13 @@ pub fn App() -> Element {
     use_effect(move || {
         let _ = st.cwd.read();
         st.load_workbench();
-        st.show_chat_for_cwd();
+    });
+
+    // Opening a folder or a project view shows a chat that belongs there.
+    use_effect(move || {
+        let _ = st.cwd.read();
+        let _ = st.project_view.read();
+        st.show_chat_for_view();
     });
 
     use_effect(move || {
@@ -145,14 +151,23 @@ fn create_requested_chats(mut st: AppState) {
                     st.active_chat.set(Some(chat));
                 }
             }
-            ChatRequest::NewAgent { session, name, task, activate } => {
-                let Some(chat) = st.create_agent(&session, name) else { continue };
+            ChatRequest::NewProjectSession { project } => {
+                if let Some(chat) = st.create_project_session(&project) {
+                    st.active_chat.set(Some(chat));
+                }
+            }
+            ChatRequest::NewAgent { session, name, task, activate, provider, model } => {
+                let Some(chat) = st.create_agent(&session, name, provider, model) else { continue };
                 if let Some(text) = task {
                     chat.send(Cmd::Prompt { label: "Task from the session".into(), text });
                 }
                 if activate {
                     st.active_chat.set(Some(chat));
                 }
+            }
+            ChatRequest::AgentInRepo { dir, name, task, provider, model } => {
+                let chat = st.create_named_session(dir, name, provider, model);
+                chat.send(Cmd::Prompt { label: "Task from another agent".into(), text: task });
             }
         }
     }

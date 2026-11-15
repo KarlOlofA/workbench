@@ -12,10 +12,11 @@ use dioxus::desktop::tao::window::{ResizeDirection, WindowId};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder, WindowEvent, use_wry_event_handler, window};
 use dioxus::prelude::*;
 
-use crate::chat::{ChatPane, ChatTabs, NewSessionButton};
+use crate::chat::{ChatPane, ChatTabs, NoChat};
 use crate::state::AppState;
 
 const LINUX: bool = cfg!(target_os = "linux");
+const MACOS: bool = cfg!(target_os = "macos");
 
 fn config() -> Config {
     let builder = WindowBuilder::new()
@@ -33,11 +34,19 @@ fn config() -> Config {
 pub fn use_chat_window(mut st: AppState) {
     let main_id: WindowId = use_hook(|| window().window.id());
     let mut opening = use_signal(|| false);
+    // Updated on every resize of the main window. Leaving full screen on macOS ends with a
+    // resize, sent once the transition is over.
+    let mut main_fullscreen = use_signal(|| window().window.fullscreen().is_some());
 
     use_effect(move || {
         let detached = st.layout.read().chat_detached;
         let open = *st.chat_window.read();
         match (detached, open) {
+            // Opening a window while the main window is in full screen crashes on macOS, so
+            // leave full screen first; the effect runs again once that is done.
+            (true, None) if MACOS && *main_fullscreen.read() => {
+                window().window.set_fullscreen(None);
+            }
             (true, None) if !*opening.peek() => {
                 opening.set(true);
                 let dom = VirtualDom::new(DetachedChat).with_root_context(st);
@@ -57,6 +66,15 @@ pub fn use_chat_window(mut st: AppState) {
     });
 
     use_wry_event_handler(move |event, _| {
+        if let Event::WindowEvent { event: WindowEvent::Resized(_), window_id, .. } = event
+            && *window_id == main_id
+        {
+            let fullscreen = window().window.fullscreen().is_some();
+            if *main_fullscreen.peek() != fullscreen {
+                main_fullscreen.set(fullscreen);
+            }
+            return;
+        }
         let Event::WindowEvent { event: WindowEvent::CloseRequested, window_id, .. } = event else { return };
         if *window_id == main_id {
             // Closing the main window quits, even with the chat window open. The chat window
@@ -139,7 +157,7 @@ fn DetachedChat() -> Element {
             if st.has_chat() {
                 ChatPane {}
             } else {
-                div { class: "empty", "No chat session in this folder " NewSessionButton {} }
+                div { class: "empty", NoChat {} }
             }
             if LINUX {
                 for (dir, name) in EDGES {

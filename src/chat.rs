@@ -2,6 +2,9 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::claude::{ChatMode, PermissionDecision, PermissionRequest, tool_summary};
+use crate::dropdown::{self, Dropdown};
+use crate::projects::Project;
+use crate::worktree_view::other_worktrees;
 use crate::logos::{Logo, LogoIcon};
 use crate::markdown;
 use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
@@ -410,7 +413,7 @@ fn QueuedMessages() -> Element {
 fn ModeToggle() -> Element {
     let st = use_context::<AppState>();
     let mut chat = st.chat();
-    let provider = st.provider_settings.peek().provider;
+    let provider = st.agent_provider(&chat).0;
     let current = *chat.chat_mode.read();
 
     rsx! {
@@ -437,7 +440,7 @@ fn ModeToggle() -> Element {
 fn PlanPrompt(approval: PlanApproval) -> Element {
     let st = use_context::<AppState>();
     let chat = st.chat();
-    let provider = st.provider_settings.peek().provider;
+    let provider = st.agent_provider(&chat).0;
     // Only the run modes the current provider supports (API providers just answer).
     let run_modes: Vec<ChatMode> = ChatMode::RUN_PLAN.into_iter().filter(|m| provider.modes().contains(m)).collect();
     let key_modes = run_modes.clone();
@@ -572,8 +575,71 @@ pub fn NewSessionButton(dir: Option<std::path::PathBuf>) -> Element {
     }
 }
 
+/// What the chat shows when it has no session to show: in a project view a New project
+/// session button and the project's sessions to pick from, elsewhere a New session button.
+#[component]
+pub fn NoChat() -> Element {
+    let mut st = use_context::<AppState>();
+    let Some(project) = st.viewed_project() else {
+        return rsx! {
+            span { "No chat session in this folder" }
+            NewSessionButton {}
+        };
+    };
+    let project_id = project.id.clone();
+    let has_folder = project.folder().is_some();
+    rsx! {
+        span { "No project session yet" }
+        button {
+            class: "small",
+            disabled: !has_folder,
+            title: if has_folder { "Start a chat session for the whole project" } else { "Add a repository to the project first" },
+            onclick: move |_| st.request_chat(ChatRequest::NewProjectSession { project: project_id.clone() }),
+            "New project session"
+        }
+        SessionPicker { project }
+    }
+}
+
+const NEW_PROJECT_SESSION: &str = "+new-project-session";
+
+/// In a project view: picks the chat session to show from the project's own sessions and the
+/// sessions in its repositories and their worktrees, or starts a new project-level session.
+/// Showing a repository's session keeps the project view open.
+#[component]
+pub fn SessionPicker(project: Project) -> Element {
+    let mut st = use_context::<AppState>();
+    let current = (*st.active_chat.read()).map(|c| c.session.cloned()).unwrap_or_default();
+    let mut choices: Vec<dropdown::Choice> = st.project_sessions(&project.id).into_iter().map(|s| dropdown::Choice::new(s.id, format!("◈ {}", s.title))).collect();
+    for repo in &project.repos {
+        let mut dirs = vec![repo.dir()];
+        dirs.extend(other_worktrees(&st, &repo.path).into_iter().map(|w| w.path));
+        for session in dirs.iter().flat_map(|d| st.sessions_in(d)) {
+            choices.push(dropdown::Choice::new(session.id, format!("{} · {}", repo.label(), session.title)));
+        }
+    }
+    choices.push(dropdown::Choice::new(NEW_PROJECT_SESSION, "+ New project session"));
+    let project_id = project.id.clone();
+    rsx! {
+        Dropdown {
+            title: "The chat session to show: the project's own, or one in its repositories",
+            value: current,
+            placeholder: "Sessions in {project.name}",
+            choices,
+            onchange: move |id: String| {
+                if id == NEW_PROJECT_SESSION {
+                    st.request_chat(ChatRequest::NewProjectSession { project: project_id.clone() });
+                } else if let Some(chat) = st.session_chats(&id).first().copied() {
+                    st.active_chat.set(Some(chat));
+                }
+            },
+        }
+    }
+}
+
 /// The agents of the active chat session as tabs, for the chat's top bar. Clicking a tab shows
-/// that agent's chat; `+` adds an agent to the session.
+/// that agent's chat; `+` adds an agent to the session. In a project view the session's title
+/// is a `SessionPicker`.
 #[component]
 pub fn ChatTabs() -> Element {
     let mut st = use_context::<AppState>();
@@ -586,7 +652,10 @@ pub fn ChatTabs() -> Element {
             class: "chat-tabs",
             // The bar around the tabs drags the chat; the tabs themselves don't.
             onmousedown: move |e| e.stop_propagation(),
-            span { class: "chat-tabs-session muted small-text", title: "{session.dir.display()}", "{session.title}" }
+            match st.viewed_project() {
+                Some(project) => rsx! { SessionPicker { project } },
+                None => rsx! { span { class: "chat-tabs-session muted small-text", title: "{session.dir.display()}", "{session.title}" } },
+            }
             for agent in session.agents {
                 if let Some(chat) = chats.iter().copied().find(|c| c.is(&agent.id)) {
                     ChatTab { key: "{agent.id}", chat, name: agent.name }
@@ -595,7 +664,7 @@ pub fn ChatTabs() -> Element {
             button {
                 class: "small chat-tab-add",
                 title: "Add an agent to this session",
-                onclick: move |_| st.request_chat(ChatRequest::NewAgent { session: session_id.clone(), name: None, task: None, activate: true }),
+                onclick: move |_| st.request_chat(ChatRequest::NewAgent { session: session_id.clone(), name: None, task: None, activate: true, provider: None, model: None }),
                 "+"
             }
         }
@@ -608,7 +677,7 @@ fn ChatTab(chat: Chat, name: String) -> Element {
     let active = st.chat() == chat;
     let busy = *chat.busy.read();
     let waiting = chat.waiting();
-    let provider = st.provider_settings.read().provider;
+    let provider = st.agent_provider(&chat).0;
 
     rsx! {
         button {

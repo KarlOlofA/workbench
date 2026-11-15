@@ -54,6 +54,8 @@
 .sidebar-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 6px 12px; }
 .sidebar-new { margin: 0 8px 6px; }
 .sidebar-group { padding: 2px 6px; }
+.fold { width: 12px; flex: none; cursor: pointer; color: var(--muted); font-size: 10px; text-align: center; }
+.fold:hover { color: var(--text); }
 .sidebar-project { display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-radius: 6px; cursor: pointer; color: var(--info); font-weight: 600; }
 .sidebar-project:hover { background: var(--panel-2); }
 .sidebar-project.active { background: var(--info-soft); }

@@ -69,7 +69,12 @@ impl Provider {
     }
 
     pub fn from_id(id: &str) -> Self {
-        Self::ALL.into_iter().find(|p| p.id() == id).unwrap_or_default()
+        Self::find(id).unwrap_or_default()
+    }
+
+    /// The provider with this id, or `None` for an unknown id.
+    pub fn find(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.id() == id)
     }
 
     pub fn label(self) -> &'static str {

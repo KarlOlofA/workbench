@@ -92,6 +92,9 @@ pub struct Chat {
     pub session: CopyValue<String>,
     /// The folder the agent works in: its session's folder.
     pub dir: CopyValue<PathBuf>,
+    /// The provider and model the agent was started on instead of the settings (see `AppState::agent_provider`).
+    pub provider: CopyValue<Option<Provider>>,
+    pub pinned_model: CopyValue<Option<String>>,
     tx: CopyValue<tokio::sync::mpsc::UnboundedSender<Cmd>>,
     pub items: Signal<Vec<ChatItem>>,
     pub busy: Signal<bool>,
@@ -117,6 +120,8 @@ impl Chat {
             agent_id: CopyValue::new_in_scope(agent.id.clone(), root),
             session: CopyValue::new_in_scope(session.id.clone(), root),
             dir: CopyValue::new_in_scope(session.dir.clone(), root),
+            provider: CopyValue::new_in_scope(agent.provider, root),
+            pinned_model: CopyValue::new_in_scope(agent.model.clone(), root),
             tx: CopyValue::new_in_scope(tx, root),
             items: Signal::new_in_scope(Vec::new(), root),
             busy: Signal::new_in_scope(false, root),
@@ -157,8 +162,14 @@ const AGENT_NAME: &str = "Agent";
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatRequest {
     NewSession { dir: PathBuf },
+    /// A project-level session for the project with this id, shown in the chat.
+    NewProjectSession { project: String },
     /// `task` is sent to the new agent as its first prompt. `activate` shows it in the chat.
-    NewAgent { session: String, name: Option<String>, task: Option<String>, activate: bool },
+    /// `provider` and `model` override the settings for this agent.
+    NewAgent { session: String, name: Option<String>, task: Option<String>, activate: bool, provider: Option<Provider>, model: Option<String> },
+    /// A new session in `dir` (a project repository) whose agent `name` gets `task` as its
+    /// first prompt; asked for by an agent in another folder of the project.
+    AgentInRepo { dir: PathBuf, name: String, task: String, provider: Option<Provider>, model: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +228,10 @@ pub struct ChatRect {
 impl ChatRect {
     pub const MIN_W: f64 = 280.0;
     pub const MIN_H: f64 = 140.0;
+    /// How much of the chat's top-left corner a move keeps inside the window, so its bar can
+    /// always be grabbed. Must match the clamp on `.chat-dock.placed` in style.css.
+    pub const KEEP_VISIBLE_W: f64 = 120.0;
+    pub const KEEP_VISIBLE_H: f64 = 40.0;
 }
 
 /// How much of the floating chat is showing right now. Not saved: it starts at `Normal`.
@@ -233,6 +248,9 @@ pub enum ChatFocus {
 /// The window layout, saved in the user's config folder: the projects sidebar, the node menu
 /// to the right of the graph, and where and how big the floating chat is.
 /// Old layout files with `chat_anchor`/`chat_expanded` still load: unknown fields are ignored.
+/// Where the folded rows of the projects sidebar are saved.
+const COLLAPSED_FILE: &str = "sidebar_collapsed.json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
@@ -299,6 +317,8 @@ pub struct AppState {
     pub view: Signal<WorkbenchView>,
     pub graph_pane: Signal<GraphPane>,
     pub layout: Signal<Layout>,
+    /// The folded rows of the projects sidebar, saved across restarts. See `toggle_collapsed`.
+    pub collapsed: Signal<HashSet<String>>,
     pub chat_focus: Signal<ChatFocus>,
     /// The detached chat's window, while it is open.
     pub chat_window: Signal<Option<dioxus::desktop::tao::window::WindowId>>,
@@ -356,6 +376,7 @@ impl AppState {
             view: Signal::new(WorkbenchView::Graph),
             graph_pane: Signal::new(GraphPane::Node),
             layout: Signal::new(config::load_json(Layout::FILE)),
+            collapsed: Signal::new(config::load_json(COLLAPSED_FILE)),
             chat_focus: Signal::new(ChatFocus::Normal),
             chat_window: Signal::new(None),
             node_history: Signal::new(NodeHistory::default()),
@@ -660,6 +681,23 @@ impl AppState {
     pub fn set_layout(&mut self, f: impl FnOnce(&mut Layout)) {
         f(&mut self.layout.write());
         self.save_layout();
+    }
+
+    /// Whether a sidebar row is folded. Keys are `project:<id>`, `folder:<path>` (a repository
+    /// or worktree) and `session:<id>`.
+    pub fn is_collapsed(&self, key: &str) -> bool {
+        self.collapsed.read().contains(key)
+    }
+
+    /// Folds a sidebar row, or unfolds it when it is folded, and saves the folded rows.
+    pub fn toggle_collapsed(&mut self, key: String) {
+        let mut collapsed = self.collapsed.write();
+        if !collapsed.remove(&key) {
+            collapsed.insert(key);
+        }
+        if let Err(e) = config::save_json(COLLAPSED_FILE, &*collapsed) {
+            self.workbench_error.set(Some(e));
+        }
     }
 
     pub fn save_layout(&mut self) {
@@ -973,10 +1011,18 @@ impl AppState {
     pub fn set_provider(&mut self, provider: Provider) {
         self.update_provider_settings(|s| s.provider = provider);
         for mut chat in self.chats.peek().iter().copied() {
-            if !provider.modes().contains(&chat.chat_mode.peek()) {
+            if chat.provider.peek().is_none() && !provider.modes().contains(&chat.chat_mode.peek()) {
                 chat.chat_mode.set(ChatMode::Plan);
             }
         }
+    }
+
+    /// The provider and model this agent runs on: the ones it was started on, else the settings'.
+    pub fn agent_provider(&self, chat: &Chat) -> (Provider, String) {
+        let settings = self.provider_settings.read();
+        let provider = chat.provider.cloned().unwrap_or(settings.provider);
+        let model = chat.pinned_model.cloned().unwrap_or_else(|| settings.model(provider));
+        (provider, model)
     }
 
     pub fn current_project(&self) -> Option<Project> {
@@ -1177,8 +1223,35 @@ impl AppState {
         self.chats.read().iter().copied().filter(|c| *c.session.peek() == session_id).collect()
     }
 
+    /// The sessions of one repository or worktree folder. Project-level sessions are left out.
     pub fn sessions_in(&self, dir: &Path) -> Vec<SavedSession> {
-        self.sessions.read().iter().filter(|s| projects::same_dir(&s.dir, dir)).cloned().collect()
+        self.sessions.read().iter().filter(|s| s.project.is_none() && projects::same_dir(&s.dir, dir)).cloned().collect()
+    }
+
+    /// The project whose project view the main screen shows.
+    pub fn viewed_project(&self) -> Option<Project> {
+        let id = self.project_view.read().clone()?;
+        self.projects.read().iter().find(|p| p.id == id).cloned()
+    }
+
+    /// The project-level sessions of a project, oldest first.
+    pub fn project_sessions(&self, project_id: &str) -> Vec<SavedSession> {
+        self.sessions.read().iter().filter(|s| s.project.as_deref() == Some(project_id)).cloned().collect()
+    }
+
+    /// The project an agent works for: its project-level session's project, or the project of
+    /// the repository or worktree it works in.
+    pub fn chat_project(&self, chat: &Chat) -> Option<Project> {
+        let project_id = self.sessions.peek().iter().find(|s| s.id == *chat.session.peek()).and_then(|s| s.project.clone());
+        match project_id {
+            Some(id) => self.projects.peek().iter().find(|p| p.id == id).cloned(),
+            None => self.project_for(&chat.dir.peek()),
+        }
+    }
+
+    /// The id of the project, when `chat` belongs to a project-level session.
+    pub fn project_session_of(&self, chat: &Chat) -> Option<String> {
+        self.sessions.peek().iter().find(|s| s.id == *chat.session.peek()).and_then(|s| s.project.clone())
     }
 
     pub fn request_chat(&mut self, request: ChatRequest) {
@@ -1204,7 +1277,7 @@ impl AppState {
         self.save_sessions();
         if self.active_chat.peek().is_some_and(|c| closing.contains(&c)) {
             self.active_chat.set(None);
-            self.show_chat_for_cwd();
+            self.show_chat_for_view();
         }
     }
 
@@ -1241,10 +1314,14 @@ impl AppState {
         self.save_sessions();
     }
 
-    /// Shows an agent in the chat and opens its session's folder.
+    /// Shows an agent in the chat and opens its session's folder, or, for a project-level
+    /// session, its project view.
     pub fn open_agent(&mut self, chat: Chat) {
         self.active_chat.set(Some(chat));
-        crate::app::open_folder(*self, chat.dir.cloned());
+        match self.project_session_of(&chat) {
+            Some(project_id) => self.project_view.set(Some(project_id)),
+            None => crate::app::open_folder(*self, chat.dir.cloned()),
+        }
     }
 
     fn save_sessions(&mut self) {
@@ -1267,12 +1344,32 @@ impl AppState {
 
     /// Creates a session with one agent in `dir`. Call from the main window only (see `chat_requests`).
     pub fn create_session(&mut self, dir: PathBuf) -> Chat {
+        self.create_named_session(dir, AGENT_NAME.into(), None, None)
+    }
+
+    /// Creates a session in `dir` whose one agent is called `agent_name` and runs on `provider`
+    /// and `model` (`None` uses the settings). Call from the main window only.
+    pub fn create_named_session(&mut self, dir: PathBuf, agent_name: String, provider: Option<Provider>, model: Option<String>) -> Chat {
         // Named after the worktree's branch, like the worktree in the sidebar; else the folder.
-        let name = git::current_branch(&dir)
+        let title = git::current_branch(&dir)
             .or_else(|| dir.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "Session".into());
-        let agent = SavedAgent { id: sessions::new_id("agent"), name: AGENT_NAME.into(), transcript: None };
-        let session = SavedSession { id: sessions::new_id("session"), title: name, dir, agents: vec![agent.clone()] };
+        self.start_session(SavedSession { id: sessions::new_id("session"), title, dir, project: None, agents: Vec::new() }, agent_name, provider, model)
+    }
+
+    /// Creates a project-level session, working in the folder that holds the project's
+    /// repositories. `None` when the project is gone or has no repositories. Call from the main window only.
+    pub fn create_project_session(&mut self, project_id: &str) -> Option<Chat> {
+        let project = self.projects.peek().iter().find(|p| p.id == project_id).cloned()?;
+        let dir = project.folder()?;
+        let session = SavedSession { id: sessions::new_id("session"), title: project.name, dir, project: Some(project.id), agents: Vec::new() };
+        Some(self.start_session(session, AGENT_NAME.into(), None, None))
+    }
+
+    /// Saves `session` with one new agent called `agent_name` and starts that agent.
+    fn start_session(&mut self, mut session: SavedSession, agent_name: String, provider: Option<Provider>, model: Option<String>) -> Chat {
+        let agent = SavedAgent { id: sessions::new_id("agent"), name: agent_name, transcript: None, provider, model };
+        session.agents = vec![agent.clone()];
         self.sessions.write().push(session.clone());
         self.save_sessions();
         let chat = Chat::launch(*self, &session, &agent);
@@ -1280,11 +1377,12 @@ impl AppState {
         chat
     }
 
-    /// Adds an agent to a session. Call from the main window only (see `chat_requests`).
-    pub fn create_agent(&mut self, session_id: &str, name: Option<String>) -> Option<Chat> {
+    /// Adds an agent to a session, running on `provider` and `model` (`None` uses the settings).
+    /// Call from the main window only (see `chat_requests`).
+    pub fn create_agent(&mut self, session_id: &str, name: Option<String>, provider: Option<Provider>, model: Option<String>) -> Option<Chat> {
         let session = self.sessions.peek().iter().find(|s| s.id == session_id).cloned()?;
         let name = name.unwrap_or_else(|| AGENT_NAME.into());
-        let agent = SavedAgent { id: sessions::new_id("agent"), name, transcript: None };
+        let agent = SavedAgent { id: sessions::new_id("agent"), name, transcript: None, provider, model };
         self.sessions.write().iter_mut().find(|s| s.id == session_id)?.agents.push(agent.clone());
         self.save_sessions();
         let chat = Chat::launch(*self, &session, &agent);
@@ -1297,7 +1395,23 @@ impl AppState {
         let saved = self.sessions.peek().clone();
         let chats: Vec<Chat> = saved.iter().flat_map(|s| s.agents.iter().map(|a| Chat::launch(*self, s, a))).collect();
         self.chats.set(chats);
-        self.show_chat_for_cwd();
+        self.show_chat_for_view();
+    }
+
+    /// Picks the chat for what the main screen shows. In a project view it keeps a project-level
+    /// session of that project, or shows the project's latest one (nothing when it has none:
+    /// the chat then offers a New project session button). Elsewhere see `show_chat_for_cwd`.
+    pub fn show_chat_for_view(&mut self) {
+        let Some(project_id) = self.project_view.peek().clone() else {
+            self.show_chat_for_cwd();
+            return;
+        };
+        if self.active_chat.peek().is_some_and(|c| self.project_session_of(&c).as_deref() == Some(project_id.as_str())) {
+            return;
+        }
+        let latest = self.project_sessions(&project_id).last().map(|s| s.id.clone());
+        let first_agent = latest.and_then(|id| self.chats.peek().iter().copied().find(|c| *c.session.peek() == id));
+        self.active_chat.set(first_agent);
     }
 
     /// Makes sure the chat shows a session of the open folder: keeps the current one when it is

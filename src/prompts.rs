@@ -6,6 +6,7 @@ use crate::projects::Project;
 use crate::reference::{self, Refs};
 use crate::rules::{self, Rule};
 use crate::claude::ChatMode;
+use crate::providers::{Provider, Settings};
 
 pub const QUESTIONS_MARKER: &str = "[[workbench:awaiting-answers]]";
 
@@ -17,38 +18,111 @@ pub fn strip_marker(text: &str) -> String {
     text.replace(QUESTIONS_MARKER, "").trim_end().to_string()
 }
 
-/// An agent starts another agent in its chat session with a block like:
-/// `[[workbench:spawn-agent name="Tests"]]Write tests for the parser[[/workbench:spawn-agent]]`
-const SPAWN_OPEN: &str = "[[workbench:spawn-agent name=\"";
-const SPAWN_NAME_END: &str = "\"]]";
+/// An agent starts another agent with a block like
+/// `[[workbench:spawn-agent name="Tests"]]Write tests for the parser[[/workbench:spawn-agent]]`.
+/// With `repo="backend"` after the name, the agent starts in a new session in that repository
+/// of the project instead of in the same session. With `provider="vibe" model="…"` the agent
+/// runs on that provider and model instead of the ones in the settings.
+const SPAWN_OPEN: &str = "[[workbench:spawn-agent ";
+const SPAWN_HEADER_END: &str = "]]";
 const SPAWN_CLOSE: &str = "[[/workbench:spawn-agent]]";
 
-/// Told to every agent, so it can start other agents when the user asks for them.
-pub fn spawn_agent_instructions() -> String {
-    format!(
-        "\n\nYou are one agent in a Workbench chat session, and you can start more agents in the same session and folder. \
-         Do this only when the user asks for another agent (or agents). For each one, end your reply with a block: \
-         `{SPAWN_OPEN}<short name>{SPAWN_NAME_END}<the complete task for that agent>{SPAWN_CLOSE}`. \
-         The new agent sees only that task, so include everything it needs to know.\n"
-    )
+/// An agent that another agent's reply asks to start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnRequest {
+    pub name: String,
+    /// The project repository to start it in; `None` starts it in the same session.
+    pub repo: Option<String>,
+    /// The provider id to run it on; `None` uses the settings.
+    pub provider: Option<String>,
+    /// The model to run it on; `None` uses the provider's model in the settings.
+    pub model: Option<String>,
+    pub task: String,
 }
 
-/// The reply without its spawn blocks, and the (name, task) of every agent it asks to start.
-pub fn spawn_requests(text: &str) -> (String, Vec<(String, String)>) {
+/// Told to every agent, so it can start other agents when the user asks for them. Agents in
+/// a project also learn how to start an agent in another of its repositories. Every agent learns
+/// the providers and models it can start an agent on.
+pub fn spawn_agent_instructions(project: Option<&Project>, settings: &Settings) -> String {
+    let mut out = format!(
+        "\n\nYou are one agent in a Workbench chat session, and you can start more agents in the same session and folder. \
+         Do this only when the user asks for another agent (or agents). For each one, end your reply with a block: \
+         `{SPAWN_OPEN}name=\"<short name>\"{SPAWN_HEADER_END}<the complete task for that agent>{SPAWN_CLOSE}`. \
+         The new agent sees only that task, so include everything it needs to know.\n"
+    );
+    let repos: Vec<String> = project.map(|p| p.repos.iter().map(|r| format!("`{}`", r.label())).collect()).unwrap_or_default();
+    if !repos.is_empty() {
+        out.push_str(&format!(
+            "To start an agent in a repository of the project instead, add the repository after the name: \
+             `{SPAWN_OPEN}name=\"<short name>\" repo=\"<repository>\"{SPAWN_HEADER_END}<task>{SPAWN_CLOSE}`. \
+             It starts in a new chat session in that repository. The repositories are: {}.\n",
+            repos.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "When the user names a provider or model for the work (for example \"use vibe large 4 to build X\"), start an agent for it          and add the provider and model to the block: `{SPAWN_OPEN}name=\"<short name>\" provider=\"<provider id>\" model=\"<model>\"{SPAWN_HEADER_END}<task>{SPAWN_CLOSE}`          (together with `repo=` when the work is in another repository). Do this even when the work is in this folder or the provider is the one you run on:          the user's settings are only the default. Pick the listed model closest to what the user said; if none fits, use the user's name for it.          Leave `model` out to use the provider's default. The providers and their models:\n"
+    ));
+    for p in Provider::ALL {
+        out.push_str(&format!("- `{}` ({}): {}\n", p.id(), p.label(), settings.model_choices(p).join(", ")));
+    }
+    out
+}
+
+/// The value of `key="value"` in a spawn block's header.
+fn header_value(header: &str, key: &str) -> Option<String> {
+    let start = header.find(&format!("{key}=\""))? + key.len() + 2;
+    let len = header[start..].find('"')?;
+    Some(header[start..start + len].trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// The reply without its spawn blocks, and every agent it asks to start.
+pub fn spawn_requests(text: &str) -> (String, Vec<SpawnRequest>) {
     let mut shown = String::new();
     let mut spawns = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find(SPAWN_OPEN) {
         let after_open = &rest[start + SPAWN_OPEN.len()..];
-        let Some(name_end) = after_open.find(SPAWN_NAME_END) else { break };
-        let body = &after_open[name_end + SPAWN_NAME_END.len()..];
+        let Some(header_end) = after_open.find(SPAWN_HEADER_END) else { break };
+        let header = &after_open[..header_end];
+        let body = &after_open[header_end + SPAWN_HEADER_END.len()..];
         let Some(close) = body.find(SPAWN_CLOSE) else { break };
         shown.push_str(&rest[..start]);
-        spawns.push((after_open[..name_end].trim().to_string(), body[..close].trim().to_string()));
+        spawns.push(SpawnRequest {
+            name: header_value(header, "name").unwrap_or_else(|| "Agent".into()),
+            repo: header_value(header, "repo"),
+            provider: header_value(header, "provider"),
+            model: header_value(header, "model"),
+            task: body[..close].trim().to_string(),
+        });
         rest = &body[close + SPAWN_CLOSE.len()..];
     }
     shown.push_str(rest);
     (shown.trim_end().to_string(), spawns)
+}
+
+/// The system prompt of a project-level agent: it works in the folder that holds the project's
+/// repositories and hands work in a repository to an agent started there.
+pub fn project_agent_prompt(project: &Project, folder: &Path) -> String {
+    let mut out = format!("You are the project-level agent of the project “{}”", project.name.trim());
+    if !project.description.trim().is_empty() {
+        out.push_str(&format!(": {}", project.description.trim()));
+    }
+    out.push_str(&format!(
+        ".\nYou work in `{}`, the folder that holds the project's repositories. They are local clones you can read with your file tools; \
+         each may have its own architecture graph at `{GRAPH_FILE}` in its folder, so read that first for an overview:\n",
+        folder.display()
+    ));
+    for r in &project.repos {
+        let gh = r.github.as_deref().map(|g| format!(" (GitHub `{g}`)")).unwrap_or_default();
+        let desc = if r.description.trim().is_empty() { String::new() } else { format!(": {}", r.description.trim()) };
+        out.push_str(&format!("- `{}` at `{}`{gh}{desc}\n", r.label(), r.path));
+    }
+    out.push_str(
+        "\nAnswer questions about the project yourself. When the user wants a change made in a repository, \
+         start an agent in that repository with the task (see below) instead of editing it yourself, \
+         so the change is made with that repository's graph and rules.\n",
+    );
+    out
 }
 
 fn mode_section(mode: ChatMode, action: &str) -> String {
@@ -900,11 +974,42 @@ mod tests {
 
     #[test]
     fn spawn_blocks_are_parsed_and_removed() {
-        let reply = format!("Starting two.\n{SPAWN_OPEN}Tests{SPAWN_NAME_END}\nWrite tests\n{SPAWN_CLOSE}\n{SPAWN_OPEN}Docs{SPAWN_NAME_END}Update docs{SPAWN_CLOSE}");
+        let reply = format!(
+            "Starting two.\n{SPAWN_OPEN}name=\"Tests\"]]\nWrite tests\n{SPAWN_CLOSE}\n{SPAWN_OPEN}name=\"Api\" repo=\"backend\" provider=\"vibe\" model=\"mistral-large-4\"]]Add a route{SPAWN_CLOSE}"
+        );
         let (shown, spawns) = spawn_requests(&reply);
         assert_eq!(shown, "Starting two.");
-        assert_eq!(spawns, vec![("Tests".into(), "Write tests".into()), ("Docs".into(), "Update docs".into())]);
+        assert_eq!(
+            spawns,
+            vec![
+                SpawnRequest { name: "Tests".into(), repo: None, provider: None, model: None, task: "Write tests".into() },
+                SpawnRequest {
+                    name: "Api".into(),
+                    repo: Some("backend".into()),
+                    provider: Some("vibe".into()),
+                    model: Some("mistral-large-4".into()),
+                    task: "Add a route".into(),
+                },
+            ]
+        );
         assert_eq!(spawn_requests("no blocks"), ("no blocks".into(), vec![]));
+    }
+
+    #[test]
+    fn spawn_instructions_name_the_project_repositories() {
+        let p = Project {
+            name: "Workbench".into(),
+            repos: vec![ProjectRepo { path: "/code/backend".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let settings = Settings::default();
+        assert!(spawn_agent_instructions(Some(&p), &settings).contains("repo=\"<repository>\""));
+        assert!(spawn_agent_instructions(Some(&p), &settings).contains("`backend`"));
+        assert!(!spawn_agent_instructions(None, &settings).contains("repo=\"<repository>\""));
+        // Every agent learns the providers it can start an agent on, with their models.
+        assert!(spawn_agent_instructions(None, &settings).contains("provider=\"<provider id>\""));
+        assert!(spawn_agent_instructions(None, &settings).contains("- `vibe` (Mistral Vibe (CLI)): mistral-medium-3.5, local"));
+        assert!(project_agent_prompt(&p, Path::new("/code")).contains("- `backend` at `/code/backend`"));
     }
 
     #[test]

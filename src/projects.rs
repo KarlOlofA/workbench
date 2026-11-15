@@ -78,6 +78,27 @@ impl Project {
         self.repos.iter_mut().find(|r| r.path == path)
     }
 
+    /// The repository an agent names in a spawn block: by its label or its folder name.
+    pub fn find_repo(&self, name: &str) -> Option<&ProjectRepo> {
+        let name = name.trim();
+        let folder = |r: &ProjectRepo| r.dir().file_name().map(|f| f.to_string_lossy().to_string());
+        self.repos.iter().find(|r| r.label().eq_ignore_ascii_case(name) || folder(r).is_some_and(|f| f.eq_ignore_ascii_case(name)))
+    }
+
+    /// The folder a project-level session works in: the deepest folder that holds every
+    /// repository. `None` when the project has no repositories.
+    pub fn folder(&self) -> Option<PathBuf> {
+        let mut dirs = self.repos.iter().map(|r| r.dir());
+        let mut common = dirs.next()?;
+        for dir in dirs {
+            while !dir.starts_with(&common) {
+                common = common.parent()?.to_path_buf();
+            }
+        }
+        // A single repository is its own folder; with several, `common` is their parent.
+        Some(common)
+    }
+
     pub fn contains(&self, dir: &Path) -> bool {
         self.repos.iter().any(|r| r.is_at(dir))
     }
@@ -221,6 +242,15 @@ mod tests {
         let existing = vec![Project { id: "workbench".into(), ..Default::default() }];
         assert_eq!(unique_id(&existing, "Workbench"), "workbench-2");
         assert_eq!(unique_id(&[], "  "), "project");
+    }
+
+    #[test]
+    fn the_project_folder_holds_every_repository_and_repos_are_found_by_name() {
+        let p = Project { repos: vec![repo("/code/wb/frontend", None), repo("/code/wb/backend", None)], ..Default::default() };
+        assert_eq!(p.folder(), Some(PathBuf::from("/code/wb")));
+        assert_eq!(p.find_repo("Backend").map(|r| r.path.as_str()), Some("/code/wb/backend"));
+        assert!(p.find_repo("host").is_none());
+        assert_eq!(Project::default().folder(), None);
     }
 
     #[test]

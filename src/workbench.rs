@@ -2,6 +2,7 @@
 //! Settings buttons at its bottom) and the main screen on the right. The main screen shows the
 //! graph by default; Code, Rules and Settings replace it until closed with the ✕ at its top
 //! left. The floating chat (`ChatDock`) is rendered by the app over the whole window.
+//! Projects, repositories, worktrees and sessions in the sidebar fold with the ▾ in front of them.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -96,6 +97,8 @@ fn ProjectSidebar() -> Element {
                     let show_id = p.id.clone();
                     let add_id = p.id.clone();
                     let name_class = if viewing.as_deref() == Some(p.id.as_str()) { "sidebar-project active" } else { "sidebar-project" };
+                    let project_key = format!("project:{}", p.id);
+                    let project_open = !st.is_collapsed(&project_key);
                     rsx! {
                         div { key: "{p.id}", class: "sidebar-group",
                         div { class: "{name_class}",
@@ -104,6 +107,7 @@ fn ProjectSidebar() -> Element {
                                 st.view.set(WorkbenchView::Graph);
                                 st.project_view.set(Some(show_id.clone()));
                             },
+                            Fold { row: project_key }
                             span { class: "sidebar-label", "◈ {p.name}" }
                             button {
                                 class: "small",
@@ -115,12 +119,16 @@ fn ProjectSidebar() -> Element {
                                 "+"
                             }
                         }
+                        if project_open {
                         ul { class: "sidebar-repos",
+                            SessionRows { dir: p.folder().unwrap_or_default(), in_worktree: false, project: Some(p.id.clone()) }
                             for r in p.repos.clone() {
                                 {
                                     let worktrees = other_worktrees(&st, &r.path);
                                     let agents = activity.get(&r.dir()).cloned().unwrap_or_default();
                                     let dir = r.dir();
+                                    let repo_key = format!("folder:{}", r.dir().display());
+                                    let repo_open = !st.is_collapsed(&repo_key);
                                     rsx! {
                                         li {
                                             key: "{r.path}",
@@ -130,9 +138,11 @@ fn ProjectSidebar() -> Element {
                                                 st.view.set(WorkbenchView::Graph);
                                                 open_folder(st, dir.clone());
                                             },
+                                            Fold { row: repo_key }
                                             span { class: "sidebar-label", "{r.label()}" }
                                             AgentDot { agents }
                                         }
+                                        if repo_open {
                                         SessionRows { dir: r.dir(), in_worktree: false }
                                         for w in worktrees {
                                             {
@@ -140,6 +150,8 @@ fn ProjectSidebar() -> Element {
                                                 let here = crate::projects::same_dir(&w.path, &cwd);
                                                 let dir = w.path.clone();
                                                 let missing = w.prunable;
+                                                let worktree_key = format!("folder:{}", w.path.display());
+                                                let worktree_open = !st.is_collapsed(&worktree_key);
                                                 rsx! {
                                                     li {
                                                         key: "{w.path.display()}",
@@ -155,18 +167,23 @@ fn ProjectSidebar() -> Element {
                                                                 open_folder(st, dir.clone());
                                                             }
                                                         },
+                                                        Fold { row: worktree_key }
                                                         span { class: "sidebar-label", "⑂ {w.label()}" }
                                                         AgentDot { agents }
                                                     }
-                                                    SessionRows { dir: w.path.clone(), in_worktree: true }
+                                                    if worktree_open {
+                                                        SessionRows { dir: w.path.clone(), in_worktree: true }
+                                                    }
                                                 }
                                             }
+                                        }
                                         }
                                     }
                                 }
                             }
                         }
                         ProjectAgents { agents: project_agents(&st, &p, &activity) }
+                        }
                         }
                     }
                 }
@@ -178,14 +195,13 @@ fn ProjectSidebar() -> Element {
 /// The chat sessions in one folder, under its repository or worktree row: the session's title
 /// (with a dot while one of its agents works) and a ✕ to close it, then each of its agents and
 /// its state. Clicking a session or an agent shows it in the chat; clicking the name of the open
-/// session renames it.
+/// session renames it. With `project` set it lists that project's project-level sessions
+/// instead (working in `dir`, the project's folder), and nothing when it has none.
 #[component]
-fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
+fn SessionRows(dir: PathBuf, in_worktree: bool, #[props(default)] project: Option<String>) -> Element {
     let mut st = use_context::<AppState>();
     let active_chat = *st.active_chat.read();
     let active = active_chat.map(|c| c.session.cloned()).unwrap_or_default();
-    // Every agent runs on the provider picked in the header.
-    let provider = st.provider_settings.read().provider;
     // The session being renamed and the name typed so far.
     let mut renaming = use_signal(|| None::<(String, String)>);
     let mut save_name = move || {
@@ -193,8 +209,14 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
             st.rename_session(&id, title);
         }
     };
-    let sessions = st.sessions_in(&dir);
+    let sessions = match &project {
+        Some(id) => st.project_sessions(id),
+        None => st.sessions_in(&dir),
+    };
     let nested = if in_worktree { "in-worktree" } else { "" };
+    if sessions.is_empty() && project.is_some() {
+        return rsx! {};
+    }
     if sessions.is_empty() {
         return rsx! {
             li { class: "sidebar-session sidebar-no-session {nested}",
@@ -214,6 +236,10 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                 let draft = renaming.read().as_ref().filter(|(r, _)| *r == session.id).map(|(_, t)| t.clone());
                 let close_tip = if working { "Close this session, stopping its working agents" } else { "Close this session" };
                 let current = if is_open { "current" } else { "" };
+                let session_key = format!("session:{}", session.id);
+                let agents_open = !st.is_collapsed(&session_key);
+                let has_agents = !session.agents.is_empty();
+                let shown_agents = if agents_open { session.agents.clone() } else { Vec::new() };
                 rsx! {
                     li {
                         key: "{session.id}",
@@ -223,6 +249,7 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                             st.view.set(WorkbenchView::Graph);
                             st.open_session(&id);
                         },
+                        if has_agents { Fold { row: session_key } }
                         match draft {
                             Some(text) => rsx! {
                                 input {
@@ -267,7 +294,7 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                             "✕"
                         }
                     }
-                    for agent in session.agents.clone() {
+                    for agent in shown_agents {
                         if let Some(chat) = chats.iter().copied().find(|c| c.is(&agent.id)) {
                             {
                                 let (state, state_class, tip) = if chat.waiting() {
@@ -278,6 +305,7 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                                     ("waiting", "", "Waiting for a prompt")
                                 };
                                 let current = if Some(chat) == active_chat { "current" } else { "" };
+                                let provider = st.agent_provider(&chat).0;
                                 rsx! {
                                     li {
                                         key: "{agent.id}",
@@ -301,6 +329,25 @@ fn SessionRows(dir: PathBuf, in_worktree: bool) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The ▾ / ▸ in front of a sidebar row that folds away the rows under it. `row` names the row
+/// (see `AppState::is_collapsed`). Clicking it only folds; the rest of the row keeps its own click.
+#[component]
+fn Fold(row: String) -> Element {
+    let mut st = use_context::<AppState>();
+    let open = !st.is_collapsed(&row);
+    rsx! {
+        span {
+            class: "fold",
+            title: if open { "Fold" } else { "Unfold" },
+            onclick: move |e: MouseEvent| {
+                e.stop_propagation();
+                st.toggle_collapsed(row.clone());
+            },
+            if open { "▾" } else { "▸" }
         }
     }
 }
@@ -488,13 +535,14 @@ pub fn window_size() -> (f64, f64) {
     (size.width, size.height)
 }
 
-/// The rect after dragging by (dx, dy), kept inside the window.
-fn dragged(d: ChatDrag, dx: f64, dy: f64) -> ChatRect {
-    let (win_w, win_h) = window_size();
+/// The rect after dragging by (dx, dy) in a window of `win_w` x `win_h`. A move may push the
+/// chat past the right and bottom edges, as long as its top bar stays in the window; a resize
+/// keeps the chat inside the window.
+fn dragged(d: ChatDrag, dx: f64, dy: f64, (win_w, win_h): (f64, f64)) -> ChatRect {
     let mut r = d.start;
     if d.edges == 0 {
-        r.x = (r.x + dx).clamp(0.0, (win_w - r.w).max(0.0));
-        r.y = (r.y + dy).clamp(0.0, (win_h - r.h).max(0.0));
+        r.x = (r.x + dx).clamp(0.0, (win_w - ChatRect::KEEP_VISIBLE_W).max(0.0));
+        r.y = (r.y + dy).clamp(0.0, (win_h - ChatRect::KEEP_VISIBLE_H).max(0.0));
         return r;
     }
     let right = r.x + r.w;
@@ -528,10 +576,7 @@ pub fn ChatDock() -> Element {
     let layout = *st.layout.read();
     let Some(chat) = *st.active_chat.read() else {
         return rsx! {
-            div { class: "chat-detached-pill",
-                span { "No chat session in this folder" }
-                NewSessionButton {}
-            }
+            div { class: "chat-detached-pill", chat::NoChat {} }
         };
     };
     let focus = if chat.waiting() { ChatFocus::Active } else { *st.chat_focus.read() };
@@ -639,12 +684,28 @@ pub fn ChatDock() -> Element {
                 onmousemove: move |e: MouseEvent| {
                     let Some(d) = *drag.peek() else { return };
                     let p = e.client_coordinates();
-                    let r = dragged(d, p.x - d.mx, p.y - d.my);
+                    let r = dragged(d, p.x - d.mx, p.y - d.my, window_size());
                     st.layout.write().chat_rect = Some(r);
                 },
                 onmouseup: move |_| end(),
                 onmouseleave: move |_| end(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chat_bigger_than_the_room_left_can_still_move_to_the_edges() {
+        let start = ChatRect { x: 100.0, y: 100.0, w: 700.0, h: 500.0 };
+        let d = ChatDrag { edges: 0, mx: 0.0, my: 0.0, start };
+        let r = dragged(d, 10_000.0, 10_000.0, (800.0, 600.0));
+        assert_eq!((r.x, r.y), (800.0 - ChatRect::KEEP_VISIBLE_W, 600.0 - ChatRect::KEEP_VISIBLE_H));
+        assert_eq!((r.w, r.h), (700.0, 500.0));
+        let r = dragged(d, -10_000.0, -10_000.0, (800.0, 600.0));
+        assert_eq!((r.x, r.y), (0.0, 0.0));
     }
 }

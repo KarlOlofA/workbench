@@ -193,7 +193,7 @@ pub async fn run(mut st: AppState, mut chat: Chat, mut rx: tokio::sync::mpsc::Un
                     }
                     // One-turn providers exit after every finished turn; only an exit mid-turn is a failure.
                     if *chat.busy.peek() {
-                        let name = st.provider_settings.peek().provider.short_name();
+                        let name = st.agent_provider(chat).0.short_name();
                         chat.items.write().push(ChatItem::Error(format!("{name} exited (code {code:?})")));
                         chat.busy.set(false);
                         finish(st, chat, false);
@@ -231,9 +231,9 @@ async fn deliver(
     text: String,
 ) {
     let rules_version = *st.rules_version.peek();
-    let provider = st.provider_settings.peek().provider;
+    let (provider, model) = st.agent_provider(chat);
     if provider != Provider::ClaudeCode {
-        start_turn(st, chat, live, generation, ev_tx, shown, text, provider).await;
+        start_turn(st, chat, live, generation, ev_tx, shown, text, provider, model).await;
         return;
     }
     let mode = *chat.chat_mode.peek();
@@ -255,7 +255,7 @@ async fn deliver(
             mode,
             append_system_prompt: system_prompt(st, chat),
             mcp_config: mcp_config.clone(),
-            model: st.provider_settings.peek().model(Provider::ClaudeCode),
+            model,
         };
         match ClaudeProcess::spawn(&opts, *generation, ev_tx.clone()) {
             Ok(proc) => *live = Some(Live { agent: Agent::Workbench(proc), rules_version, mode, mcp_config }),
@@ -281,12 +281,68 @@ async fn deliver(
 
 /// The Workbench context every provider gets: graph upkeep, rules, related repos and the project.
 /// Agents can also start other agents in their chat session (see `prompts::spawn_requests`).
+/// A project-level agent gets the project's repositories instead, since it works above them.
 fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
-    let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
     let dir = chat.dir.cloned();
-    let project = st.project_for(&dir);
-    let with_project = prompts::with_project(base, project.as_ref(), &dir).unwrap_or_default();
-    Some(format!("{with_project}{}", prompts::spawn_agent_instructions()))
+    let project = st.chat_project(chat);
+    let context = match (st.project_session_of(chat), project.as_ref()) {
+        (Some(_), Some(p)) => prompts::project_agent_prompt(p, &dir),
+        _ => {
+            let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
+            prompts::with_project(base, project.as_ref(), &dir).unwrap_or_default()
+        }
+    };
+    Some(format!("{context}{}", prompts::spawn_agent_instructions(project.as_ref(), &st.provider_settings.peek())))
+}
+
+/// Starts the agents a reply asks for: in the same session, or in a new session in a
+/// repository of the agent's project, on the provider and model the block names, if any.
+fn start_spawns(st: &mut AppState, mut chat: Chat, spawns: Vec<prompts::SpawnRequest>) {
+    let project = st.chat_project(&chat);
+    for spawn in spawns {
+        let provider = match spawn.provider.as_deref().map(|id| (id, Provider::find(id))) {
+            None => None,
+            Some((_, Some(p))) => Some(p),
+            Some((id, None)) => {
+                let ids: Vec<&str> = Provider::ALL.iter().map(|p| p.id()).collect();
+                chat.items.write().push(ChatItem::Error(format!(
+                    "Could not start agent “{}”: “{id}” is not a provider; use one of {}",
+                    spawn.name,
+                    ids.join(", ")
+                )));
+                continue;
+            }
+        };
+        // A model without a provider is for the provider in the settings.
+        let runs_on = match (provider, &spawn.model) {
+            (Some(p), Some(m)) => format!(" on {} · {m}", p.label()),
+            (Some(p), None) => format!(" on {}", p.label()),
+            (None, Some(m)) => format!(" on {m}"),
+            (None, None) => String::new(),
+        };
+        let Some(repo_name) = spawn.repo else {
+            chat.items.write().push(ChatItem::Info(format!("Started agent “{}”{runs_on} in this session", spawn.name)));
+            st.request_chat(ChatRequest::NewAgent {
+                session: chat.session.cloned(),
+                name: Some(spawn.name),
+                task: Some(spawn.task),
+                activate: false,
+                provider,
+                model: spawn.model,
+            });
+            continue;
+        };
+        match project.as_ref().and_then(|p| p.find_repo(&repo_name)) {
+            Some(repo) => {
+                chat.items.write().push(ChatItem::Info(format!("Started agent “{}”{runs_on} in a new session in {}", spawn.name, repo.label())));
+                st.request_chat(ChatRequest::AgentInRepo { dir: repo.dir(), name: spawn.name, task: spawn.task, provider, model: spawn.model });
+            }
+            None => chat.items.write().push(ChatItem::Error(format!(
+                "Could not start agent “{}”: “{repo_name}” is not a repository of this agent's project",
+                spawn.name
+            ))),
+        }
+    }
 }
 
 /// Whether the agent works in the open folder, whose graph and files the app shows.
@@ -319,6 +375,7 @@ async fn start_turn(
     shown: ChatItem,
     text: String,
     provider: Provider,
+    model: String,
 ) {
     // Answering in the chat instead of picking a mode replaces the plan.
     chat.plan_approval.set(None);
@@ -336,7 +393,7 @@ async fn start_turn(
     }
     let opts = TurnOptions {
         cwd: chat.dir.cloned(),
-        model: settings.model(provider),
+        model,
         resume: chat.session_id.peek().clone(),
         mode,
         system_prompt: instructions,
@@ -388,7 +445,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
         ClaudeEvent::Init { session_id, model, mcp_servers } => {
             st.mcp_status.set(mcp_servers);
             // Reopening the app loads Workbench transcripts, so only Workbench sessions are remembered.
-            if st.provider_settings.peek().provider == Provider::ClaudeCode {
+            if st.agent_provider(chat).0 == Provider::ClaudeCode {
                 st.save_transcript(&chat.agent_id.cloned(), Some(session_id.clone()));
             }
             chat.session_id.set(Some(session_id));
@@ -486,10 +543,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
                 None => Vec::new(),
             };
             drop(items);
-            for (name, task) in spawns {
-                chat.items.write().push(ChatItem::Info(format!("Started agent “{name}” in this session")));
-                st.request_chat(ChatRequest::NewAgent { session: chat.session.cloned(), name: Some(name), task: Some(task), activate: false });
-            }
+            start_spawns(st, *chat, spawns);
             if questions {
                 st.await_answers();
             } else {
@@ -497,7 +551,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             }
             // Providers without a plan mode of their own: a plan-mode reply that doesn't ask
             // questions is the plan, so ask how to run it.
-            let plan_from_reply = st.provider_settings.peek().provider != Provider::ClaudeCode && *chat.chat_mode.peek() == ChatMode::Plan;
+            let plan_from_reply = st.agent_provider(chat).0 != Provider::ClaudeCode && *chat.chat_mode.peek() == ChatMode::Plan;
             if plan_from_reply && !is_error && !asked {
                 let plan = chat.items.peek().iter().rev().find_map(|i| match i {
                     ChatItem::Assistant { text, .. } => Some(text.clone()),
