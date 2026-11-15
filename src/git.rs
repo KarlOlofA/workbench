@@ -269,6 +269,13 @@ pub fn status(cwd: &Path) -> Result<Vec<StatusEntry>, String> {
         .collect())
 }
 
+/// Puts `paths` back as they are at HEAD, in the index and the working tree.
+pub fn restore(cwd: &Path, paths: &[&str]) -> Result<(), String> {
+    let mut args = vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"];
+    args.extend_from_slice(paths);
+    run_git(cwd, &args).map(|_| ())
+}
+
 pub fn push_current_branch(cwd: &Path) -> Result<String, String> {
     let out = Command::new("git")
         .args(["push", "-u", "origin", "HEAD"])

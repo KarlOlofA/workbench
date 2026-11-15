@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::agent::{self, Agent, TurnOptions};
+use crate::agent::{self, AgentAdapter, TurnOptions};
 use crate::api_chat;
-use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
+use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL, TESTED_CLI_VERSIONS, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
 use crate::history;
 use crate::projects::same_dir;
 use crate::{mcp, mcp_oauth};
@@ -11,12 +11,14 @@ use crate::prompts;
 use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
 
 struct Live {
-    agent: Agent,
+    agent: Box<dyn AgentAdapter>,
     rules_version: u64,
     /// The mode the agent runs in; a different chat mode restarts it on the next message.
     mode: ChatMode,
     /// The MCP config the Workbench process was started with; a new one (such as a refreshed sign-in token) restarts it.
     mcp_config: Option<String>,
+    /// The model the agent runs; a job routed to another model restarts it.
+    model: String,
 }
 
 /// The session loop of one agent: receives its commands, owns its agent process and turns the
@@ -239,7 +241,7 @@ async fn deliver(
     let mode = *chat.chat_mode.peek();
     let servers = st.mcp_servers.peek().clone();
     let mcp_config = mcp::claude_config(&mcp_oauth::with_tokens(&servers).await);
-    if live.as_ref().is_some_and(|l| l.rules_version != rules_version || l.mode != mode || l.mcp_config != mcp_config)
+    if live.as_ref().is_some_and(|l| l.rules_version != rules_version || l.mode != mode || l.mcp_config != mcp_config || l.model != model)
         && let Some(l) = live.take()
     {
         l.agent.kill().await;
@@ -255,10 +257,10 @@ async fn deliver(
             mode,
             append_system_prompt: system_prompt(st, chat),
             mcp_config: mcp_config.clone(),
-            model,
+            model: model.clone(),
         };
         match ClaudeProcess::spawn(&opts, *generation, ev_tx.clone()) {
-            Ok(proc) => *live = Some(Live { agent: Agent::Workbench(proc), rules_version, mode, mcp_config }),
+            Ok(proc) => *live = Some(Live { agent: Box::new(proc), rules_version, mode, mcp_config, model }),
             Err(e) => {
                 chat.items.write().push(ChatItem::Error(format!("{e:#}")));
                 finish(st, chat, false);
@@ -359,8 +361,11 @@ fn begin_turn(st: &mut AppState, chat: &Chat) {
 
 /// Ends the tracked graph turn or job, when it is this agent's.
 fn finish(st: &mut AppState, chat: &Chat, success: bool) {
-    if st.owns_turn(chat) {
-        st.finish_job(success);
+    if st.owns_turn(chat)
+        && let Some(warning) = st.finish_job(success)
+    {
+        let mut items = chat.items;
+        items.write().push(ChatItem::Error(warning));
     }
 }
 
@@ -404,7 +409,7 @@ async fn start_turn(
     };
     chat.model.set(if opts.model.is_empty() { provider.short_name().to_string() } else { opts.model.clone() });
     match agent::start_turn(provider, &settings, opts, *generation, ev_tx.clone()) {
-        Ok(agent) => *live = Some(Live { agent, rules_version: *st.rules_version.peek(), mode, mcp_config: None }),
+        Ok(agent) => *live = Some(Live { agent, rules_version: *st.rules_version.peek(), mode, mcp_config: None, model: String::new() }),
         Err(e) => {
             chat.items.write().push(shown);
             chat.items.write().push(ChatItem::Error(format!("{e:#}")));
@@ -579,6 +584,10 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             }
         }
         ClaudeEvent::Stderr(line) => chat.items.write().push(ChatItem::Info(line)),
+        ClaudeEvent::Unsupported(what) => chat.items.write().push(ChatItem::Error(format!(
+            "Claude Code output outside the tested contract: {what}. Workbench is tested with Claude Code {}; some agent output may be missing.",
+            TESTED_CLI_VERSIONS.join(", ")
+        ))),
         ClaudeEvent::ControlRequest { .. } | ClaudeEvent::Exited => {}
     }
 }

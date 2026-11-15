@@ -39,7 +39,7 @@
       "id": "app-state",
       "title": "AppState (signals store)",
       "kind": "store",
-      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP servers (the user's and the project's) and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), the chat sessions with every agent's live Chat and which one the chat shows, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns of an agent in the open folder it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Only one agent's turn or job is tracked at a time. Also defines the Cmd enum sent to the session loop.",
+      "description": "Central reactive store made of Dioxus signals: graph, baseline, rules, related GitHub repos, the MCP servers (the user's and the project's) and their last reported status, the user's provider settings, the projects list and whether the project view is showing, selection, the module scope path (which network the graph view shows), the chat sessions with every agent's live Chat and which one the chat shows, open file, tabs and the active job. It also holds the domain actions: open/save/revert files, load and sync the workbench from disk, update and save the graph or the current network, enter and leave modules, compute changes against the baseline, revert node and module changes, mark the graph as in sync, and update rules, related repos and MCP connections (saving MCP connections restarts Workbench on the next message). For plain chat turns of an agent in the open folder it snapshots the graph when the turn starts and, when the turn succeeds, moves the graph edits Workbench made into the baseline (the whole graph if it was in sync, otherwise only Workbench's changes), so they don't show up as the user's pending changes. Edits the user makes in the graph during the turn stay pending. Only one agent's turn or job is tracked at a time. Also defines the Cmd enum sent to the session loop. Every graph load, outside change and edit is recorded in the intent ledger. Description proposals are accepted or rejected through it. A scoped run snapshots its blast radius when it starts and is enforced when it finishes. An agent's node changes are absorbed only after verification passes.",
       "files": [
         "src/state.rs",
         "src/config.rs"
@@ -52,14 +52,18 @@
         "external-references",
         "ghost-branches",
         "node-history",
-        "chat-sessions"
+        "chat-sessions",
+        "intent-ledger",
+        "blast-radius",
+        "verification",
+        "work-orders"
       ]
     },
     {
       "id": "session-loop",
       "title": "Workbench session loop",
       "kind": "service",
-      "description": "One long-running loop per agent that receives that agent's Cmd values (Send, Prompt, Interrupt, Restart, Resume, Close; Close stops the agent and ends the loop) and owns its live agent, so agents in a session work at the same time. With Workbench it spawns the agent process lazily in the agent's folder, respawns it when the rules version changes, and resumes the agent's stored session id. A generation counter drops events from killed processes. Streamed events become the agent's chat items; when the agent works in the open folder, file-touching tool results bump repo_version and reload the open file, and Done settles its chat turn or graph job against the baseline. A reply that ends with spawn-agent blocks starts those agents with their tasks: in the same session, or, when a block names a repository of the agent's project, in a new session in that repository. A project-level agent gets the project's repositories as its context instead of the open folder's graph. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench session ids are saved for resuming. Each agent runs on its own provider and model when it was started on one (AppState::agent_provider), otherwise on the ones in the settings; a spawn-agent block can name a provider and model for the new agent, and an unknown provider id is shown as an error instead of starting it.",
+      "description": "One long-running loop per agent that receives that agent's Cmd values (Send, Prompt, Interrupt, Restart, Resume, Close; Close stops the agent and ends the loop) and owns its live agent, so agents in a session work at the same time. With Workbench it spawns the agent process lazily in the agent's folder, respawns it when the rules version changes, and resumes the agent's stored session id. A generation counter drops events from killed processes. Streamed events become the agent's chat items; when the agent works in the open folder, file-touching tool results bump repo_version and reload the open file, and Done settles its chat turn or graph job against the baseline. A reply that ends with spawn-agent blocks starts those agents with their tasks: in the same session, or, when a block names a repository of the agent's project, in a new session in that repository. A project-level agent gets the project's repositories as its context instead of the open folder's graph. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench session ids are saved for resuming. Each agent runs on its own provider and model when it was started on one (AppState::agent_provider), otherwise on the ones in the settings; a spawn-agent block can name a provider and model for the new agent, and an unknown provider id is shown as an error instead of starting it. The provider and model of a turn come from agent_provider. A job's route wins over the agent's own provider.",
       "files": [
         "src/session.rs",
         "src/history.rs"
@@ -76,9 +80,10 @@
       "id": "workbench-process",
       "title": "Workbench agent process",
       "kind": "service",
-      "description": "Finds the agent binary, then spawns it with stream-json input/output, partial messages, the permission mode of the chat mode, AskUserQuestion turned off (the agent asks in its reply instead), an optional --resume, --model, --append-system-prompt and --mcp-config. It writes user messages, interrupt control requests and permission answers (a plan approval also sets the session's mode) to stdin. Stdout lines are parsed into AgentEvent values (Init with the MCP server statuses, TextDelta, ToolUse, ToolResult, Done, Stderr, Exited) and tagged with a generation number. Also provides tool summaries and file-path extraction.",
+      "description": "Finds the agent binary, then spawns it with stream-json input/output, partial messages, the permission mode of the chat mode, AskUserQuestion turned off (the agent asks in its reply instead), an optional --resume, --model, --append-system-prompt and --mcp-config. It writes user messages, interrupt control requests and permission answers (a plan approval also sets the session's mode) to stdin. Stdout lines are parsed into AgentEvent values (Init with the MCP server statuses, TextDelta, ToolUse, ToolResult, Done, Stderr, Exited) and tagged with a generation number. Also provides tool summaries and file-path extraction. ClaudeProcess implements the AgentAdapter trait. Event shapes it doesn't know, and CLI versions outside TESTED_CLI_VERSIONS (2.1.322, pinned by a recorded fixture), come back as Unsupported events and are shown in the chat.",
       "files": [
-        "src/claude.rs"
+        "src/claude.rs",
+        "tests/fixtures/claude-2.1.322.ndjson"
       ],
       "links": [
         "workbench-cli"
@@ -98,7 +103,7 @@
       "id": "prompt-builder",
       "title": "Prompt builder",
       "kind": "service",
-      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create, and is told which nodes and files other branches are also changing), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply. It also builds the project-level agent's prompt (the project and its repositories) and the spawn-agent instructions, which name the project's repositories an agent can start another agent in. The spawn-agent instructions also list every provider id with its models, so when the user names a provider or model in the chat (\"use vibe large 4 to build X\") the agent adds provider and model to the block.",
+      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create, and is told which nodes and files other branches are also changing), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply. It also builds the project-level agent's prompt (the project and its repositories) and the spawn-agent instructions, which name the project's repositories an agent can start another agent in. The spawn-agent instructions also list every provider id with its models, so when the user names a provider or model in the chat (\"use vibe large 4 to build X\") the agent adds provider and model to the block. The Process prompt is built from typed work orders, each with its own instruction and declared blast radius.",
       "files": [
         "src/prompts.rs"
       ],
@@ -108,7 +113,8 @@
         "github-context",
         "external-references",
         "project-view",
-        "claims"
+        "claims",
+        "work-orders"
       ]
     },
     {
@@ -140,8 +146,9 @@
       "id": "workbench-files",
       "title": ".workbench data files",
       "kind": "db",
-      "description": "On-disk JSON store in the opened project: graph.json (the current, editable graph), graph.baseline.json (the last state in sync with the code) and rules.json. These files are read on load and re-read whenever the repo version changes.",
+      "description": "On-disk store in the opened project: graph.json (the ledger materialized plus node positions, the editable graph), graph.baseline.json (the last state in sync with the code), ledger.ndjson (the intent ledger), rules.json and node-history.jsonl. .gitattributes union-merges ledger.ndjson and node-history.jsonl. These files are read on load and re-read whenever the repo version changes.",
       "files": [
+        ".workbench/ledger.ndjson",
         ".workbench/graph.json",
         ".workbench/graph.baseline.json",
         ".workbench/rules.json",
@@ -222,14 +229,15 @@
       "id": "graph-canvas",
       "title": "Graph canvas",
       "kind": "component",
-      "description": "SVG and HTML node diagram with pan, zoom, fit-to-view, node dragging (saves the position) and link creation by clicking. It highlights the active flow path and colours nodes by kind. It always shows one network: the main graph or the module the user has opened. Module attachment nodes are drawn with a double teal border, the module name and node count, and are marked edited when their module has pending changes; double-clicking one opens the module, and a breadcrumb bar leads back up. The toolbar's + Module… menu creates a new module or attaches an existing one here. A press in the canvas or on a node fades the floating chat.",
+      "description": "SVG and HTML node diagram with pan, zoom, fit-to-view, node dragging (saves the position) and link creation by clicking. It highlights the active flow path and colours nodes by kind. It always shows one network: the main graph or the module the user has opened. Module attachment nodes are drawn with a double teal border, the module name and node count, and are marked edited when their module has pending changes; double-clicking one opens the module, and a breadcrumb bar leads back up. The toolbar's + Module… menu creates a new module or attaches an existing one here. A press in the canvas or on a node fades the floating chat. Nodes that an intent edit may have made stale get a marker.",
       "files": [
         "src/graph_view.rs"
       ],
       "links": [
         "app-state",
         "graph-model",
-        "ghost-branches"
+        "ghost-branches",
+        "claims"
       ]
     },
     {
@@ -254,7 +262,7 @@
       "id": "changes-pane",
       "title": "Changes pane (commit graph)",
       "kind": "component",
-      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. Before processing it reads the claims of the other git branches and warns when they change the same nodes or files, or nodes these changes depend on; the user can process anyway or process only the changes no other branch touches. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated.",
+      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. Before processing it reads the claims of the other git branches and warns when they change the same nodes or files, or nodes these changes depend on; the user can process anyway or process only the changes no other branch touches. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated. Description changes are flagged. Descriptions that agents proposed are listed for the user to accept or reject. Possibly stale dependents are shown, and a Strict toggle makes out-of-scope edits get undone.",
       "files": [
         "src/graph_view.rs"
       ],
@@ -262,7 +270,8 @@
         "app-state",
         "prompt-builder",
         "session-loop",
-        "claims"
+        "claims",
+        "intent-ledger"
       ]
     },
     {
@@ -564,7 +573,7 @@
       "id": "agent-layer",
       "title": "Agent layer",
       "kind": "service",
-      "description": "One interface over every LLM provider for the session loop. Workbench runs as the long-lived agent process; every other provider runs one turn per message, either a fresh Codex or Vibe process that resumes the previous session or one API request with the conversation so far, plus one more per round of MCP tool calls the model makes. All of them report back as the same chat events. Only Workbench can be interrupted mid-turn or ask for permissions; other turns are stopped by killing them.",
+      "description": "One interface over every LLM provider for the session loop. Workbench runs as the long-lived agent process; every other provider runs one turn per message, either a fresh Codex or Vibe process that resumes the previous session or one API request with the conversation so far, plus one more per round of MCP tool calls the model makes. All of them report back as the same chat events. Only Workbench can be interrupted mid-turn or ask for permissions; other turns are stopped by killing them. The contract is the AgentAdapter trait: ClaudeProcess::spawn builds it for Workbench and start_turn builds it for one-turn providers. Both report on one EventSender.",
       "files": [
         "src/agent.rs"
       ],
@@ -676,7 +685,7 @@
       "id": "claims",
       "title": "Claims (branch work overlap)",
       "kind": "service",
-      "description": "Derives the blast radius of intent work from git, without storing anything: the nodes a graph diff changes, the files those nodes own, and the nodes that link to them. open_claims reads every other branch with commits HEAD doesn't have, and builds each branch's claim from its graph diffed against the merge base plus the code files it changed, together with the branch's authors. overlaps compares the local pending changes with those claims, so contention shows up before any agent runs.",
+      "description": "Derives the blast radius of intent work from git, without storing anything: the nodes a graph diff changes, the files those nodes own, and the nodes that link to them. open_claims reads every other branch with commits HEAD doesn't have, and builds each branch's claim from its graph diffed against the merge base plus the code files it changed, together with the branch's authors. overlaps compares the local pending changes with those claims, so contention shows up before any agent runs. stale flags the callers and flow neighbours of an edited node as possibly stale, so an intent edit shows what else it may invalidate.",
       "files": [
         "src/claims.rs",
         "src/git.rs"
@@ -703,6 +712,68 @@
         "graph-model",
         "git-service",
         "app-state"
+      ]
+    },
+    {
+      "id": "intent-ledger",
+      "title": "Intent ledger",
+      "kind": "model",
+      "description": "The append-only log in .workbench/ledger.ndjson, the source of truth for the graph. Every entry is a ULID-stamped op from a closed set (node.add, node.merge, node.remove, ref.add, flow.put, flow.remove, tombstone), attributed to a person, an agent or an edit from outside. record diffs the materialized ledger against graph.json and appends the ops that explain the difference. materialize rebuilds the graph from the entries and takes positions from graph.json. When an agent edits a description, the edit becomes a proposal that a person accepts or rejects (verdict). Workbench refuses to append if earlier lines were changed or dropped (extends). The frozen schema is in docs/ledger-spec.md.",
+      "files": [
+        "src/ledger.rs",
+        "docs/ledger-spec.md"
+      ],
+      "links": [
+        "graph-model",
+        "workbench-files"
+      ]
+    },
+    {
+      "id": "blast-radius",
+      "title": "Blast-radius enforcement",
+      "kind": "service",
+      "description": "start snapshots a scoped run: the selected nodes, the files they own and the git state before the run. After the run, enforce compares the files the run changed with that scope (Workbench's own files are always allowed). Out-of-scope changes are reported in the chat. In strict mode they are restored from HEAD, which is safe because they were clean when the run started.",
+      "files": [
+        "src/scope.rs"
+      ],
+      "links": [
+        "git-service",
+        "graph-model"
+      ]
+    },
+    {
+      "id": "work-orders",
+      "title": "Work orders",
+      "kind": "model",
+      "description": "Turns the graph diff into typed work orders, one per kind of edit: Description, Link, Files, NodeAdd or NodeRemove. Each kind has its own instruction in the Process prompt and a declared blast radius (its claim), checked against the other branches' open claims. scope_nodes gives the union of the blast radii, which the blast-radius check enforces after the run.",
+      "files": [
+        "src/work_order.rs"
+      ],
+      "links": [
+        "graph-model",
+        "claims"
+      ]
+    },
+    {
+      "id": "verification",
+      "title": "Verification before absorb",
+      "kind": "service",
+      "description": "An agent's change to a node moves into the baseline only when the node's description passes the description lint and a model confirms the node's files do what the description says. Otherwise the change stays pending, with the reason. needs_check skips removals, modules and references, which have no code of their own. The checks come from the workbench-check library, so the app and the CI gate judge the same way. Answers are cached in .workbench/.check-cache by request hash.",
+      "files": [
+        "src/verify.rs"
+      ],
+      "links": [
+        "workbench-check",
+        "graph-model"
+      ]
+    },
+    {
+      "id": "workbench-check",
+      "title": "workbench-check library",
+      "kind": "external",
+      "description": "The workbench_auditer crate behind the `workbench check` CI gate, used as a path dependency (../workbench_auditer/crates/workbench-check). It provides the description lint, the satisfaction check against an Anthropic model, and its config from .workbench/check.toml.",
+      "files": [
+        "Cargo.toml"
       ]
     }
   ],
@@ -1023,7 +1094,7 @@
           "id": "providers-tab",
           "title": "Providers tab",
           "kind": "screen",
-          "description": "One card per provider, showing whether its CLI is installed or its API key is set, with a Use button. API providers get a key field and a Load models button that fetches the provider's live model list.",
+          "description": "One card per provider, showing whether its CLI is installed or its API key is set, with a Use button. API providers get a key field and a Load models button that fetches the provider's live model list. A Job routing section picks a provider and model per kind of job.",
           "files": [
             "src/providers_view.rs",
             "src/code.rs"
@@ -1037,7 +1108,7 @@
           "id": "provider-settings",
           "title": "Provider catalogue & settings",
           "kind": "model",
-          "description": "The Provider enum: label, how it is reached (CLI binary or API base URL, key variable and API style), suggested models and availability. Settings holds the chosen provider, the model per provider, typed API keys (the environment variable wins) and loaded model lists.",
+          "description": "The Provider enum: label, how it is reached (CLI binary or API base URL, key variable and API style), suggested models and availability. Settings holds the chosen provider, the model per provider, typed API keys (the environment variable wins) and loaded model lists. Routes send a kind of Workbench job to its own provider and model. strict_scope turns on undoing out-of-scope edits.",
           "files": [
             "src/providers.rs"
           ],

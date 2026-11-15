@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 
 use crate::api_chat;
 use crate::dropdown::{Choice, ComboBox, Dropdown};
-use crate::providers::{Access, Provider};
-use crate::state::{AppState, Cmd};
+use crate::providers::{Access, Provider, Route};
+use crate::state::{AppState, Cmd, JobKind};
 
 /// Header control: which provider and model the chat uses.
 #[component]
@@ -61,6 +61,65 @@ pub fn ProvidersView() -> Element {
             div { class: "rules-list",
                 for provider in Provider::ALL {
                     ProviderCard { key: "{provider.id()}", provider, active: provider == settings.provider }
+                }
+            }
+            JobRoutes {}
+        }
+    }
+}
+
+/// Routes each kind of Workbench job to a provider and model, using the keys above.
+#[component]
+fn JobRoutes() -> Element {
+    let mut st = use_context::<AppState>();
+    let settings = st.provider_settings.read().clone();
+    let mut choices = vec![Choice::new("", "The chat's provider")];
+    choices.extend(Provider::ALL.iter().map(|p| Choice::new(p.id(), p.label())));
+
+    rsx! {
+        div { class: "rules-intro muted small-text",
+            "Job routing: run a kind of Workbench job on another provider or model than the chat's. Jobs that change code need a CLI provider."
+        }
+        div { class: "rules-list",
+            for kind in JobKind::ALL {
+                {
+                    let route = settings.routes.get(kind.key()).cloned();
+                    let suggestions = route.as_ref().map(|r| settings.model_choices(r.provider)).unwrap_or_default();
+                    rsx! {
+                        div { key: "{kind.key()}", class: "rule",
+                            span { "{kind.label()}" }
+                            Dropdown {
+                                title: "Provider for this job",
+                                value: route.as_ref().map(|r| r.provider.id().to_string()).unwrap_or_default(),
+                                choices: choices.clone(),
+                                onchange: move |id: String| {
+                                    st.update_provider_settings(|s| {
+                                        if id.is_empty() {
+                                            s.routes.remove(kind.key());
+                                        } else {
+                                            s.routes.insert(kind.key().to_string(), Route { provider: Provider::from_id(&id), model: String::new() });
+                                        }
+                                    });
+                                },
+                            }
+                            if let Some(r) = route {
+                                ComboBox {
+                                    class: "model-input",
+                                    title: "Model for this job. Leave empty for the provider's default.",
+                                    placeholder: "default model",
+                                    value: r.model.clone(),
+                                    suggestions,
+                                    onchange: move |model: String| {
+                                        st.update_provider_settings(|s| {
+                                            if let Some(r) = s.routes.get_mut(kind.key()) {
+                                                r.model = model;
+                                            }
+                                        });
+                                    },
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

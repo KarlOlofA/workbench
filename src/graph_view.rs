@@ -9,10 +9,12 @@ use crate::claude::ChatMode;
 use crate::dropdown::{Choice, ComboBox, Dropdown};
 use crate::ghost::{self, GhostPick};
 use crate::git;
-use crate::graph::{self, ChangeKind, Flow, Graph, KNOWN_KINDS, Module, NODE_H, NODE_W, Node, REFERENCE_KIND, RefNode, Reference, Subject};
+use crate::ledger;
+use crate::graph::{self, ChangeKind, Field, Flow, Graph, KNOWN_KINDS, Module, NODE_H, NODE_W, Node, REFERENCE_KIND, RefNode, Reference, Subject};
 use crate::prompts::{self, DebugMode};
 use crate::reference::{self, RefState, Source};
 use crate::node_history::{self, Entry, Op, Row};
+use crate::work_order;
 use crate::state::{AppState, Cmd, GraphPane, Job, JobKind, Layout};
 
 fn attach_module(mut st: AppState, module: String) {
@@ -246,7 +248,13 @@ pub fn GraphTab() -> Element {
                 match job {
                     Some(Job { awaiting: true, .. }) => rsx! {
                         span { class: "badge warn", title: "Answer Workbench's questions in the chat to continue", "Waiting for your answers" }
-                        button { class: "small", onclick: move |_| st.finish_job(false), "Cancel" }
+                        button {
+                            class: "small",
+                            onclick: move |_| {
+                                st.finish_job(false);
+                            },
+                            "Cancel"
+                        }
                     },
                     Some(Job { kind: JobKind::Generate, .. }) => rsx! { span { class: "badge busy", "Mapping…" } },
                     Some(Job { kind: JobKind::Process, .. }) => rsx! { span { class: "badge busy", "Processing…" } },
@@ -822,6 +830,8 @@ fn GraphCanvas() -> Element {
         .unwrap_or_default();
     let changes = st.changes();
     let changed_modules: Vec<String> = changes.iter().filter_map(|c| c.scope.clone()).collect();
+    let stale: HashMap<String, String> =
+        claims::stale(&st.graph.read(), &changes).into_iter().filter(|s| s.node.0 == scope).map(|s| (s.node.1.clone(), stale_text(&s))).collect();
     let status: HashMap<String, &'static str> = changes
         .into_iter()
         .filter(|c| c.subject == Subject::Node && c.scope == scope)
@@ -1085,6 +1095,9 @@ fn GraphCanvas() -> Element {
                                         "added" => rsx! { span { class: "gnode-status", "new" } },
                                         "modified" => rsx! { span { class: "gnode-status", "edited" } },
                                         _ => rsx! {},
+                                    }
+                                    if let Some(tip) = stale.get(&n.id) {
+                                        span { class: "gnode-stale", title: "{tip}", "stale?" }
                                     }
                                     if n_marks > 0 {
                                         span { class: "gnode-ghost-tag", title: "{mark_tip}", "⧉ {n_marks}" }
@@ -2226,42 +2239,7 @@ fn HistoryPane() -> Element {
                                     }
                                 }
                             }
-                            table { class: "hunk-lines node-diff",
-                                tbody {
-                                    for (i, row) in rows.into_iter().enumerate() {
-                                        match row {
-                                            Row::Line { op, old, new, text } => rsx! {
-                                                tr {
-                                                    key: "{i}",
-                                                    class: match op {
-                                                        Op::Add => "added",
-                                                        Op::Del => "removed",
-                                                        Op::Same => "context",
-                                                    },
-                                                    td { class: "ln", {old.map(|n| n.to_string()).unwrap_or_default()} }
-                                                    td { class: "ln", {new.map(|n| n.to_string()).unwrap_or_default()} }
-                                                    td { class: "sign",
-                                                        match op {
-                                                            Op::Add => "+",
-                                                            Op::Del => "−",
-                                                            Op::Same => " ",
-                                                        }
-                                                    }
-                                                    td { class: "src", "{text}" }
-                                                }
-                                            },
-                                            Row::Skip(n) => rsx! {
-                                                tr { key: "{i}", class: "meta",
-                                                    td { class: "ln" }
-                                                    td { class: "ln" }
-                                                    td { class: "sign" }
-                                                    td { class: "src", "⋯ {n} unchanged line{plural(n)}" }
-                                                }
-                                            },
-                                        }
-                                    }
-                                }
-                            }
+                            {diff_table(rows)}
                         }
                     }
                 }
@@ -2378,6 +2356,7 @@ fn ChangesPane() -> Element {
     });
     let overlaps = open_claims.read().as_ref().map(|open| claim_overlaps(st, &changes, open)).unwrap_or_default();
     let free = changes.iter().filter(|c| !overlaps.iter().any(|o| o.claim.touches(c))).count();
+    let stale = claims::stale(&st.graph.read(), &changes);
 
     // `only_free` leaves out the changes that overlap another branch's claim.
     let mut process = move |only_free: bool| {
@@ -2392,7 +2371,11 @@ fn ChangesPane() -> Element {
         }
         let overlaps = claim_overlaps(st, &changes, &open);
         let mode = st.start_job(JobKind::Process);
-        let text = st.with_refs(|refs| prompts::process(&st.graph.peek(), &changes, &st.rules.peek(), &note.peek(), mode, Some(refs), &overlaps));
+        let base = st.baseline.peek().clone().unwrap_or_default();
+        let orders = work_order::from_changes(&base, &st.graph.peek(), &changes, &open);
+        // The run may only change files inside the work orders' blast radii.
+        st.scope_run(work_order::scope_nodes(&orders));
+        let text = st.with_refs(|refs| prompts::process(&st.graph.peek(), &orders, &st.rules.peek(), &note.peek(), mode, Some(refs), &overlaps));
         let label = format!("Process {} graph change{} ({})", changes.len(), plural(changes.len()), mode.label());
         note.set(String::new());
         st.chat_or_new().send(Cmd::Prompt { label, text });
@@ -2400,6 +2383,7 @@ fn ChangesPane() -> Element {
 
     if changes.is_empty() {
         return rsx! {
+            ProposalsList {}
             div { class: "muted pad",
                 if has_nodes {
                     "The graph matches the code. Edit node descriptions, links or nodes and your changes will show up here."
@@ -2412,6 +2396,7 @@ fn ChangesPane() -> Element {
 
     rsx! {
         div { class: "changes",
+            ProposalsList {}
             if !has_baseline {
                 div { class: "hint-box",
                     "This graph hasn't been processed yet, so every node counts as new. If it already describes the code, choose "
@@ -2441,12 +2426,28 @@ fn ChangesPane() -> Element {
                     let rev_scope = c.scope.clone();
                     let subject = c.subject;
                     let id_rev = n.id.clone();
+                    let intent = matches!(&c.kind, ChangeKind::Modified(f) if f.contains(&Field::Description));
+                    let verification = st.verification.read().get(&key).cloned();
                     rsx! {
                         div { key: "{key}", class: "change {cls}",
                             span { class: "change-sign", "{sign}" }
                             div { class: "change-body",
-                                div { class: "change-title", "{title}" }
+                                div { class: "change-title",
+                                    "{title}"
+                                    if intent {
+                                        span {
+                                            class: "intent-flag",
+                                            title: "This rewrites what the node is meant to do. Review it like a change to .env: the code will be changed to match it.",
+                                            "⚠ intent"
+                                        }
+                                    }
+                                }
                                 div { class: "muted small-text", "{detail}{place}" }
+                                match verification {
+                                    Some(None) => rsx! { div { class: "muted small-text", "Verifying that the code matches the description…" } },
+                                    Some(Some(why)) => rsx! { div { class: "warn small-text", title: "The agent's work on this node stays pending until it passes", "⚠ Not verified: {why}" } },
+                                    None => rsx! {},
+                                }
                             }
                             if !removed {
                                 button {
@@ -2461,6 +2462,18 @@ fn ChangesPane() -> Element {
                                 onclick: move |_| st.revert_change(rev_scope.clone(), subject, &id_rev),
                                 "Revert"
                             }
+                        }
+                    }
+                }
+            }
+            if !stale.is_empty() {
+                div { class: "hint-box claim-warning",
+                    div { class: "claim-warning-head", b { "Possibly stale ({stale.len()})" } }
+                    div { class: "small-text", "These nodes depend on intent you changed. Check that their descriptions still agree with it." }
+                    for s in stale.iter() {
+                        div { key: "{s.node.0:?}{s.node.1}", class: "small-text",
+                            b { {st.graph.peek().net(s.node.0.as_deref()).map(|n| n.title_of(&s.node.1)).unwrap_or_default()} }
+                            " · {stale_text(s)}"
                         }
                     }
                 }
@@ -2508,6 +2521,77 @@ fn ChangesPane() -> Element {
                     title: "Accept the graph as an accurate description of the code without changing any code",
                     onclick: move |_| st.mark_in_sync(),
                     "Mark in sync"
+                }
+            }
+            label {
+                class: "small-text muted",
+                title: "Processing may only change the changed nodes' files and their callers'. In strict mode, changes to other existing files are undone.",
+                input {
+                    r#type: "checkbox",
+                    checked: st.provider_settings.read().strict_scope,
+                    onchange: move |e| st.update_provider_settings(|s| s.strict_scope = e.checked()),
+                }
+                " Strict scope: undo changes outside the changed nodes' files"
+            }
+        }
+    }
+}
+
+/// Why a node may be stale, for its badge and the Changes pane.
+fn stale_text(s: &claims::Stale) -> String {
+    match &s.flow {
+        Some(flow) => format!("may be stale: it is on the flow “{flow}” with `{}`, whose intent changed", s.because),
+        None => format!("may be stale: it depends on `{}`, whose intent changed", s.because),
+    }
+}
+
+/// The descriptions agents proposed. Agents never change intent themselves (see
+/// `ledger::record`), so a person accepts or rejects each proposal here.
+#[component]
+fn ProposalsList() -> Element {
+    let mut st = use_context::<AppState>();
+    let locked = st.graph_locked() || st.turn_start.read().is_some();
+    let entries = st.ledger.read().clone();
+    let g = st.graph.read().clone();
+    let items: Vec<(String, String, String, Vec<Row>)> = ledger::open_proposals(&entries)
+        .into_iter()
+        .filter_map(|e| {
+            let (scope, subject, id) = ledger::merge_target(&e.op)?;
+            let ledger::Op::NodeMerge { patch, .. } = &e.op else { return None };
+            let proposed = patch.get("description")?.as_str().unwrap_or_default();
+            let (title, current) = match subject {
+                Subject::Module => g.module(id).map(|m| (format!("▣ {}", m.title), m.description.clone()))?,
+                Subject::Node => g.net(scope).and_then(|n| n.node(id)).map(|n| (n.title.clone(), n.description.clone()))?,
+            };
+            let who = e.author.clone().map(|a| format!("an agent run by {a}")).unwrap_or_else(|| "an agent".into());
+            Some((e.id.clone(), title, who, node_history::line_diff(&current, proposed)))
+        })
+        .collect();
+    if items.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "hint-box claim-warning",
+            div { class: "claim-warning-head", b { "⚠ Proposed intent changes ({items.len()})" } }
+            div { class: "small-text",
+                "Agents may not rewrite what a node is meant to do. Accept a proposal to make it the node's description, or reject it."
+            }
+            for (id, title, who, rows) in items {
+                {
+                    let accept_id = id.clone();
+                    let reject_id = id.clone();
+                    rsx! {
+                        div { key: "{id}", class: "proposal",
+                            div { class: "claim-warning-head",
+                                span { class: "change-title", "{title}" }
+                                span { class: "muted small-text", " · proposed by {who}" }
+                                div { class: "spacer" }
+                                button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&accept_id, true), "Accept" }
+                                button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&reject_id, false), "Reject" }
+                            }
+                            {diff_table(rows)}
+                        }
+                    }
                 }
             }
         }
@@ -2682,6 +2766,48 @@ fn FlowDraft() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Before/after text as a line diff table, as in the history pane.
+fn diff_table(rows: Vec<Row>) -> Element {
+    rsx! {
+        table { class: "hunk-lines node-diff",
+            tbody {
+                for (i, row) in rows.into_iter().enumerate() {
+                    match row {
+                        Row::Line { op, old, new, text } => rsx! {
+                            tr {
+                                key: "{i}",
+                                class: match op {
+                                    Op::Add => "added",
+                                    Op::Del => "removed",
+                                    Op::Same => "context",
+                                },
+                                td { class: "ln", {old.map(|n| n.to_string()).unwrap_or_default()} }
+                                td { class: "ln", {new.map(|n| n.to_string()).unwrap_or_default()} }
+                                td { class: "sign",
+                                    match op {
+                                        Op::Add => "+",
+                                        Op::Del => "−",
+                                        Op::Same => " ",
+                                    }
+                                }
+                                td { class: "src", "{text}" }
+                            }
+                        },
+                        Row::Skip(n) => rsx! {
+                            tr { key: "{i}", class: "meta",
+                                td { class: "ln" }
+                                td { class: "ln" }
+                                td { class: "sign" }
+                                td { class: "src", "⋯ {n} unchanged line{plural(n)}" }
+                            }
+                        },
                     }
                 }
             }

@@ -3,7 +3,9 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
+use crate::agent::AgentAdapter;
 use crate::platform;
+use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -23,8 +25,24 @@ pub enum ClaudeEvent {
     ControlRequest { request_id: String, subtype: String },
     ControlCancel { request_id: String },
     Stderr(String),
+    /// Output outside the tested Claude Code contract: an unknown event shape or an untested
+    /// CLI version. Shown as an error, so a CLI change can't silently drop agent output.
+    Unsupported(String),
     Exited,
 }
+
+/// Claude Code versions whose stream-json output is pinned by a recorded fixture in
+/// `tests/fixtures/claude-<version>.ndjson`. Add a version only together with its fixture.
+pub const TESTED_CLI_VERSIONS: [&str; 1] = ["2.1.322"];
+
+/// Top-level event types Workbench knows and has nothing to show for.
+const IGNORED_TYPES: [&str; 3] = ["control_response", "rate_limit_event", "keep_alive"];
+const IGNORED_SYSTEM: [&str; 7] = ["status", "hook_started", "hook_progress", "hook_response", "thinking_tokens", "compact_boundary", "api_retry"];
+const STREAM_EVENTS: [&str; 8] =
+    ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "ping", "error"];
+const STREAM_DELTAS: [&str; 5] = ["text_delta", "input_json_delta", "thinking_delta", "signature_delta", "citations_delta"];
+const ASSISTANT_BLOCKS: [&str; 6] = ["text", "tool_use", "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result"];
+const USER_BLOCKS: [&str; 3] = ["tool_result", "text", "image"];
 
 /// One MCP server as reported by the agent when a session starts, e.g. status "connected" or "failed".
 #[derive(Debug, Clone, PartialEq)]
@@ -258,8 +276,14 @@ impl ClaudeProcess {
         let out_tx = tx.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
+            let mut reported = std::collections::HashSet::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 for ev in parse_line(&line) {
+                    if let ClaudeEvent::Unsupported(what) = &ev
+                        && !reported.insert(what.clone())
+                    {
+                        continue;
+                    }
                     if out_tx.send((generation, ev)).is_err() {
                         return;
                     }
@@ -288,7 +312,11 @@ impl ClaudeProcess {
         Ok(())
     }
 
-    pub async fn send_user(&mut self, text: &str) -> Result<()> {
+}
+
+#[async_trait]
+impl AgentAdapter for ClaudeProcess {
+    async fn send_user(&mut self, text: &str) -> Result<()> {
         self.write_json(json!({
             "type": "user",
             "message": {
@@ -299,7 +327,7 @@ impl ClaudeProcess {
         .await
     }
 
-    pub async fn interrupt(&mut self) -> Result<()> {
+    async fn interrupt(&mut self) -> Result<()> {
         self.request_counter += 1;
         let id = format!("ui-{}", self.request_counter);
         self.write_json(json!({
@@ -310,7 +338,7 @@ impl ClaudeProcess {
         .await
     }
 
-    pub async fn respond_permission(&mut self, request_id: &str, decision: &PermissionDecision) -> Result<()> {
+    async fn respond_permission(&mut self, request_id: &str, decision: &PermissionDecision) -> Result<()> {
         let response = match decision {
             PermissionDecision::Allow { input, permissions } => {
                 let mut r = json!({ "behavior": "allow", "updatedInput": input });
@@ -334,7 +362,7 @@ impl ClaudeProcess {
         .await
     }
 
-    pub async fn respond_error(&mut self, request_id: &str, error: &str) -> Result<()> {
+    async fn respond_error(&mut self, request_id: &str, error: &str) -> Result<()> {
         self.write_json(json!({
             "type": "control_response",
             "response": { "subtype": "error", "request_id": request_id, "error": error }
@@ -342,11 +370,11 @@ impl ClaudeProcess {
         .await
     }
 
-    pub async fn kill(mut self) {
+    async fn kill(mut self: Box<Self>) {
         let _ = self.child.kill().await;
     }
 
-    pub fn exit_code(&mut self) -> Option<i32> {
+    fn exit_code(&mut self) -> Option<i32> {
         self.child.try_wait().ok().flatten().and_then(|s| s.code())
     }
 }
@@ -380,27 +408,39 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
 
     match v.get("type").and_then(Value::as_str) {
         Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
+            let mut events = Vec::new();
+            let version = str_at(&v, "claude_code_version");
+            if !TESTED_CLI_VERSIONS.contains(&version.as_str()) {
+                events.push(ClaudeEvent::Unsupported(format!("untested Claude Code version {version:?}")));
+            }
             let mcp_servers = v["mcp_servers"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .map(|m| McpStatus { name: str_at(m, "name"), status: str_at(m, "status") })
                 .collect();
-            vec![ClaudeEvent::Init { session_id: str_at(&v, "session_id"), model: str_at(&v, "model"), mcp_servers }]
+            events.push(ClaudeEvent::Init { session_id: str_at(&v, "session_id"), model: str_at(&v, "model"), mcp_servers });
+            events
         }
+        Some("system") => match v.get("subtype").and_then(Value::as_str) {
+            Some(s) if IGNORED_SYSTEM.contains(&s) => vec![],
+            other => vec![unsupported(&format!("system event {other:?}"))],
+        },
+        Some(t) if IGNORED_TYPES.contains(&t) => vec![],
         Some("stream_event") => {
             let ev = &v["event"];
-            if ev.get("type").and_then(Value::as_str) == Some("content_block_delta")
-                && ev["delta"].get("type").and_then(Value::as_str) == Some("text_delta")
-            {
-                vec![ClaudeEvent::TextDelta(str_at(&ev["delta"], "text"))]
-            } else {
-                vec![]
+            let kind = ev.get("type").and_then(Value::as_str).unwrap_or_default();
+            let delta = ev["delta"].get("type").and_then(Value::as_str).unwrap_or_default();
+            match kind {
+                "content_block_delta" if delta == "text_delta" => vec![ClaudeEvent::TextDelta(str_at(&ev["delta"], "text"))],
+                "content_block_delta" if !STREAM_DELTAS.contains(&delta) => vec![unsupported(&format!("stream delta {delta:?}"))],
+                k if STREAM_EVENTS.contains(&k) => vec![],
+                k => vec![unsupported(&format!("stream event {k:?}"))],
             }
         }
         Some("assistant") => v["message"]["content"]
             .as_array()
-            .map(|blocks| {
+            .map_or_else(|| vec![unsupported("assistant message without content")], |blocks| {
                 blocks
                     .iter()
                     .filter_map(|b| match b.get("type").and_then(Value::as_str) {
@@ -410,25 +450,29 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
                             name: str_at(b, "name"),
                             input: b.get("input").cloned().unwrap_or(Value::Null),
                         }),
-                        _ => None,
+                        Some(t) if ASSISTANT_BLOCKS.contains(&t) => None,
+                        other => Some(unsupported(&format!("assistant block {other:?}"))),
                     })
                     .collect()
-            })
-            .unwrap_or_default(),
+            }),
+        // A replayed user message may have plain string content.
+        Some("user") if v["message"]["content"].is_string() => vec![],
         Some("user") => v["message"]["content"]
             .as_array()
-            .map(|blocks| {
+            .map_or_else(|| vec![unsupported("user message without content")], |blocks| {
                 blocks
                     .iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-                    .map(|b| ClaudeEvent::ToolResult {
-                        id: str_at(b, "tool_use_id"),
-                        content: content_to_string(b.get("content").unwrap_or(&Value::Null)),
-                        is_error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                    .filter_map(|b| match b.get("type").and_then(Value::as_str) {
+                        Some("tool_result") => Some(ClaudeEvent::ToolResult {
+                            id: str_at(b, "tool_use_id"),
+                            content: content_to_string(b.get("content").unwrap_or(&Value::Null)),
+                            is_error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                        }),
+                        Some(t) if USER_BLOCKS.contains(&t) => None,
+                        other => Some(unsupported(&format!("user block {other:?}"))),
                     })
                     .collect()
-            })
-            .unwrap_or_default(),
+            }),
         Some("control_request") => {
             let req = &v["request"];
             let request_id = str_at(&v, "request_id");
@@ -450,8 +494,12 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
             is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
             text: v.get("result").and_then(Value::as_str).map(String::from),
         }],
-        _ => vec![],
+        other => vec![unsupported(&format!("event type {other:?}"))],
     }
+}
+
+fn unsupported(what: &str) -> ClaudeEvent {
+    ClaudeEvent::Unsupported(format!("unknown {what}"))
 }
 
 pub fn tool_summary(name: &str, input: &Value, cwd: &Path) -> String {
@@ -561,10 +609,39 @@ mod tests {
 
     #[test]
     fn parses_init_and_result() {
-        let i = r#"{"type":"system","subtype":"init","session_id":"s1","model":"m","mcp_servers":[{"name":"docs","status":"connected"}]}"#;
+        let i = r#"{"type":"system","subtype":"init","session_id":"s1","model":"m","claude_code_version":"2.1.322","mcp_servers":[{"name":"docs","status":"connected"}]}"#;
         assert!(matches!(&parse_line(i)[..], [ClaudeEvent::Init { session_id, mcp_servers, .. }]
             if session_id == "s1" && mcp_servers[0] == McpStatus { name: "docs".into(), status: "connected".into() }));
         let r = r#"{"type":"result","subtype":"success","is_error":false,"result":"x","total_cost_usd":0.5}"#;
         assert!(matches!(&parse_line(r)[..], [ClaudeEvent::Done { cost_usd: Some(c), .. }] if *c == 0.5));
+    }
+
+    /// Every tested CLI version has a recorded stream, and every line of it parses without
+    /// leaving the known contract.
+    #[test]
+    fn tested_cli_versions_parse_their_recorded_streams() {
+        for version in TESTED_CLI_VERSIONS {
+            let path = format!("{}/tests/fixtures/claude-{version}.ndjson", env!("CARGO_MANIFEST_DIR"));
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let events: Vec<ClaudeEvent> = text.lines().flat_map(parse_line).collect();
+            let unsupported: Vec<&ClaudeEvent> = events.iter().filter(|e| matches!(e, ClaudeEvent::Unsupported(_))).collect();
+            assert!(unsupported.is_empty(), "{version}: {unsupported:?}");
+            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::Init { .. })));
+            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::TextDelta(_))));
+            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::ToolUse { .. })));
+            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::ToolResult { .. })));
+            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::Done { .. })));
+        }
+    }
+
+    #[test]
+    fn unknown_shapes_and_versions_are_reported() {
+        let unsupported = |line: &str| parse_line(line).iter().any(|e| matches!(e, ClaudeEvent::Unsupported(_)));
+        assert!(unsupported(r#"{"type":"brand_new_event"}"#));
+        assert!(unsupported(r#"{"type":"system","subtype":"brand_new"}"#));
+        assert!(unsupported(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"audio_delta"}}}"#));
+        assert!(unsupported(r#"{"type":"assistant","message":{"content":[{"type":"hologram"}]}}"#));
+        assert!(unsupported(r#"{"type":"system","subtype":"init","session_id":"s","model":"m","claude_code_version":"9.9.9"}"#));
+        assert!(!unsupported(r#"{"type":"rate_limit_event","rate_limit_info":{}}"#));
     }
 }

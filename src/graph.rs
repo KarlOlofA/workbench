@@ -114,6 +114,7 @@ pub enum Field {
     Kind,
     Description,
     Links,
+    Files,
     Module,
     Reference,
 }
@@ -125,13 +126,15 @@ impl Field {
             Field::Kind => "kind",
             Field::Description => "description",
             Field::Links => "links",
+            Field::Files => "files",
             Field::Module => "module",
             Field::Reference => "reference",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Subject {
     Node,
     Module,
@@ -662,6 +665,9 @@ fn diff_net(base: &Graph, cur: &Graph, scope: Option<&str>) -> Vec<Change> {
                 }
                 if sorted(&before.links) != sorted(&after.links) {
                     fields.push(Field::Links);
+                }
+                if before.files != after.files {
+                    fields.push(Field::Files);
                 }
                 if before.module != after.module {
                     fields.push(Field::Module);

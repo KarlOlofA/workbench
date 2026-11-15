@@ -339,6 +339,7 @@ button.toggle.on { border-color: var(--accent); color: var(--accent); }
 .gnode-kind { color: var(--kind); }
 .gnode.added .gnode-status { color: var(--add); }
 .gnode.modified .gnode-status { color: var(--warn); }
+.gnode-stale { color: var(--warn); font-style: italic; }
 .gnode.dim { opacity: 0.35; }
 .gnode.dim.selected { opacity: 1; }
 .gnode { transition: opacity 0.12s; }
@@ -529,6 +530,8 @@ label.check input { width: auto; padding: 0; }
 .gnode.ghost-conflict { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--warn); }
 .claim-warning { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--warn); color: var(--text); }
 .claim-warning-head { display: flex; align-items: center; color: var(--warn); }
+.intent-flag { margin-left: 6px; padding: 0 4px; border: 1px solid var(--warn); border-radius: 4px; color: var(--warn); font-size: 11px; }
+.proposal { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
 .merge-view { display: flex; flex-direction: column; gap: 10px; padding: 16px 20px; overflow-y: auto; max-width: 1100px; }
 .merge-conflict { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--warn); border-radius: 8px; }
 .merge-conflict-head { display: flex; align-items: baseline; gap: 10px; }

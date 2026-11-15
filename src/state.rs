@@ -9,12 +9,15 @@ use crate::claude::{ChatMode, McpStatus, PermissionDecision, PermissionRequest};
 use crate::claims;
 use crate::ghost::{self, GhostBranch, GhostPick};
 use crate::git;
+use crate::ledger;
+use crate::scope;
+use crate::verify;
 use crate::github;
 use crate::mcp;
 use crate::projects::{self, Project};
 use crate::providers::{self, Provider};
 use crate::prompts;
-use crate::graph::{self, BASELINE_FILE, Change, GRAPH_FILE, Graph, Subject};
+use crate::graph::{self, BASELINE_FILE, Change, ChangeKind, Field, GRAPH_FILE, Graph, Subject};
 use crate::node_history::{self, NodeHistory, Source};
 use crate::reference::{self, RefGraphs, RefState, Refs};
 use crate::rules::{self, Rule};
@@ -179,6 +182,27 @@ pub enum JobKind {
     Draft,
 }
 
+impl JobKind {
+    pub const ALL: [JobKind; 3] = [JobKind::Generate, JobKind::Process, JobKind::Draft];
+
+    /// The key of the job's route in the provider settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            JobKind::Generate => "generate",
+            JobKind::Process => "process",
+            JobKind::Draft => "draft",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            JobKind::Generate => "Generate or refresh the graph",
+            JobKind::Process => "Commit & process graph changes",
+            JobKind::Draft => "Draft nodes from a description",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Job {
     pub kind: JobKind,
@@ -323,6 +347,13 @@ pub struct AppState {
     /// The detached chat's window, while it is open.
     pub chat_window: Signal<Option<dioxus::desktop::tao::window::WindowId>>,
     pub node_history: Signal<NodeHistory>,
+    /// Verification of agent changes before they are absorbed, by change key: None while it
+    /// runs, the reason when the change stays pending (see `verify.rs`).
+    pub verification: Signal<HashMap<String, Option<String>>>,
+    /// The scope of the running agent turn or job, when it works on chosen nodes.
+    pub run_scope: Signal<Option<scope::RunScope>>,
+    /// The intent ledger (`.workbench/ledger.ndjson`), as last read or written.
+    pub ledger: Signal<Vec<ledger::Entry>>,
     pub me: Signal<Option<String>>,
     pub flow_draft: Signal<Option<Vec<String>>>,
     pub active_flow: Signal<Option<String>>,
@@ -380,6 +411,9 @@ impl AppState {
             chat_focus: Signal::new(ChatFocus::Normal),
             chat_window: Signal::new(None),
             node_history: Signal::new(NodeHistory::default()),
+            ledger: Signal::new(Vec::new()),
+            run_scope: Signal::new(None),
+            verification: Signal::new(HashMap::new()),
             me: Signal::new(None),
             flow_draft: Signal::new(None),
             active_flow: Signal::new(None),
@@ -508,7 +542,15 @@ impl AppState {
         });
         self.me.set(git::user_name(&cwd));
         self.node_history.set(NodeHistory { known: node_history::load_snapshot(&cwd), entries });
-        self.graph.set(g.unwrap_or_default());
+        // A newly opened folder has its own ledger: nothing of it has been read yet.
+        self.ledger.set(Vec::new());
+        // graph.json is a view of the ledger: rebuild it when only the ledger exists.
+        let rebuilt = g.is_none().then(|| ledger::load(&cwd).ok().filter(|l| !l.is_empty())).flatten();
+        let rebuilt = rebuilt.map(|l| ledger::materialize(&l, &Graph::default()));
+        self.graph.set(g.or(rebuilt.clone()).unwrap_or_default());
+        if rebuilt.is_some() {
+            self.save_graph();
+        }
         self.record_history(Source::Outside);
         self.baseline.set(base);
         self.rules.set(r);
@@ -653,12 +695,99 @@ impl AppState {
         }
     }
 
+    /// Agents don't own intent: the description edits of an agent turn or job were recorded as
+    /// proposals (see `ledger::record`), so the graph gets the ledger's descriptions back.
+    /// Runs while the turn or job is still tracked, so the last edits count as the agent's.
+    fn restore_intent(&mut self) {
+        self.sync_workbench_from_disk();
+        let committed = ledger::materialize(&self.ledger.peek(), &self.graph.peek());
+        if self.take_descriptions(&committed) {
+            self.save_graph();
+            self.record_history(Source::Workbench);
+        }
+    }
+
+    /// Sets every node and module description that differs in `from`. Only descriptions, so
+    /// the order and layout of graph.json stay as they are.
+    fn take_descriptions(&mut self, from: &Graph) -> bool {
+        let changes = graph::diff(&self.graph.peek(), from);
+        let mut changed = false;
+        for c in changes {
+            let (ChangeKind::Modified(fields), Some(after)) = (&c.kind, &c.after) else { continue };
+            if !fields.contains(&Field::Description) {
+                continue;
+            }
+            let mut g = self.graph.write();
+            match c.subject {
+                Subject::Module => {
+                    if let Some(m) = g.module_mut(&c.id) {
+                        m.description = after.description.clone();
+                    }
+                }
+                Subject::Node => {
+                    if let Some(n) = g.net_mut(c.scope.as_deref()).and_then(|net| net.node_mut(&c.id)) {
+                        n.description = after.description.clone();
+                    }
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// Accepts or rejects an agent's proposed description (see `ledger::verdict`).
+    pub fn decide_proposal(&mut self, id: &str, accept: bool) {
+        if self.job.peek().is_some() || self.turn_start.peek().is_some() {
+            self.workbench_error.set(Some("Wait until the agent has finished before deciding on its proposals.".into()));
+            return;
+        }
+        let cwd = self.cwd.peek().clone();
+        let me = self.me.peek().clone();
+        let known = self.ledger.peek().clone();
+        let entries = match ledger::load_checked(&cwd, &known) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.workbench_error.set(Some(e));
+                return;
+            }
+        };
+        let new = ledger::verdict(&entries, id, accept, me.as_deref(), node_history::now());
+        if let Err(e) = ledger::append(&cwd, &new) {
+            self.workbench_error.set(Some(e));
+            return;
+        }
+        let mut all = entries;
+        all.extend(new);
+        let g = ledger::materialize(&all, &self.graph.peek());
+        self.ledger.set(all);
+        if self.take_descriptions(&g) {
+            self.save_graph();
+            self.record_history(Source::Person);
+        }
+    }
+
+    /// Records the graph's changes in the intent ledger as ops.
+    fn record_ledger(&mut self, g: &Graph, source: Source, me: Option<&str>) {
+        let cwd = self.cwd.peek().clone();
+        let source = match source {
+            Source::Person => ledger::Source::Person,
+            Source::Workbench => ledger::Source::Agent,
+            Source::Outside => ledger::Source::Outside,
+        };
+        let known = self.ledger.peek().clone();
+        match ledger::record(&cwd, &known, g, source, me, node_history::now()) {
+            Ok(entries) => self.ledger.set(entries),
+            Err(e) => self.workbench_error.set(Some(e)),
+        }
+    }
+
     /// Appends an entry to the shared node history for every node or module whose information
     /// differs from what this client last saw, saves the log in `.workbench/` and the local
     /// snapshot in the user's config folder.
     pub fn record_history(&mut self, source: Source) {
         let g = self.graph.peek().clone();
         let me = self.me.peek().clone();
+        self.record_ledger(&g, source, me.as_deref());
         let before = self.node_history.peek().entries.len();
         let changed = self.node_history.write().record(&g, source, me.as_deref(), node_history::now());
         if !changed {
@@ -1017,9 +1146,14 @@ impl AppState {
         }
     }
 
-    /// The provider and model this agent runs on: the ones it was started on, else the settings'.
+    /// The provider and model this agent runs on: the route of the job it is running (see
+    /// `Settings::route`), else the ones it was started on, else the settings'.
     pub fn agent_provider(&self, chat: &Chat) -> (Provider, String) {
         let settings = self.provider_settings.read();
+        let job = if self.owns_turn(chat) { self.job.peek().as_ref().map(|j| j.kind.key()) } else { None };
+        if job.is_some_and(|j| settings.routes.contains_key(j)) {
+            return settings.route(job);
+        }
         let provider = chat.provider.cloned().unwrap_or(settings.provider);
         let model = chat.pinned_model.cloned().unwrap_or_else(|| settings.model(provider));
         (provider, model)
@@ -1131,8 +1265,32 @@ impl AppState {
         self.turn_owner.set(Some(agent_id.to_string()));
         self.sync_workbench_from_disk();
         let g = self.graph.peek().clone();
+        let net = self.scope.peek().last().cloned();
+        let selected: Vec<_> = self.selected.peek().iter().map(|id| (net.clone(), id.clone())).collect();
+        if !selected.is_empty() {
+            self.scope_run(selected);
+        }
         self.turn_start.set(Some(g));
         self.turn_user_edits.write().clear();
+    }
+
+    /// Scopes the running turn or job to `nodes` (see `scope.rs`).
+    pub fn scope_run(&mut self, nodes: Vec<claims::NodeKey>) {
+        let cwd = self.cwd.peek().clone();
+        let s = scope::start(&cwd, &self.graph.peek(), nodes);
+        self.run_scope.set(Some(s));
+    }
+
+    /// Compares the files the scoped run changed with its scope, and in strict mode undoes
+    /// what it may. Returns the message for the chat.
+    fn enforce_scope(&mut self) -> Option<String> {
+        let s = self.run_scope.take()?;
+        let cwd = self.cwd.peek().clone();
+        let strict = self.provider_settings.peek().strict_scope;
+        match scope::enforce(&cwd, &s, &self.graph.peek(), strict) {
+            Ok(violations) => scope::report(&violations, strict),
+            Err(e) => Some(format!("Could not check the agent's changes against its scope: {e}")),
+        }
     }
 
     fn end_chat_turn(&mut self, success: bool) {
@@ -1152,12 +1310,54 @@ impl AppState {
             return;
         }
         let was_in_sync = user_edits.is_empty() && self.baseline.peek().as_ref().is_some_and(|b| graph::diff(b, &start).is_empty());
-        if was_in_sync {
+        self.absorb_verified(made, cur, was_in_sync);
+    }
+
+    /// Moves changes an agent finished into the baseline. Changes whose node needs
+    /// verification (see `verify.rs`) are checked in the background first and only absorbed
+    /// when satisfied; the others stay pending with the reason. `in_sync`: when nothing needs
+    /// checking, the whole graph becomes the baseline.
+    fn absorb_verified(&mut self, changes: Vec<Change>, cur: Graph, in_sync: bool) {
+        let (check, ready): (Vec<Change>, Vec<Change>) = changes.into_iter().partition(verify::needs_check);
+        if check.is_empty() && in_sync {
             self.mark_in_sync();
             return;
         }
+        self.absorb_now(&ready, &cur);
+        if check.is_empty() {
+            return;
+        }
+        for c in &check {
+            self.verification.write().insert(c.key(), None);
+        }
+        let cwd = self.cwd.peek().clone();
+        let mut st = *self;
+        spawn(async move {
+            let (dir, graph, list) = (cwd.clone(), cur.clone(), check.clone());
+            let results = tokio::task::spawn_blocking(move || verify::run(&dir, &graph, &list, verify::anthropic)).await.unwrap_or_default();
+            if *st.cwd.peek() != cwd {
+                return;
+            }
+            for (i, c) in check.iter().enumerate() {
+                match results.get(i).cloned().unwrap_or_else(|| Err("the check stopped unexpectedly".into())) {
+                    Ok(()) => {
+                        st.verification.write().remove(&c.key());
+                        st.absorb_now(std::slice::from_ref(c), &cur);
+                    }
+                    Err(why) => {
+                        st.verification.write().insert(c.key(), Some(why));
+                    }
+                }
+            }
+        });
+    }
+
+    fn absorb_now(&mut self, changes: &[Change], cur: &Graph) {
+        if changes.is_empty() {
+            return;
+        }
         let mut base = self.baseline.peek().clone().unwrap_or_default();
-        graph::absorb(&mut base, &made, &cur);
+        graph::absorb(&mut base, changes, cur);
         let cwd = self.cwd.peek().clone();
         match graph::save(&cwd, BASELINE_FILE, &base) {
             Ok(()) => self.baseline.set(Some(base)),
@@ -1170,16 +1370,30 @@ impl AppState {
         self.turn_owner.peek().as_deref().is_some_and(|id| chat.is(id))
     }
 
-    pub fn finish_job(&mut self, success: bool) {
+    /// Ends the tracked turn or job. Returns a warning for the chat when the run changed
+    /// files outside its scope.
+    pub fn finish_job(&mut self, success: bool) -> Option<String> {
+        if self.turn_start.peek().is_some() || self.job.peek().is_some() {
+            self.restore_intent();
+        }
+        let out_of_scope = self.enforce_scope();
         self.end_chat_turn(success);
         self.turn_owner.set(None);
-        let Some(job) = *self.job.peek() else { return };
+        let Some(job) = *self.job.peek() else { return out_of_scope };
         // Sync while the job is still set so its graph edits are credited to Workbench.
         self.sync_workbench_from_disk();
         self.job.set(None);
-        if success && job.kind != JobKind::Draft {
-            self.mark_in_sync();
+        match job.kind {
+            JobKind::Process if success => {
+                let cur = self.graph.peek().clone();
+                let changes = graph::diff(self.baseline.peek().as_ref().unwrap_or(&Graph::default()), &cur);
+                self.absorb_verified(changes, cur, true);
+            }
+            // A generated graph is read from the code, so it is in sync by construction.
+            JobKind::Generate if success => self.mark_in_sync(),
+            _ => {}
         }
+        out_of_scope
     }
 
     pub fn update_rules(&mut self, f: impl FnOnce(&mut Vec<Rule>)) {

@@ -312,17 +312,23 @@ pub fn exists(cwd: &Path) -> bool {
     cwd.join(HISTORY_FILE).exists()
 }
 
+/// Adds `line` (e.g. `file merge=union`) to `.workbench/.gitattributes` unless it is there.
+pub fn ensure_attribute(cwd: &Path, line: &str) -> Result<(), String> {
+    let attrs = cwd.join(ATTRIBUTES_FILE);
+    let current = std::fs::read_to_string(&attrs).unwrap_or_default();
+    if !current.lines().any(|l| l.trim() == line.trim()) {
+        let sep = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+        std::fs::write(&attrs, format!("{current}{sep}{}\n", line.trim())).map_err(|e| format!("{ATTRIBUTES_FILE}: {e}"))?;
+    }
+    Ok(())
+}
+
 pub fn save(cwd: &Path, entries: &[Entry]) -> Result<(), String> {
     let path = cwd.join(HISTORY_FILE);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let attrs = cwd.join(ATTRIBUTES_FILE);
-    let current = std::fs::read_to_string(&attrs).unwrap_or_default();
-    if !current.lines().any(|l| l.trim() == ATTRIBUTES.trim()) {
-        let sep = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
-        std::fs::write(&attrs, format!("{current}{sep}{ATTRIBUTES}")).map_err(|e| format!("{ATTRIBUTES_FILE}: {e}"))?;
-    }
+    ensure_attribute(cwd, ATTRIBUTES)?;
     let mut text = String::new();
     for e in entries {
         text.push_str(&serde_json::to_string(e).map_err(|e| e.to_string())?);

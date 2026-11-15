@@ -212,6 +212,22 @@ pub struct Settings {
     /// Model lists loaded from API providers in the Providers tab, per provider id.
     #[serde(default)]
     pub fetched_models: BTreeMap<String, Vec<String>>,
+    /// Strict scope: undo an agent run's changes to existing files outside its nodes' files.
+    #[serde(default)]
+    pub strict_scope: bool,
+    /// The provider and model per job kind (see `JobKind::key`). Jobs without a route run on
+    /// the chat's provider.
+    #[serde(default)]
+    pub routes: BTreeMap<String, Route>,
+}
+
+/// Which provider and model run one kind of Workbench job instead of the chat's own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Route {
+    pub provider: Provider,
+    /// Empty means the provider's default model.
+    #[serde(default)]
+    pub model: String,
 }
 
 impl Settings {
@@ -221,6 +237,15 @@ impl Settings {
 
     pub fn save(&self) -> Result<(), String> {
         config::save_json(SETTINGS_FILE, self)
+    }
+
+    /// The provider and model for a run: the route of `job` when it has one, else the chat's.
+    pub fn route(&self, job: Option<&str>) -> (Provider, String) {
+        match job.and_then(|j| self.routes.get(j)) {
+            Some(r) if r.model.trim().is_empty() => (r.provider, r.provider.default_model().to_string()),
+            Some(r) => (r.provider, r.model.trim().to_string()),
+            None => (self.provider, self.model(self.provider)),
+        }
     }
 
     pub fn model(&self, provider: Provider) -> String {
@@ -250,6 +275,17 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jobs_use_their_route_or_the_chat_provider() {
+        let mut s = Settings { provider: Provider::Codex, ..Default::default() };
+        s.routes.insert("process".into(), Route { provider: Provider::ClaudeCode, model: "opus".into() });
+        s.routes.insert("draft".into(), Route { provider: Provider::AnthropicApi, model: String::new() });
+        assert_eq!(s.route(Some("process")), (Provider::ClaudeCode, "opus".to_string()));
+        assert_eq!(s.route(Some("draft")), (Provider::AnthropicApi, Provider::AnthropicApi.default_model().to_string()));
+        assert_eq!(s.route(Some("generate")).0, Provider::Codex);
+        assert_eq!(s.route(None).0, Provider::Codex);
+    }
 
     #[test]
     fn cli_providers_offer_every_mode_api_providers_only_plan_and_answer() {

@@ -7,6 +7,7 @@ use crate::reference::{self, Refs};
 use crate::rules::{self, Rule};
 use crate::claude::ChatMode;
 use crate::providers::{Provider, Settings};
+use crate::work_order::{self, WorkOrder};
 
 pub const QUESTIONS_MARKER: &str = "[[workbench:awaiting-answers]]";
 
@@ -456,7 +457,8 @@ fn claims_section(graph: &Graph, overlaps: &[BranchClaim]) -> String {
     p
 }
 
-pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mode: ChatMode, refs: Option<&Refs>, overlaps: &[BranchClaim]) -> String {
+pub fn process(graph: &Graph, orders: &[WorkOrder], rules: &[Rule], note: &str, mode: ChatMode, refs: Option<&Refs>, overlaps: &[BranchClaim]) -> String {
+    let changes = &work_order::changes(orders);
     let ids: Vec<String> = changes.iter().map(|c| c.id.clone()).collect();
     let rules = rules::relevant(rules, Some(&ids));
 
@@ -540,6 +542,11 @@ pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mo
                             p.push_str("Description now:\n");
                             p.push_str(&quote(&after.description));
                         }
+                        Field::Files => p.push_str(&format!(
+                            "Files re-sliced: [{}] → [{}]. Move the code so exactly these files implement this node.\n",
+                            before.files.join(", "),
+                            after.files.join(", ")
+                        )),
                         Field::Links => {
                             let added: Vec<String> = after.links.iter().filter(|l| !before.links.contains(l)).cloned().collect();
                             let removed: Vec<String> = before.links.iter().filter(|l| !after.links.contains(l)).cloned().collect();
@@ -573,6 +580,7 @@ pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mo
         }
     }
 
+    p.push_str(&work_orders_section(orders));
     p.push_str(&claims_section(graph, overlaps));
 
     if !note.trim().is_empty() {
@@ -593,6 +601,33 @@ pub fn process(graph: &Graph, changes: &[Change], rules: &[Rule], note: &str, mo
          6. If a change contradicts a rule, follow the rule and say so.\n\
          7. Finish with one short line per node describing what you changed, plus one line per node you added.\n"
     ));
+    p
+}
+
+/// The changes as typed work orders with their declared blast radius, which Workbench checks
+/// the run's changed files against.
+fn work_orders_section(orders: &[WorkOrder]) -> String {
+    let mut p = String::from(
+        "## Work orders\n\n\
+         The changes above are these work orders. Each may only change the files in its `blast_radius.files` \
+         and the files of the nodes in `blast_radius.dependents`, plus files of nodes you add. Workbench checks the changed files against this after the run.\n\n",
+    );
+    let mut kinds: Vec<work_order::Kind> = Vec::new();
+    for o in orders {
+        if !kinds.contains(&o.kind) {
+            kinds.push(o.kind);
+        }
+    }
+    for k in kinds {
+        let name = serde_json::to_string(&k).unwrap_or_default();
+        p.push_str(&format!("- {name}: {}.\n", k.instruction()));
+    }
+    p.push_str("\n```json\n");
+    for o in orders {
+        p.push_str(&serde_json::to_string(o).unwrap_or_default());
+        p.push('\n');
+    }
+    p.push_str("```\n\n");
     p
 }
 
@@ -841,7 +876,9 @@ pub fn system_append(graph: Option<&Graph>, rules: &[Rule], related: &[String], 
              - When you add a meaningful new unit (an endpoint, route, command, service, screen, component, store, data model, job or external integration), \
              add a node for it in the same shape as the existing nodes: `id`, `title`, `kind`, a `description` of 2-5 plain sentences on what it does, `files` and `links` \
              (ids of nodes it calls or depends on). Leave `pos` out; Workbench places it. Add a link from each existing node that now calls it.\n\
-             - When you remove such a unit, remove its node and every link and flow step that points at it. When you change what a node does or calls, update its `description` and `links`.\n\
+             - When you remove such a unit, remove its node and every link and flow step that points at it. When you change what a node calls, update its `links`.\n\
+             - Descriptions belong to the user: when you change what an existing node does, you may write its new `description`, but it only becomes a proposal \
+             the user accepts or rejects; say in your summary which descriptions you proposed.\n\
              - Group small helpers into the node that owns them instead of giving them their own node. Put a new isolated feature with several parts in a module.\n\
              - Keep existing `id`s and `pos` values, keep the file valid JSON, and list the graph changes you made in your final summary.\n\
              Never edit `{BASELINE_FILE}`.\n\n"
@@ -952,7 +989,7 @@ mod tests {
         cur.node_mut("get-users").unwrap().description = "Lists users with pagination".into();
         cur.remove_node("db");
         let rules = vec![Rule { id: "r1".into(), title: "No unwrap".into(), body: String::new(), enabled: true, scope: None }];
-        let p = process(&cur, &diff(&base, &cur), &rules, "be careful", ChatMode::Auto, None, &[]);
+        let p = process(&cur, &work_order::from_changes(&base, &cur, &diff(&base, &cur), &[]), &rules, "be careful", ChatMode::Auto, None, &[]);
         assert!(p.contains("Lists users with pagination"));
         assert!(p.contains("Removed node `db`"));
         assert!(p.contains("No unwrap"));
@@ -1093,7 +1130,7 @@ mod tests {
         base.remove_node("auth-ref");
         let mut cur = graph.clone();
         cur.node_mut("get-users").unwrap().links.push("auth-ref".into());
-        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, Some(&refs), &[]);
+        let p = process(&cur, &work_order::from_changes(&base, &cur, &diff(&base, &cur), &[]), &[], "", ChatMode::Auto, Some(&refs), &[]);
         assert!(p.contains("### New external reference `auth-ref` — Shared auth"));
         assert!(p.contains("Do not create code for the reference itself"));
         assert!(p.contains("Login route"));
@@ -1119,7 +1156,7 @@ mod tests {
         let mut cur = with_github_module();
         cur.nodes.push(serde_json::from_str(r#"{"id":"gh","title":"GitHub","kind":"module","module":"github"}"#).unwrap());
         cur.node_mut("api").unwrap().links.push("gh".into());
-        let p = process(&cur, &diff(&base, &cur), &[], "", ChatMode::Auto, None, &[]);
+        let p = process(&cur, &work_order::from_changes(&base, &cur, &diff(&base, &cur), &[]), &[], "", ChatMode::Auto, None, &[]);
         assert!(p.contains("### New module `github` — GitHub"));
         assert!(p.contains("Attached at: `gh` (GitHub) in the main network"));
         assert!(p.contains("New node `gh-service` — gh service (service) in module `github`"));

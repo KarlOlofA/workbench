@@ -9,12 +9,12 @@ use std::path::Path;
 
 use crate::ghost;
 use crate::git;
-use crate::graph::{self, Change, Graph, Subject};
+use crate::graph::{self, Change, ChangeKind, Field, Graph, Subject};
 
 /// A node in a graph: (module scope, node id).
 pub type NodeKey = (Option<String>, String);
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct Claim {
     pub nodes: Vec<NodeKey>,
     pub files: Vec<String>,
@@ -86,6 +86,49 @@ pub fn claim(base: &Graph, cur: &Graph, changes: &[Change]) -> Claim {
                 if !out.nodes.contains(&k) {
                     push_unique(&mut out.dependents, k);
                 }
+            }
+        }
+    }
+    out
+}
+
+/// A node whose description may now contradict an intent edit to a node it depends on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stale {
+    pub node: NodeKey,
+    /// The id of the edited node, or of the edited module the node attaches.
+    pub because: String,
+    /// The flow both are on, when that is the connection.
+    pub flow: Option<String>,
+}
+
+/// The nodes that may be stale after the intent edits in `changes`: the nodes that link to an
+/// edited node or attach an edited module, and the other nodes of every flow the edited node
+/// is on. Nodes whose own intent changed too are left out: someone already rewrote them.
+pub fn stale(cur: &Graph, changes: &[Change]) -> Vec<Stale> {
+    let intent: Vec<&Change> =
+        changes.iter().filter(|c| matches!(&c.kind, ChangeKind::Modified(f) if f.contains(&Field::Description))).collect();
+    let edited: Vec<NodeKey> = intent.iter().filter(|c| c.subject == Subject::Node).map(|c| key(c)).collect();
+    let mut out: Vec<Stale> = Vec::new();
+    let mut add = |k: NodeKey, because: &str, flow: Option<&str>| {
+        if k.1 != because && !edited.contains(&k) && !out.iter().any(|s| s.node == k) {
+            out.push(Stale { node: k, because: because.to_string(), flow: flow.map(String::from) });
+        }
+    };
+    for c in intent {
+        if c.subject == Subject::Module {
+            for k in cur.module_uses(&c.id) {
+                add(k, &c.id, None);
+            }
+            continue;
+        }
+        let Some(net) = cur.net(c.scope.as_deref()) else { continue };
+        for n in net.incoming(&c.id) {
+            add((c.scope.clone(), n.id.clone()), &c.id, None);
+        }
+        for f in net.flows.iter().filter(|f| f.nodes.contains(&c.id)) {
+            for n in &f.nodes {
+                add((c.scope.clone(), n.clone()), &c.id, Some(&f.name));
             }
         }
     }
@@ -166,6 +209,22 @@ mod tests {
         assert_eq!(c.nodes, vec![k("db")]);
         assert_eq!(c.files, vec!["src/db.rs".to_string()]);
         assert_eq!(c.dependents, vec![k("api")]);
+    }
+
+    #[test]
+    fn intent_edits_flag_callers_and_flow_neighbours_as_stale() {
+        let mut b = base();
+        b.flows.push(crate::graph::Flow { id: "f".into(), name: "Render".into(), nodes: vec!["ui".into(), "db".into()], note: String::new() });
+        let mut cur = b.clone();
+        cur.node_mut("db").unwrap().description = "new intent".into();
+        let s = stale(&cur, &graph::diff(&b, &cur));
+        assert_eq!(s.iter().map(|s| s.node.1.as_str()).collect::<Vec<_>>(), vec!["api", "ui"]);
+        assert_eq!(s[1].flow.as_deref(), Some("Render"));
+
+        // A caller whose intent was rewritten too is no longer stale.
+        cur.node_mut("api").unwrap().description = "also new".into();
+        let s = stale(&cur, &graph::diff(&b, &cur));
+        assert_eq!(s.iter().map(|s| s.node.1.as_str()).collect::<Vec<_>>(), vec!["ui"]);
     }
 
     #[test]

@@ -10,70 +10,65 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 use crate::api_chat::{self, ChatMessage};
-use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, PermissionDecision};
+use crate::claude::{ChatMode, ClaudeEvent, PermissionDecision};
 use crate::mcp;
 use crate::providers::{Access, Provider, Settings};
 use crate::{codex, platform, vibe};
 
 pub type EventSender = UnboundedSender<(u64, ClaudeEvent)>;
 
-pub enum Agent {
-    Workbench(ClaudeProcess),
-    /// A single turn of a non-Workbench provider, running in a background task.
-    /// Aborting the task drops its child process, which kills it.
-    Turn(JoinHandle<()>),
+/// The contract between the session loop and an agent backend. Each backend has its own
+/// constructor (`ClaudeProcess::spawn` for the long-lived Workbench process, `start_turn` for
+/// one-turn providers) that takes an `EventSender`. Everything the agent does comes back on it
+/// as `ClaudeEvent`s, including permission requests, which are answered with `respond_permission`.
+#[async_trait]
+pub trait AgentAdapter: Send {
+    async fn send_user(&mut self, text: &str) -> Result<()>;
+    /// Stops the current turn and keeps the agent alive. Agents that can't return an error,
+    /// so the session loop kills them instead.
+    async fn interrupt(&mut self) -> Result<()>;
+    async fn respond_permission(&mut self, request_id: &str, decision: &PermissionDecision) -> Result<()>;
+    async fn respond_error(&mut self, request_id: &str, error: &str) -> Result<()>;
+    async fn kill(self: Box<Self>);
+    fn exit_code(&mut self) -> Option<i32>;
 }
 
-impl Agent {
-    pub async fn send_user(&mut self, text: &str) -> Result<()> {
-        match self {
-            Agent::Workbench(p) => p.send_user(text).await,
-            Agent::Turn(_) => Err(anyhow!("this run already has its prompt; start a new turn instead")),
-        }
+/// A single turn of a non-Workbench provider, running in a background task.
+/// Aborting the task drops its child process, which kills it.
+pub struct TurnRun(JoinHandle<()>);
+
+#[async_trait]
+impl AgentAdapter for TurnRun {
+    async fn send_user(&mut self, _text: &str) -> Result<()> {
+        Err(anyhow!("this run already has its prompt; start a new turn instead"))
     }
 
-    /// Only Workbench can stop mid-turn and stay alive. Other runs return an error,
-    /// so the session loop kills them instead.
-    pub async fn interrupt(&mut self) -> Result<()> {
-        match self {
-            Agent::Workbench(p) => p.interrupt().await,
-            Agent::Turn(_) => Err(anyhow!("one-turn runs are stopped by ending them")),
-        }
+    async fn interrupt(&mut self) -> Result<()> {
+        Err(anyhow!("one-turn runs are stopped by ending them"))
     }
 
-    /// Permission and control requests only come from Workbench, so other runs ignore the answer.
-    pub async fn respond_permission(&mut self, request_id: &str, decision: &PermissionDecision) -> Result<()> {
-        match self {
-            Agent::Workbench(p) => p.respond_permission(request_id, decision).await,
-            Agent::Turn(_) => Ok(()),
-        }
+    /// Permission and control requests only come from Workbench, so one-turn runs ignore the answer.
+    async fn respond_permission(&mut self, _request_id: &str, _decision: &PermissionDecision) -> Result<()> {
+        Ok(())
     }
 
-    pub async fn respond_error(&mut self, request_id: &str, error: &str) -> Result<()> {
-        match self {
-            Agent::Workbench(p) => p.respond_error(request_id, error).await,
-            Agent::Turn(_) => Ok(()),
-        }
+    async fn respond_error(&mut self, _request_id: &str, _error: &str) -> Result<()> {
+        Ok(())
     }
 
-    pub async fn kill(self) {
-        match self {
-            Agent::Workbench(p) => p.kill().await,
-            Agent::Turn(task) => task.abort(),
-        }
+    async fn kill(self: Box<Self>) {
+        self.0.abort();
     }
 
-    pub fn exit_code(&mut self) -> Option<i32> {
-        match self {
-            Agent::Workbench(p) => p.exit_code(),
-            Agent::Turn(_) => None,
-        }
+    fn exit_code(&mut self) -> Option<i32> {
+        None
     }
 }
 
@@ -93,7 +88,7 @@ pub struct TurnOptions {
     pub history: Vec<ChatMessage>,
 }
 
-pub fn start_turn(provider: Provider, settings: &Settings, opts: TurnOptions, generation: u64, tx: EventSender) -> Result<Agent> {
+pub fn start_turn(provider: Provider, settings: &Settings, opts: TurnOptions, generation: u64, tx: EventSender) -> Result<Box<dyn AgentAdapter>> {
     let task = match provider.access() {
         Access::Cli { .. } if provider == Provider::ClaudeCode => {
             return Err(anyhow!("Workbench runs as a long-lived process, not one turn at a time"));
@@ -128,7 +123,7 @@ pub fn start_turn(provider: Provider, settings: &Settings, opts: TurnOptions, ge
             })
         }
     };
-    Ok(Agent::Turn(task))
+    Ok(Box::new(TurnRun(task)))
 }
 
 /// Turns the output lines of a one-turn CLI into events.
