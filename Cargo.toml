@@ -19,6 +19,6 @@ syntect = "5.3.0"
 tokio = { version = "1.54.1", features = ["process", "io-util", "sync", "rt", "macros", "time", "net"] }
 ulid = "3.0.0"
 # Intent checks (PRO-222 satisfaction, PRO-223 lint) from the workbench_auditer repo, used before absorbing agent work.
-workbench-check = { path = "../workbench_auditer/crates/workbench-check" }
-workbench-graph = { path = "../workbench_auditer/crates/workbench-graph" }
-workbench-llm = { path = "../workbench_auditer/crates/workbench-llm" }
+workbench-check = { git = "https://github.com/KarlOlofA/workbench_auditer.git", rev = "f383a88a97401c3613c62792bd47b10ebf82d8ba" }
+workbench-graph = { git = "https://github.com/KarlOlofA/workbench_auditer.git", rev = "f383a88a97401c3613c62792bd47b10ebf82d8ba" }
+workbench-llm = { git = "https://github.com/KarlOlofA/workbench_auditer.git", rev = "f383a88a97401c3613c62792bd47b10ebf82d8ba" }

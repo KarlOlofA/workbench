@@ -55,7 +55,10 @@ pub fn run(root: &Path, cur: &Graph, changes: &[Change], connect: impl FnOnce(&C
             // Sorted: link order means nothing (the graph diff ignores it), so it mustn't change the request.
             let mut neighbours: Vec<String> = node.links.iter().filter_map(|l| net.node(l)).map(|n| n.title.clone()).collect();
             neighbours.sort();
-            let request = satisfaction::request(&node, &workbench_graph::rules_for(&rules, &node.id), &neighbours, &source);
+            // Same test as the auditer's structure check: files the node lists that aren't in
+            // the repository, so the model doesn't count their absence as drift.
+            let missing: Vec<String> = node.files.iter().filter(|f| !root.join(f).exists()).cloned().collect();
+            let request = satisfaction::request(&node, &workbench_graph::rules_for(&rules, &node.id), &neighbours, &source, &missing);
             let model = model
                 .get_or_insert_with(|| connect.take().map_or_else(|| Err("no model".to_string()), |c| c(&config)))
                 .as_ref()

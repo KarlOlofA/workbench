@@ -758,7 +758,7 @@
       "id": "verification",
       "title": "Verification before absorb",
       "kind": "service",
-      "description": "An agent's change to a node moves into the baseline only when the node's description passes the description lint and a model confirms the node's files do what the description says. Otherwise the change stays pending, with the reason. needs_check skips removals, modules and references, which have no code of their own. The checks come from the workbench-check library, so the app and the CI gate judge the same way. Answers are cached in .workbench/.check-cache by request hash.",
+      "description": "An agent's change to a node moves into the baseline only when the node's description passes the description lint and a model confirms the node's files do what the description says. Otherwise the change stays pending, with the reason. needs_check skips removals, modules and references, which have no code of their own. The checks come from the workbench-check library, so the app and the CI gate judge the same way. The files the node lists that are missing from the repository are named in the request, so the model does not count their absence as drift. Answers are cached in .workbench/.check-cache by request hash.",
       "files": [
         "src/verify.rs"
       ],
@@ -771,7 +771,7 @@
       "id": "workbench-check",
       "title": "workbench-check library",
       "kind": "external",
-      "description": "The workbench_auditer crate behind the `workbench check` CI gate, used as a path dependency (../workbench_auditer/crates/workbench-check). It provides the description lint, the satisfaction check against an Anthropic model, and its config from .workbench/check.toml.",
+      "description": "The workbench_auditer crate behind the `workbench check` CI gate, used as a git dependency on github.com/KarlOlofA/workbench_auditer pinned to one commit, together with workbench-graph and workbench-llm. It provides the description lint, the satisfaction check against an Anthropic model, and its config from .workbench/check.toml.",
       "files": [
         "Cargo.toml"
       ]

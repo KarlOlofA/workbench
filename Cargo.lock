@@ -6340,6 +6340,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "workbench-check"
 version = "0.1.0"
+source = "git+https://github.com/KarlOlofA/workbench_auditer.git?rev=f383a88a97401c3613c62792bd47b10ebf82d8ba#f383a88a97401c3613c62792bd47b10ebf82d8ba"
 dependencies = [
  "serde",
  "serde_json",
@@ -6352,6 +6353,7 @@ dependencies = [
 [[package]]
 name = "workbench-graph"
 version = "0.1.0"
+source = "git+https://github.com/KarlOlofA/workbench_auditer.git?rev=f383a88a97401c3613c62792bd47b10ebf82d8ba#f383a88a97401c3613c62792bd47b10ebf82d8ba"
 dependencies = [
  "serde",
  "serde_json",
@@ -6360,6 +6362,7 @@ dependencies = [
 [[package]]
 name = "workbench-llm"
 version = "0.1.0"
+source = "git+https://github.com/KarlOlofA/workbench_auditer.git?rev=f383a88a97401c3613c62792bd47b10ebf82d8ba#f383a88a97401c3613c62792bd47b10ebf82d8ba"
 dependencies = [
  "reqwest",
  "serde_json",
