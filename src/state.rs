@@ -1042,6 +1042,20 @@ impl AppState {
         projects.iter().find(|p| p.repo(&repo).is_some()).cloned()
     }
 
+    /// The other folders of `dir`'s project: its repositories and their worktrees, without `dir`.
+    pub fn other_project_dirs(&self, dir: &Path) -> Vec<PathBuf> {
+        let Some(project) = self.project_for(dir) else { return Vec::new() };
+        let worktrees = self.worktrees.peek();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for repo in &project.repos {
+            dirs.push(repo.dir());
+            dirs.extend(worktrees.get(&repo.path).into_iter().flatten().map(|w| w.path.clone()));
+        }
+        dirs.retain(|d| !projects::same_dir(d, dir));
+        dirs.dedup();
+        dirs
+    }
+
     /// Every agent found running on the machine by the project repository or worktree folder
     /// it runs in. Agents outside them are left out. Workbench's own agents are listed with
     /// their chat sessions instead.

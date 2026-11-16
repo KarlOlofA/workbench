@@ -24,6 +24,11 @@ pub fn configure(cmd: &mut Command, opts: &TurnOptions) {
         }
         ChatMode::Plan | ChatMode::AcceptEdits => {}
     }
+    // Vibe asks before touching a path outside its folder, and a headless run can't answer, so
+    // the project's other repositories and worktrees are added as working directories.
+    for dir in &opts.extra_dirs {
+        cmd.arg("--add-dir").arg(dir);
+    }
     if let Some(id) = &opts.resume {
         cmd.args(["--resume", id]);
     }
@@ -184,6 +189,7 @@ mod tests {
             model: String::new(),
             resume: Some("s1".to_string()),
             mode,
+            extra_dirs: vec![PathBuf::from("/repos/backend")],
             system_prompt: String::new(),
             mcp_servers: Vec::new(),
             prompt: String::new(),
@@ -194,6 +200,8 @@ mod tests {
             configure(&mut cmd, &opts(mode));
             cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>()
         };
+        // The project's other folders are reachable in every mode.
+        assert!(args(ChatMode::Plan).windows(2).any(|w| w == ["--add-dir", "/repos/backend"]));
         // A resumed session ignores `--agent`, so Auto and Full auto need their approval flag.
         assert!(args(ChatMode::Auto).contains(&"--smart-approve".to_string()));
         assert!(args(ChatMode::FullAuto).contains(&"--auto-approve".to_string()));

@@ -84,6 +84,8 @@ pub struct TurnOptions {
     /// The provider's session to continue (Codex thread id or Vibe session id).
     pub resume: Option<String>,
     pub mode: ChatMode,
+    /// The project's other repositories and worktrees, which the agent may also read.
+    pub extra_dirs: Vec<PathBuf>,
     pub system_prompt: String,
     pub mcp_servers: Vec<mcp::Server>,
     pub prompt: String,

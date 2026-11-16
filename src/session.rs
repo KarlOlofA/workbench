@@ -396,6 +396,7 @@ async fn start_turn(
         model,
         resume: chat.session_id.peek().clone(),
         mode,
+        extra_dirs: st.other_project_dirs(&chat.dir.cloned()),
         system_prompt: instructions,
         mcp_servers,
         prompt: text,
