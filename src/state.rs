@@ -32,6 +32,8 @@ pub enum ChatItem {
     Tool { id: String, name: String, summary: String, input: String, result: Option<(String, bool)> },
     Info(String),
     Error(String),
+    /// The nodes a reply names for what the user asked about (see `prompts::focus_requests`).
+    Focus(Vec<prompts::FocusRequest>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +354,12 @@ pub struct AppState {
     pub verification: Signal<HashMap<String, Option<String>>>,
     /// The scope of the running agent turn or job, when it works on chosen nodes.
     pub run_scope: Signal<Option<scope::RunScope>>,
+    /// The files the scoped run has edited so far, repo-relative. Cleared when the run ends.
+    pub live_edits: Signal<Vec<String>>,
+    /// The node the next fit of the graph zooms to instead of the whole network (see `focus_node`).
+    pub focus_target: Signal<Option<String>>,
+    /// Whether the code Changes tab shows (and counts) the files in `.workbench/`.
+    pub show_workbench_diffs: Signal<bool>,
     /// The intent ledger (`.workbench/ledger.ndjson`), as last read or written.
     pub ledger: Signal<Vec<ledger::Entry>>,
     pub me: Signal<Option<String>>,
@@ -413,6 +421,9 @@ impl AppState {
             node_history: Signal::new(NodeHistory::default()),
             ledger: Signal::new(Vec::new()),
             run_scope: Signal::new(None),
+            live_edits: Signal::new(Vec::new()),
+            focus_target: Signal::new(None),
+            show_workbench_diffs: Signal::new(false),
             verification: Signal::new(HashMap::new()),
             me: Signal::new(None),
             flow_draft: Signal::new(None),
@@ -909,6 +920,14 @@ impl AppState {
         self.graph_pane.set(GraphPane::Node);
     }
 
+    /// Shows `id` on the graph: opens its network, selects it, and asks the canvas to zoom to it
+    /// and its direct links. Only changes the view.
+    pub fn focus_node(&mut self, module: Option<String>, id: String) {
+        self.show_change(module, Some(id.clone()));
+        self.focus_target.set(Some(id));
+        *self.fit_request.write() += 1;
+    }
+
     pub fn select(&mut self, id: Option<String>) {
         self.selected.set(id.into_iter().collect());
     }
@@ -1274,6 +1293,21 @@ impl AppState {
         self.turn_user_edits.write().clear();
     }
 
+    /// The files the running scoped work is editing now that `node` (in module `scope`) claims.
+    /// Empty when no run works on the node. Only reads state.
+    pub fn live_edits_of(&self, scope: Option<&str>, node: &graph::Node) -> Vec<String> {
+        let key = (scope.map(String::from), node.id.clone());
+        if !self.run_scope.read().as_ref().is_some_and(|s| s.nodes.contains(&key)) {
+            return Vec::new();
+        }
+        self.live_edits
+            .read()
+            .iter()
+            .filter(|path| !path.starts_with(scope::ALWAYS_ALLOWED) && scope::covers(&node.files, path))
+            .cloned()
+            .collect()
+    }
+
     /// Scopes the running turn or job to `nodes` (see `scope.rs`).
     pub fn scope_run(&mut self, nodes: Vec<claims::NodeKey>) {
         let cwd = self.cwd.peek().clone();
@@ -1284,6 +1318,7 @@ impl AppState {
     /// Compares the files the scoped run changed with its scope, and in strict mode undoes
     /// what it may. Returns the message for the chat.
     fn enforce_scope(&mut self) -> Option<String> {
+        self.live_edits.write().clear();
         let s = self.run_scope.take()?;
         let cwd = self.cwd.peek().clone();
         let strict = self.provider_settings.peek().strict_scope;

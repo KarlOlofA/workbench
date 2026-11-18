@@ -19,7 +19,6 @@ pub const HISTORY_FILE: &str = ".workbench/node-history.jsonl";
 const ATTRIBUTES_FILE: &str = ".workbench/.gitattributes";
 const ATTRIBUTES: &str = "node-history.jsonl merge=union\n";
 const MERGE_SECS: u64 = 120;
-const CONTEXT: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -122,7 +121,7 @@ fn new_uid(at: u64, salt: usize) -> String {
     format!("{at:x}-{:016x}", h.finish())
 }
 
-fn sentences(text: &str) -> Vec<String> {
+pub fn sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
         let mut cur = String::new();
@@ -356,22 +355,16 @@ pub fn save_snapshot(cwd: &Path, s: &Snapshot) -> Result<(), String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    Same,
     Add,
     Del,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Row {
-    Line { op: Op, old: Option<usize>, new: Option<usize>, text: String },
-    Skip(usize),
-}
-
-/// Classic line diff (longest common subsequence) with unchanged runs collapsed to a few lines
-/// of context around each change.
-pub fn line_diff(before: &str, after: &str) -> Vec<Row> {
-    let a: Vec<&str> = if before.is_empty() { Vec::new() } else { before.split('\n').collect() };
-    let b: Vec<&str> = if after.is_empty() { Vec::new() } else { after.split('\n').collect() };
+/// What changed in a node's intent: the lines of `before` that are gone and the lines of
+/// `after` that are new, in order. Rendered nodes (`render_node`) hold one fact per line (title,
+/// kind, links, each file, each description sentence), so each change is one fact.
+/// Uses a longest common subsequence, so lines that only moved don't count as changes.
+pub fn intent_changes(before: &str, after: &str) -> Vec<(Op, String)> {
+    let (a, b) = (facts(before), facts(after));
     let (n, m) = (a.len(), b.len());
     let mut lcs = vec![vec![0usize; m + 1]; n + 1];
     for i in (0..n).rev() {
@@ -379,40 +372,47 @@ pub fn line_diff(before: &str, after: &str) -> Vec<Row> {
             lcs[i][j] = if a[i] == b[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
         }
     }
-    let mut ops: Vec<(Op, Option<usize>, Option<usize>, &str)> = Vec::new();
+    let mut changes = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < n || j < m {
         if i < n && j < m && a[i] == b[j] {
-            ops.push((Op::Same, Some(i + 1), Some(j + 1), a[i]));
             i += 1;
             j += 1;
         } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
-            ops.push((Op::Del, Some(i + 1), None, a[i]));
+            changes.push((Op::Del, a[i].clone()));
             i += 1;
         } else {
-            ops.push((Op::Add, None, Some(j + 1), b[j]));
+            changes.push((Op::Add, b[j].clone()));
             j += 1;
         }
     }
-    let changed: Vec<usize> = ops.iter().enumerate().filter(|(_, o)| o.0 != Op::Same).map(|(k, _)| k).collect();
-    let near = |k: usize| changed.iter().any(|&c| c.abs_diff(k) <= CONTEXT);
-    let mut rows = Vec::new();
-    let mut skipped = 0;
-    for (k, (op, old, new, text)) in ops.into_iter().enumerate() {
-        if op == Op::Same && !near(k) {
-            skipped += 1;
+    changes
+}
+
+/// The non-empty lines of a rendered node. An indented line, such as a file under `Files:`,
+/// gets the heading above it, so it reads `Files: src/x.rs` on its own. A heading followed by
+/// indented lines is not a fact itself; its lines carry it.
+fn facts(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut heading = "";
+    let mut out = Vec::new();
+    for (k, line) in lines.iter().enumerate() {
+        if line.starts_with(' ') {
+            out.push(format!("{heading} {}", line.trim()));
             continue;
         }
-        if skipped > 0 {
-            rows.push(Row::Skip(skipped));
-            skipped = 0;
+        heading = line.trim();
+        let has_lines_below = lines.get(k + 1).is_some_and(|next| next.starts_with(' '));
+        if !has_lines_below {
+            out.push(heading.to_string());
         }
-        rows.push(Row::Line { op, old, new, text: text.to_string() });
     }
-    if skipped > 0 {
-        rows.push(Row::Skip(skipped));
-    }
-    rows
+    out
+}
+
+/// What changed between two descriptions, one sentence per change.
+pub fn description_changes(before: &str, after: &str) -> Vec<(Op, String)> {
+    intent_changes(&sentences(before.trim()).join("\n"), &sentences(after.trim()).join("\n"))
 }
 
 #[cfg(test)]
@@ -513,13 +513,28 @@ mod tests {
     }
 
     #[test]
-    fn line_diff_marks_changes_and_collapses_context() {
-        let before = "1\n2\n3\n4\n5\n6\n7\n8";
-        let after = "1\n2\n3\n4\n5\nsix\n7\n8";
-        let rows = line_diff(before, after);
-        assert_eq!(rows[0], Row::Skip(3));
-        let ops: Vec<Op> = rows.iter().filter_map(|r| match r { Row::Line { op, .. } => Some(*op), _ => None }).collect();
-        assert_eq!(ops, vec![Op::Same, Op::Same, Op::Del, Op::Add, Op::Same, Op::Same]);
-        assert!(line_diff("", "a\nb").iter().all(|r| matches!(r, Row::Line { op: Op::Add, .. })));
+    fn intent_changes_lists_only_changed_facts() {
+        let before = "Title: A\nKind: service\nLinks: b, c\n\nLoads it.\nSaves it.";
+        let after = "Title: A\nKind: service\nLinks: b\n\nLoads it.\nSaves it twice.";
+        assert_eq!(
+            intent_changes(before, after),
+            vec![
+                (Op::Del, "Links: b, c".to_string()),
+                (Op::Add, "Links: b".to_string()),
+                (Op::Del, "Saves it.".to_string()),
+                (Op::Add, "Saves it twice.".to_string()),
+            ]
+        );
+        assert_eq!(intent_changes("", "a\nb"), vec![(Op::Add, "a".to_string()), (Op::Add, "b".to_string())]);
+        assert_eq!(intent_changes("Files:\n  a.rs", "Files:\n  a.rs\n  b.rs"), vec![(Op::Add, "Files: b.rs".to_string())]);
+    }
+
+    #[test]
+    fn description_changes_are_per_sentence() {
+        let changes = description_changes("Loads it. Saves it.", "Loads it. Saves it — twice. Logs it.");
+        assert_eq!(
+            changes,
+            vec![(Op::Del, "Saves it.".to_string()), (Op::Add, "Saves it — twice.".to_string()), (Op::Add, "Logs it.".to_string())]
+        );
     }
 }

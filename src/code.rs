@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use crate::git::{self, FileDiff, LineKind};
 use crate::github_view::GitHubView;
 use crate::highlight;
+use crate::scope;
 use crate::editor::EditorView;
 use crate::state::{AppState, Tab};
 
@@ -193,7 +194,7 @@ fn status_class(code: &str) -> &'static str {
 
 #[component]
 fn DiffView() -> Element {
-    let st = use_context::<AppState>();
+    let mut st = use_context::<AppState>();
     let mut base = use_signal(|| "HEAD".to_string());
     let mut applied_base = use_signal(|| "HEAD".to_string());
 
@@ -229,13 +230,26 @@ fn DiffView() -> Element {
                 },
             }
             button { onclick: move |_| applied_base.set(base.peek().clone()), "Compare" }
+            div { class: "spacer" }
+            label { class: "small-text muted", title: "Workbench's own files in .workbench/, such as the graph and its history",
+                input {
+                    r#type: "checkbox",
+                    checked: *st.show_workbench_diffs.read(),
+                    onchange: move |e| st.show_workbench_diffs.set(e.checked()),
+                }
+                " Show Workbench files"
+            }
         }
     };
 
-    let files = match result {
+    let mut files = match result {
         Err(e) => return rsx! { {header} div { class: "error pad", "{e}" } },
         Ok(f) => f,
     };
+    let show_workbench = *st.show_workbench_diffs.read();
+    if !show_workbench {
+        files.retain(|f| !f.path.starts_with(scope::ALWAYS_ALLOWED));
+    }
 
     let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
     let file_count = files.len();
@@ -301,29 +315,31 @@ pub fn FileDiffView(file: FileDiff, #[props(default = true)] local: bool) -> Ele
                             "Ask Workbench"
                         }
                     }
-                    table { class: "hunk-lines",
-                        tbody {
-                            for (li, line) in hunk.lines.iter().enumerate() {
-                                tr {
-                                    key: "{li}",
-                                    class: match line.kind {
-                                        LineKind::Added => "added",
-                                        LineKind::Removed => "removed",
-                                        LineKind::Context => "context",
-                                        LineKind::Meta => "meta",
-                                    },
-                                    td { class: "ln", {line.old_no.map(|n| n.to_string()).unwrap_or_default()} }
-                                    td { class: "ln", {line.new_no.map(|n| n.to_string()).unwrap_or_default()} }
-                                    td { class: "sign",
-                                        match line.kind {
-                                            LineKind::Added => "+",
-                                            LineKind::Removed => "−",
-                                            _ => " ",
+                    div { class: "diff-scroll",
+                        table { class: "hunk-lines",
+                            tbody {
+                                for (li, line) in hunk.lines.iter().enumerate() {
+                                    tr {
+                                        key: "{li}",
+                                        class: match line.kind {
+                                            LineKind::Added => "added",
+                                            LineKind::Removed => "removed",
+                                            LineKind::Context => "context",
+                                            LineKind::Meta => "meta",
+                                        },
+                                        td { class: "ln", {line.old_no.map(|n| n.to_string()).unwrap_or_default()} }
+                                        td { class: "ln", {line.new_no.map(|n| n.to_string()).unwrap_or_default()} }
+                                        td { class: "sign",
+                                            match line.kind {
+                                                LineKind::Added => "+",
+                                                LineKind::Removed => "−",
+                                                _ => " ",
+                                            }
                                         }
-                                    }
-                                    td {
-                                        class: "src",
-                                        dangerous_inner_html: highlight::highlight_line_html(&path, &line.text),
+                                        td {
+                                            class: "src",
+                                            dangerous_inner_html: highlight::highlight_line_html(&path, &line.text),
+                                        }
                                     }
                                 }
                             }

@@ -7,6 +7,7 @@ use crate::projects::Project;
 use crate::worktree_view::other_worktrees;
 use crate::logos::{Logo, LogoIcon};
 use crate::markdown;
+use crate::prompts;
 use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
 
 #[component]
@@ -360,6 +361,34 @@ fn ChatEntry(item: ChatItem) -> Element {
         }
         ChatItem::Info(text) => rsx! { div { class: "msg info", "{text}" } },
         ChatItem::Error(text) => rsx! { div { class: "msg error", "{text}" } },
+        ChatItem::Focus(matches) => rsx! { FocusMatches { matches } },
+    }
+}
+
+/// The nodes a reply named, as buttons that show each one on the graph.
+#[component]
+fn FocusMatches(matches: Vec<prompts::FocusRequest>) -> Element {
+    let mut st = use_context::<AppState>();
+    let g = st.graph.read().clone();
+    rsx! {
+        div { class: "msg info focus-matches",
+            span { class: "muted small-text", if matches.len() == 1 { "Responsible node:" } else { "Possible nodes, pick one:" } }
+            for (i, m) in matches.into_iter().enumerate() {
+                {
+                    let title = g.net(m.module.as_deref()).and_then(|n| n.node(&m.node)).map(|n| n.title.clone());
+                    rsx! {
+                        button {
+                            key: "{i}",
+                            class: "small",
+                            disabled: title.is_none(),
+                            title: if title.is_none() { "This node isn't in the graph" } else { "Show it on the graph" },
+                            onclick: move |_| st.focus_node(m.module.clone(), m.node.clone()),
+                            "{title.clone().unwrap_or_else(|| m.node.clone())} · {m.confidence}"
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

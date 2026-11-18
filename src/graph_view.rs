@@ -13,7 +13,7 @@ use crate::ledger;
 use crate::graph::{self, ChangeKind, Field, Flow, Graph, KNOWN_KINDS, Module, NODE_H, NODE_W, Node, REFERENCE_KIND, RefNode, Reference, Subject};
 use crate::prompts::{self, DebugMode};
 use crate::reference::{self, RefState, Source};
-use crate::node_history::{self, Entry, Op, Row};
+use crate::node_history::{self, Entry, Op};
 use crate::work_order;
 use crate::state::{AppState, Cmd, GraphPane, Job, JobKind, Layout};
 
@@ -449,11 +449,24 @@ fn bounds(positions: &HashMap<String, [f64; 2]>) -> Option<(f64, f64, f64, f64)>
     })
 }
 
-fn fit_view(g: &Graph, w: f64, h: f64) -> View {
-    let Some((x0, y0, x1, y1)) = bounds(&g.positions()) else { return (40.0, 40.0, 1.0) };
+/// The view that fits `positions` into a `w` × `h` canvas, zoomed no further out than `min_zoom`.
+fn fit_positions(positions: &HashMap<String, [f64; 2]>, w: f64, h: f64, min_zoom: f64) -> View {
+    let Some((x0, y0, x1, y1)) = bounds(positions) else { return (40.0, 40.0, 1.0) };
     let pad = 32.0;
-    let z = ((w - 2.0 * pad) / (x1 - x0)).min((h - 2.0 * pad) / (y1 - y0)).clamp(0.25, 1.1);
+    let z = ((w - 2.0 * pad) / (x1 - x0)).min((h - 2.0 * pad) / (y1 - y0)).clamp(min_zoom, 1.1);
     ((w - (x1 - x0) * z) / 2.0 - x0 * z, (h - (y1 - y0) * z) / 2.0 - y0 * z, z)
+}
+
+/// The view that fits the whole network.
+fn fit_view(g: &Graph, w: f64, h: f64) -> View {
+    fit_positions(&g.positions(), w, h, 0.25)
+}
+
+/// The view that fits `id` and the nodes it links to or from, zoomed in far enough to read.
+fn focus_view(g: &Graph, id: &str, w: f64, h: f64) -> View {
+    let mut near = g.positions();
+    near.retain(|other, _| other == id || g.linked(id, other));
+    fit_positions(&near, w, h, 0.6)
 }
 
 pub fn zoom_at(view: View, cx: f64, cy: f64, factor: f64) -> View {
@@ -618,6 +631,10 @@ fn GraphCanvas() -> Element {
     let mut arrange_undo = use_signal(|| None::<(Option<String>, HashMap<String, [f64; 2]>)>);
     let mut ghost_menu = use_signal(|| false);
     let mut branch_list = use_signal(|| None::<Result<Vec<String>, String>>);
+    // While true the view pans smoothly to a focused node; otherwise it follows the mouse at once.
+    let mut panning = use_signal(|| false);
+    // The node that glows after the chat focused it.
+    let mut pulse = use_signal(|| None::<String>);
 
     let refresh_branches = move || {
         let cwd = st.cwd.peek().clone();
@@ -659,12 +676,27 @@ fn GraphCanvas() -> Element {
         });
     };
 
+    // Fits the whole network, or zooms to the node the chat asked to focus and pulses it.
     use_effect(move || {
         let _ = st.fit_request.read();
         let Some(m) = mounted.read().clone() else { return };
+        let target = st.focus_target.write().take();
         spawn(async move {
-            if let Ok(rect) = m.get_client_rect().await {
-                view.set(fit_view(&st.net_peek(), rect.size.width, rect.size.height));
+            let Ok(rect) = m.get_client_rect().await else { return };
+            let (w, h) = (rect.size.width, rect.size.height);
+            let g = st.net_peek();
+            let Some(id) = target.filter(|id| g.node(id).is_some()) else {
+                view.set(fit_view(&g, w, h));
+                return;
+            };
+            view.set(focus_view(&g, &id, w, h));
+            panning.set(true);
+            pulse.set(Some(id.clone()));
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            panning.set(false);
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            if pulse.peek().as_deref() == Some(id.as_str()) {
+                pulse.set(None);
             }
         });
     });
@@ -785,6 +817,7 @@ fn GraphCanvas() -> Element {
     };
 
     let g = st.net();
+    let net_scope = st.current_scope();
     let scope = st.current_scope();
     let mut positions = g.positions();
     let ghosts = st.ghosts.read().clone();
@@ -950,7 +983,9 @@ fn GraphCanvas() -> Element {
             onmouseup: move |_| end_drag(),
             onmouseleave: move |_| end_drag(),
             onwheel: on_wheel,
-            div { class: "graph-world", style: "transform: translate({px}px, {py}px) scale({z});",
+            div {
+                class: if *panning.read() { "graph-world panning" } else { "graph-world" },
+                style: "transform: translate({px}px, {py}px) scale({z});",
                 div { class: "edges", dangerous_inner_html: "{svg}" }
                 if !ghost_layer.edges.is_empty() {
                     div { class: "edges", dangerous_inner_html: "{ghost_svg}" }
@@ -979,6 +1014,9 @@ fn GraphCanvas() -> Element {
                             n.description.clone()
                         };
                         let sel = if selected.contains(&n.id) { "selected" } else { "" };
+                        let pulsing = if pulse.read().as_deref() == Some(n.id.as_str()) { "pulse" } else { "" };
+                        let editing = st.live_edits_of(net_scope.as_deref(), &n);
+                        let editing_tip = format!("Being edited now:\n{}", editing.join("\n"));
                         let dim = if lit.as_ref().is_some_and(|l| !l.contains(&n.id)) { "dim" } else { "" };
                         let hub = hub_count.get(&n.id).copied();
                         let marks = ghost_layer.marks.get(&n.id).cloned().unwrap_or_default();
@@ -1027,7 +1065,7 @@ fn GraphCanvas() -> Element {
                         rsx! {
                             div {
                                 key: "{n.id}",
-                                class: "gnode {st_class} {sel} {on} {mod_class} {dim} {ghost_class}",
+                                class: "gnode {st_class} {sel} {on} {mod_class} {dim} {ghost_class} {pulsing}",
                                 style: "left: {x}px; top: {y}px; width: {NODE_W}px; height: {NODE_H}px; --kind: {color}; --ghost: {mark_color};",
                                 title: "{tip}",
                                 onmouseenter: move |e: MouseEvent| {
@@ -1098,6 +1136,9 @@ fn GraphCanvas() -> Element {
                                     }
                                     if let Some(tip) = stale.get(&n.id) {
                                         span { class: "gnode-stale", title: "{tip}", "stale?" }
+                                    }
+                                    if !editing.is_empty() {
+                                        span { class: "gnode-editing", title: "{editing_tip}", "● editing" }
                                     }
                                     if n_marks > 0 {
                                         span { class: "gnode-ghost-tag", title: "{mark_tip}", "⧉ {n_marks}" }
@@ -1428,6 +1469,7 @@ fn NodePane() -> Element {
     };
     let incoming: Vec<(String, String)> = g.incoming(&id).iter().map(|n| (n.id.clone(), n.title.clone())).collect();
     let outgoing: Vec<(String, String)> = node.links.iter().map(|l| (l.clone(), g.title_of(l))).collect();
+    let live = st.live_edits_of(scope.as_deref(), &node);
     let candidates: Vec<(String, String)> = g
         .nodes
         .iter()
@@ -1665,6 +1707,22 @@ fn NodePane() -> Element {
                             move |_| st.open(&f)
                         },
                         "{f}"
+                    }
+                }
+            }
+            if !live.is_empty() {
+                label { "Being edited now" }
+                ul { class: "file-list live-edits",
+                    for f in live {
+                        li {
+                            key: "{f}",
+                            onclick: {
+                                let f = f.clone();
+                                move |_| st.open(&f)
+                            },
+                            span { class: "live-dot", "●" }
+                            span { "{f}" }
+                        }
                     }
                 }
             }
@@ -2203,7 +2261,7 @@ fn HistoryPane() -> Element {
                         "removed" => ("−", "removed"),
                         _ => ("~", "modified"),
                     };
-                    let rows = node_history::line_diff(e.before.as_deref().unwrap_or(""), e.after.as_deref().unwrap_or(""));
+                    let changes = node_history::intent_changes(e.before.as_deref().unwrap_or(""), e.after.as_deref().unwrap_or(""));
                     let place = match (&e.scope, e.module) {
                         (Some(m), false) => format!(" · in ▣ {}", module_titles.get(m).cloned().unwrap_or_else(|| m.clone())),
                         _ => String::new(),
@@ -2239,7 +2297,7 @@ fn HistoryPane() -> Element {
                                     }
                                 }
                             }
-                            {diff_table(rows)}
+                            {intent_list(changes)}
                         }
                     }
                 }
@@ -2553,7 +2611,7 @@ fn ProposalsList() -> Element {
     let locked = st.graph_locked() || st.turn_start.read().is_some();
     let entries = st.ledger.read().clone();
     let g = st.graph.read().clone();
-    let items: Vec<(String, String, String, Vec<Row>)> = ledger::open_proposals(&entries)
+    let items: Vec<(String, String, String, Vec<(Op, String)>)> = ledger::open_proposals(&entries)
         .into_iter()
         .filter_map(|e| {
             let (scope, subject, id) = ledger::merge_target(&e.op)?;
@@ -2564,7 +2622,7 @@ fn ProposalsList() -> Element {
                 Subject::Node => g.net(scope).and_then(|n| n.node(id)).map(|n| (n.title.clone(), n.description.clone()))?,
             };
             let who = e.author.clone().map(|a| format!("an agent run by {a}")).unwrap_or_else(|| "an agent".into());
-            Some((e.id.clone(), title, who, node_history::line_diff(&current, proposed)))
+            Some((e.id.clone(), title, who, node_history::description_changes(&current, proposed)))
         })
         .collect();
     if items.is_empty() {
@@ -2576,7 +2634,7 @@ fn ProposalsList() -> Element {
             div { class: "small-text",
                 "Agents may not rewrite what a node is meant to do. Accept a proposal to make it the node's description, or reject it."
             }
-            for (id, title, who, rows) in items {
+            for (id, title, who, changes) in items {
                 {
                     let accept_id = id.clone();
                     let reject_id = id.clone();
@@ -2589,7 +2647,7 @@ fn ProposalsList() -> Element {
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&accept_id, true), "Accept" }
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&reject_id, false), "Reject" }
                             }
-                            {diff_table(rows)}
+                            {intent_list(changes)}
                         }
                     }
                 }
@@ -2773,41 +2831,21 @@ fn FlowDraft() -> Element {
     }
 }
 
-/// Before/after text as a line diff table, as in the history pane.
-fn diff_table(rows: Vec<Row>) -> Element {
+/// The facts of a node's intent that were added or removed, drawn like the rows of a code diff
+/// but without the unchanged ones. Used by the node history and the description proposals.
+fn intent_list(changes: Vec<(Op, String)>) -> Element {
+    if changes.is_empty() {
+        return rsx! { div { class: "muted small-text", "No change to the intent." } };
+    }
     rsx! {
-        table { class: "hunk-lines node-diff",
-            tbody {
-                for (i, row) in rows.into_iter().enumerate() {
-                    match row {
-                        Row::Line { op, old, new, text } => rsx! {
-                            tr {
-                                key: "{i}",
-                                class: match op {
-                                    Op::Add => "added",
-                                    Op::Del => "removed",
-                                    Op::Same => "context",
-                                },
-                                td { class: "ln", {old.map(|n| n.to_string()).unwrap_or_default()} }
-                                td { class: "ln", {new.map(|n| n.to_string()).unwrap_or_default()} }
-                                td { class: "sign",
-                                    match op {
-                                        Op::Add => "+",
-                                        Op::Del => "−",
-                                        Op::Same => " ",
-                                    }
-                                }
-                                td { class: "src", "{text}" }
-                            }
-                        },
-                        Row::Skip(n) => rsx! {
-                            tr { key: "{i}", class: "meta",
-                                td { class: "ln" }
-                                td { class: "ln" }
-                                td { class: "sign" }
-                                td { class: "src", "⋯ {n} unchanged line{plural(n)}" }
-                            }
-                        },
+        div { class: "diff-scroll",
+            table { class: "hunk-lines",
+                tbody {
+                    for (i, (op, text)) in changes.into_iter().enumerate() {
+                        match op {
+                            Op::Add => rsx! { tr { key: "{i}", class: "added", td { class: "sign", "+" } td { class: "src", "{text}" } } },
+                            Op::Del => rsx! { tr { key: "{i}", class: "removed", td { class: "sign", "−" } td { class: "src", "{text}" } } },
+                        }
                     }
                 }
             }

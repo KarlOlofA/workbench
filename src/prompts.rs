@@ -101,6 +101,55 @@ pub fn spawn_requests(text: &str) -> (String, Vec<SpawnRequest>) {
     (shown.trim_end().to_string(), spawns)
 }
 
+/// An agent points at the node(s) responsible for a behaviour with blocks like
+/// `[[workbench:focus node="scope" module="auth" confidence="high"]]`, and Workbench zooms the
+/// graph to the one the user picks. `module` is left out for nodes of the main network.
+const FOCUS_OPEN: &str = "[[workbench:focus ";
+
+/// A node an agent's reply names as responsible for what the user asked about.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusRequest {
+    /// The module the node is in; `None` for the main network.
+    pub module: Option<String>,
+    pub node: String,
+    /// `high`, `medium` or `low`, as the agent judged it.
+    pub confidence: String,
+}
+
+/// Told to every agent with a graph, so a question about a behaviour can zoom the graph to the
+/// node that handles it.
+pub fn focus_instructions() -> String {
+    format!(
+        "\n\nWhen the user asks which part of the code handles a behaviour (for example \"what handles login rate limiting?\"), \
+         find the responsible node(s) in `{GRAPH_FILE}` from their descriptions and links, then answer and end your reply with one block per node: \
+         `{FOCUS_OPEN}node=\"<node id>\" module=\"<module id, only for nodes inside a module>\" confidence=\"high|medium|low\"{SPAWN_HEADER_END}`. \
+         Workbench shows the graph at that node. When several nodes plausibly match, list them all with honest confidences so the user can pick; don't pick one for them.\n"
+    )
+}
+
+/// The reply without its focus blocks, and every node they name.
+pub fn focus_requests(text: &str) -> (String, Vec<FocusRequest>) {
+    let mut shown = String::new();
+    let mut focus = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(FOCUS_OPEN) {
+        let after_open = &rest[start + FOCUS_OPEN.len()..];
+        let Some(header_end) = after_open.find(SPAWN_HEADER_END) else { break };
+        let header = &after_open[..header_end];
+        shown.push_str(&rest[..start]);
+        if let Some(node) = header_value(header, "node") {
+            focus.push(FocusRequest {
+                module: header_value(header, "module"),
+                node,
+                confidence: header_value(header, "confidence").unwrap_or_else(|| "unsure".into()),
+            });
+        }
+        rest = &after_open[header_end + SPAWN_HEADER_END.len()..];
+    }
+    shown.push_str(rest);
+    (shown.trim_end().to_string(), focus)
+}
+
 /// The system prompt of a project-level agent: it works in the folder that holds the project's
 /// repositories and hands work in a repository to an agent started there.
 pub fn project_agent_prompt(project: &Project, folder: &Path) -> String {
@@ -1030,6 +1079,22 @@ mod tests {
             ]
         );
         assert_eq!(spawn_requests("no blocks"), ("no blocks".into(), vec![]));
+    }
+
+    #[test]
+    fn focus_blocks_are_parsed_and_removed() {
+        let reply = format!(
+            "The scope check.\n{FOCUS_OPEN}node=\"scope\" confidence=\"high\"]]\n{FOCUS_OPEN}node=\"login\" module=\"auth\" confidence=\"low\"]]"
+        );
+        let (shown, focus) = focus_requests(&reply);
+        assert_eq!(shown, "The scope check.");
+        assert_eq!(
+            focus,
+            vec![
+                FocusRequest { module: None, node: "scope".into(), confidence: "high".into() },
+                FocusRequest { module: Some("auth".into()), node: "login".into(), confidence: "low".into() },
+            ]
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::git::{self, StatusEntry};
 use crate::graph::Graph;
 
 /// Workbench's own files, which every run may change.
-const ALWAYS_ALLOWED: &str = ".workbench/";
+pub const ALWAYS_ALLOWED: &str = ".workbench/";
 
 /// What an agent run was scoped to, captured when it starts.
 #[derive(Debug, Clone, PartialEq, Default)]

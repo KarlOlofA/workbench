@@ -291,7 +291,8 @@ fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
         (Some(_), Some(p)) => prompts::project_agent_prompt(p, &dir),
         _ => {
             let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
-            prompts::with_project(base, project.as_ref(), &dir).unwrap_or_default()
+            let base = prompts::with_project(base, project.as_ref(), &dir).unwrap_or_default();
+            format!("{base}{}", prompts::focus_instructions())
         }
     };
     Some(format!("{context}{}", prompts::spawn_agent_instructions(project.as_ref(), &st.provider_settings.peek())))
@@ -507,6 +508,14 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             if let Some(path) = touched
                 && here(st, chat)
             {
+                if let Some(p) = &path
+                    && st.run_scope.peek().is_some()
+                {
+                    let rel = st.rel_path(p);
+                    if !st.live_edits.peek().contains(&rel) {
+                        st.live_edits.write().push(rel);
+                    }
+                }
                 st.bump_repo();
                 st.reload_open_file_if_clean();
                 if let Some(p) = path
@@ -537,19 +546,29 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
                     }
                 }
             }
-            let spawns = match items.iter_mut().rev().find_map(|i| match i {
+            let (spawns, focus) = match items.iter_mut().rev().find_map(|i| match i {
                 ChatItem::Assistant { text, .. } => Some(text),
                 _ => None,
             }) {
                 Some(text) => {
                     let (shown, spawns) = prompts::spawn_requests(text);
+                    let (shown, focus) = prompts::focus_requests(&shown);
                     *text = shown;
-                    spawns
+                    (spawns, focus)
                 }
-                None => Vec::new(),
+                None => (Vec::new(), Vec::new()),
             };
+            if !focus.is_empty() {
+                items.push(ChatItem::Focus(focus.clone()));
+            }
             drop(items);
             start_spawns(st, *chat, spawns);
+            // One match is shown right away; with several the user picks one in the chat.
+            if let [only] = focus.as_slice()
+                && here(st, chat)
+            {
+                st.focus_node(only.module.clone(), only.node.clone());
+            }
             if questions {
                 st.await_answers();
             } else {

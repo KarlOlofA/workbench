@@ -256,7 +256,8 @@
 .file-diff > summary { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--panel); cursor: pointer; font-family: var(--mono); }
 .hunk-header { display: flex; align-items: center; justify-content: space-between; padding: 3px 10px; background: var(--hint-bg); color: var(--muted); }
 .hunk-header button { padding: 1px 8px; font-size: 11px; }
-.hunk-lines { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+.diff-scroll { overflow-x: auto; }
+.hunk-lines { min-width: 100%; width: max-content; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
 .hunk-lines td { padding: 0 6px; white-space: pre; line-height: 18px; vertical-align: top; }
 .hunk-lines .ln { width: 1%; color: var(--faint); text-align: right; user-select: none; }
 .hunk-lines .sign { width: 1%; user-select: none; }
@@ -301,6 +302,9 @@ button.toggle.on { border-color: var(--accent); color: var(--accent); }
 .gnode-port.out { right: -8px; }
 .gnode-port:hover { background: var(--accent); border-color: var(--accent); }
 .graph-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.graph-world.panning { transition: transform 0.4s ease; }
+.gnode.pulse { animation: node-pulse 2s ease-out; }
+@keyframes node-pulse { 0%, 30% { box-shadow: 0 0 0 4px var(--accent), 0 0 18px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
 .edges { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; pointer-events: none; }
 .edges-svg { overflow: visible; }
 .edges-svg .edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
@@ -340,6 +344,8 @@ button.toggle.on { border-color: var(--accent); color: var(--accent); }
 .gnode.added .gnode-status { color: var(--add); }
 .gnode.modified .gnode-status { color: var(--warn); }
 .gnode-stale { color: var(--warn); font-style: italic; }
+.gnode-editing { color: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
+.live-edits .live-dot { color: var(--accent); margin-right: 6px; animation: agent-pulse 1.2s ease-in-out infinite; }
 .gnode.dim { opacity: 0.35; }
 .gnode.dim.selected { opacity: 1; }
 .gnode { transition: opacity 0.12s; }
@@ -583,8 +589,6 @@ label.check input { width: auto; padding: 0; }
 .history-entry.modified .change-sign { color: var(--warn); }
 .history-entry .change-title { min-width: 0; }
 .history-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.node-diff { border-top: 1px solid var(--border); background: var(--bg); }
-.node-diff td.src { white-space: pre-wrap; word-break: break-word; }
 .model-input { width: 170px; }
 
 /* Worktrees and agent activity. */
