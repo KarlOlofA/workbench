@@ -5,8 +5,8 @@ use crate::api_chat;
 use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL, TESTED_CLI_VERSIONS, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
 use crate::history;
 use crate::projects::same_dir;
-use crate::{mcp, mcp_oauth};
-use crate::providers::Provider;
+use crate::{mcp, mcp_oauth, scope};
+use crate::providers::{self, Provider};
 use crate::prompts;
 use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
 
@@ -292,7 +292,7 @@ fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
         _ => {
             let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
             let base = prompts::with_project(base, project.as_ref(), &dir).unwrap_or_default();
-            format!("{base}{}", prompts::focus_instructions())
+            format!("{base}{}{}", prompts::focus_instructions(), prompts::query_instructions(&crate::query::command_line(&dir)))
         }
     };
     Some(format!("{context}{}", prompts::spawn_agent_instructions(project.as_ref(), &st.provider_settings.peek())))
@@ -302,6 +302,7 @@ fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
 /// repository of the agent's project, on the provider and model the block names, if any.
 fn start_spawns(st: &mut AppState, mut chat: Chat, spawns: Vec<prompts::SpawnRequest>) {
     let project = st.chat_project(&chat);
+    let parent_full_auto = *chat.chat_mode.peek() == ChatMode::FullAuto;
     for spawn in spawns {
         let provider = match spawn.provider.as_deref().map(|id| (id, Provider::find(id))) {
             None => None,
@@ -323,8 +324,12 @@ fn start_spawns(st: &mut AppState, mut chat: Chat, spawns: Vec<prompts::SpawnReq
             (None, Some(m)) => format!(" on {m}"),
             (None, None) => String::new(),
         };
+        // Full auto carries over to the new agent when its provider can run it (API providers only answer).
+        let child_provider = provider.unwrap_or(st.provider_settings.peek().provider);
+        let full_auto = parent_full_auto && child_provider.modes().contains(&ChatMode::FullAuto);
+        let in_mode = if full_auto { " in Full auto" } else { "" };
         let Some(repo_name) = spawn.repo else {
-            chat.items.write().push(ChatItem::Info(format!("Started agent “{}”{runs_on} in this session", spawn.name)));
+            chat.items.write().push(ChatItem::Info(format!("Started agent “{}”{runs_on}{in_mode} in this session", spawn.name)));
             st.request_chat(ChatRequest::NewAgent {
                 session: chat.session.cloned(),
                 name: Some(spawn.name),
@@ -332,13 +337,14 @@ fn start_spawns(st: &mut AppState, mut chat: Chat, spawns: Vec<prompts::SpawnReq
                 activate: false,
                 provider,
                 model: spawn.model,
+                full_auto,
             });
             continue;
         };
         match project.as_ref().and_then(|p| p.find_repo(&repo_name)) {
             Some(repo) => {
-                chat.items.write().push(ChatItem::Info(format!("Started agent “{}”{runs_on} in a new session in {}", spawn.name, repo.label())));
-                st.request_chat(ChatRequest::AgentInRepo { dir: repo.dir(), name: spawn.name, task: spawn.task, provider, model: spawn.model });
+                chat.items.write().push(ChatItem::Info(format!("Started agent “{}”{runs_on}{in_mode} in a new session in {}", spawn.name, repo.label())));
+                st.request_chat(ChatRequest::AgentInRepo { dir: repo.dir(), name: spawn.name, task: spawn.task, provider, model: spawn.model, full_auto });
             }
             None => chat.items.write().push(ChatItem::Error(format!(
                 "Could not start agent “{}”: “{repo_name}” is not a repository of this agent's project",
@@ -361,13 +367,76 @@ fn begin_turn(st: &mut AppState, chat: &Chat) {
 }
 
 /// Ends the tracked graph turn or job, when it is this agent's.
+/// After a successful turn, names the files it changed that no node owns (PRO-233).
 fn finish(st: &mut AppState, chat: &Chat, success: bool) {
-    if st.owns_turn(chat)
-        && let Some(warning) = st.finish_job(success)
-    {
-        let mut items = chat.items;
+    if !st.owns_turn(chat) {
+        return;
+    }
+    let mut items = chat.items;
+    if let Some(warning) = st.finish_job(success) {
         items.write().push(ChatItem::Error(warning));
     }
+    let unowned = st.unowned_changes();
+    let notice = scope::report_unowned(&unowned, file_searches(&items.peek()));
+    if let Some(notice) = notice.filter(|_| success) {
+        items.write().push(ChatItem::Info(notice));
+    }
+}
+
+/// When the agent's provider ran out of tokens and a fallback is set (PRO-236), moves the agent
+/// to the fallback and sends it the conversation so far, so the work goes on. The fallback can't
+/// resume the old provider's session, so it starts a new one from the visible chat.
+fn fall_back_if_out_of_tokens(st: &mut AppState, chat: &mut Chat, error: &str) {
+    let Some(fallback) = st.provider_settings.peek().fallback.clone() else { return };
+    let (current, _) = st.agent_provider(chat);
+    if current == fallback.provider || !providers::out_of_tokens(error) {
+        return;
+    }
+    chat.provider.set(Some(fallback.provider));
+    chat.pinned_model.set(Some(fallback.model.trim().to_string()).filter(|m| !m.is_empty()));
+    chat.session_id.set(None);
+    if !fallback.provider.modes().contains(&chat.chat_mode.peek()) {
+        chat.chat_mode.set(ChatMode::Plan);
+    }
+    let handover = handover(&chat.items.peek());
+    chat.items.write().push(ChatItem::Info(format!(
+        "{} ran out of tokens. Continuing on {} with the conversation so far.",
+        current.label(),
+        fallback.provider.label()
+    )));
+    chat.send(Cmd::Restart { keep_session: true });
+    chat.send(Cmd::Prompt { label: format!("Conversation handed over from {}", current.label()), text: handover });
+}
+
+/// How many recent messages the fallback provider gets.
+const HANDOVER_MESSAGES: usize = 20;
+
+/// The recent user messages and replies, as a prompt for the provider that takes over.
+fn handover(items: &[ChatItem]) -> String {
+    let messages: Vec<String> = items
+        .iter()
+        .filter_map(|i| match i {
+            ChatItem::User(m) => Some(format!("User: {}", m.text)),
+            ChatItem::Assistant { text, .. } => Some(format!("Assistant: {text}")),
+            _ => None,
+        })
+        .collect();
+    let recent = &messages[messages.len().saturating_sub(HANDOVER_MESSAGES)..];
+    format!(
+        "You are taking over this conversation from another provider, which ran out of tokens. \
+         Here are its latest messages. Continue with the user's last request; check the files for work already done.\n\n{}",
+        recent.join("\n\n")
+    )
+}
+
+/// The file-system searches (Grep, Glob) the agent ran since the user's last message.
+fn file_searches(items: &[ChatItem]) -> usize {
+    items
+        .iter()
+        .rev()
+        .take_while(|i| !matches!(i, ChatItem::User(_)))
+        .filter(|i| matches!(i, ChatItem::Tool { name, .. } if name == "Grep" || name == "Glob"))
+        .count()
 }
 
 /// Every provider except Workbench runs one turn per message: a fresh CLI
@@ -533,9 +602,9 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             let asked = text.as_deref().is_some_and(prompts::asks_questions);
             let questions = !is_error && asked && st.owns_turn(chat) && st.job.peek().is_some_and(|j| j.mode == ChatMode::Plan);
             if is_error {
-                chat.items
-                    .write()
-                    .push(ChatItem::Error(text.unwrap_or_else(|| "request failed".into())));
+                let error = text.clone().unwrap_or_else(|| "request failed".into());
+                chat.items.write().push(ChatItem::Error(error.clone()));
+                fall_back_if_out_of_tokens(st, chat, &error);
             }
             let mut items = chat.items.write();
             for item in items.iter_mut() {

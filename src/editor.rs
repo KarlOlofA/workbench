@@ -22,6 +22,7 @@ while (ed) {
   const m = await dioxus.recv();
   try {
     if (m.type === "load") ed.load(m.path, m.text, m.keep);
+    else if (m.type === "goto") ed.goto(m.line, m.col);
     else if (m.type === "focus") setTimeout(() => { window.dispatchEvent(new Event("resize")); ed.focus(); }, 0);
   } catch (e) {
     dioxus.send({ type: "error", message: "editor error: " + (e && e.stack || e) });
@@ -51,6 +52,9 @@ pub fn EditorView(visible: bool) -> Element {
         let keep = st.editor_load.peek().1;
         if let Some(f) = st.open_file.peek().as_ref() {
             let _ = b.send(json!({ "type": "load", "path": f.rel, "text": f.content, "keep": keep }));
+            if let Some((line, col)) = st.editor_goto.take() {
+                let _ = b.send(json!({ "type": "goto", "line": line, "col": col }));
+            }
         }
     });
 

@@ -355,16 +355,14 @@ pub fn save_snapshot(cwd: &Path, s: &Snapshot) -> Result<(), String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
+    Same,
     Add,
     Del,
 }
 
-/// What changed in a node's intent: the lines of `before` that are gone and the lines of
-/// `after` that are new, in order. Rendered nodes (`render_node`) hold one fact per line (title,
-/// kind, links, each file, each description sentence), so each change is one fact.
-/// Uses a longest common subsequence, so lines that only moved don't count as changes.
-pub fn intent_changes(before: &str, after: &str) -> Vec<(Op, String)> {
-    let (a, b) = (facts(before), facts(after));
+/// The steps that turn `a` into `b`, from a longest common subsequence, so items that only
+/// stayed in place count as `Same`.
+fn diff<T: PartialEq + Clone>(a: &[T], b: &[T]) -> Vec<(Op, T)> {
     let (n, m) = (a.len(), b.len());
     let mut lcs = vec![vec![0usize; m + 1]; n + 1];
     for i in (0..n).rev() {
@@ -372,21 +370,59 @@ pub fn intent_changes(before: &str, after: &str) -> Vec<(Op, String)> {
             lcs[i][j] = if a[i] == b[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
         }
     }
-    let mut changes = Vec::new();
+    let mut steps = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < n || j < m {
         if i < n && j < m && a[i] == b[j] {
+            steps.push((Op::Same, a[i].clone()));
             i += 1;
             j += 1;
         } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
-            changes.push((Op::Del, a[i].clone()));
+            steps.push((Op::Del, a[i].clone()));
             i += 1;
         } else {
-            changes.push((Op::Add, b[j].clone()));
+            steps.push((Op::Add, b[j].clone()));
             j += 1;
         }
     }
-    changes
+    steps
+}
+
+/// What changed in a node's intent, as two parts:
+/// - the facts (title, kind, links, each file) that are gone (`Del`) or new (`Add`), and
+/// - the description as prose: its words in order, each `Same`, `Add` or `Del`. Empty when the
+///   description didn't change.
+///
+/// Rendered nodes (`render_node`) hold one fact per line, then a blank line and the description.
+pub fn intent_changes(before: &str, after: &str) -> (Vec<(Op, String)>, Vec<(Op, String)>) {
+    let split = |text: &str| -> (String, String) {
+        let (facts, description) = text.split_once("\n\n").unwrap_or((text, ""));
+        (facts.to_string(), prose(description))
+    };
+    let ((facts_a, prose_a), (facts_b, prose_b)) = (split(before), split(after));
+    let fact_changes = diff(&facts(&facts_a), &facts(&facts_b)).into_iter().filter(|(op, _)| *op != Op::Same).collect();
+    let prose_changes = if prose_a == prose_b { Vec::new() } else { prose_diff(&prose_a, &prose_b) };
+    (fact_changes, prose_changes)
+}
+
+/// A rendered description (one sentence per line, a blank line between paragraphs) as text again.
+fn prose(rendered: &str) -> String {
+    rendered.split("\n\n").map(|p| p.lines().map(str::trim).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n\n")
+}
+
+/// Word-level diff of two texts, for reading as prose. Each word keeps the space or line break
+/// after it, so joining the `Same` and `Add` parts gives `after` back. Runs of the same op are
+/// merged into one part.
+pub fn prose_diff(before: &str, after: &str) -> Vec<(Op, String)> {
+    let words = |text: &str| -> Vec<String> { text.split_inclusive(char::is_whitespace).map(String::from).collect() };
+    let mut out: Vec<(Op, String)> = Vec::new();
+    for (op, word) in diff(&words(before.trim()), &words(after.trim())) {
+        match out.last_mut() {
+            Some((last, text)) if *last == op => text.push_str(&word),
+            _ => out.push((op, word)),
+        }
+    }
+    out
 }
 
 /// The non-empty lines of a rendered node. An indented line, such as a file under `Files:`,
@@ -408,11 +444,6 @@ fn facts(text: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// What changed between two descriptions, one sentence per change.
-pub fn description_changes(before: &str, after: &str) -> Vec<(Op, String)> {
-    intent_changes(&sentences(before.trim()).join("\n"), &sentences(after.trim()).join("\n"))
 }
 
 #[cfg(test)]
@@ -513,28 +544,28 @@ mod tests {
     }
 
     #[test]
-    fn intent_changes_lists_only_changed_facts() {
+    fn intent_changes_lists_facts_and_diffs_the_description_as_prose() {
         let before = "Title: A\nKind: service\nLinks: b, c\n\nLoads it.\nSaves it.";
         let after = "Title: A\nKind: service\nLinks: b\n\nLoads it.\nSaves it twice.";
+        let (facts, prose) = intent_changes(before, after);
+        assert_eq!(facts, vec![(Op::Del, "Links: b, c".to_string()), (Op::Add, "Links: b".to_string())]);
         assert_eq!(
-            intent_changes(before, after),
-            vec![
-                (Op::Del, "Links: b, c".to_string()),
-                (Op::Add, "Links: b".to_string()),
-                (Op::Del, "Saves it.".to_string()),
-                (Op::Add, "Saves it twice.".to_string()),
-            ]
+            prose,
+            vec![(Op::Same, "Loads it. Saves ".to_string()), (Op::Del, "it.".to_string()), (Op::Add, "it twice.".to_string())]
         );
-        assert_eq!(intent_changes("", "a\nb"), vec![(Op::Add, "a".to_string()), (Op::Add, "b".to_string())]);
-        assert_eq!(intent_changes("Files:\n  a.rs", "Files:\n  a.rs\n  b.rs"), vec![(Op::Add, "Files: b.rs".to_string())]);
+        assert_eq!(intent_changes("", "a\nb").0, vec![(Op::Add, "a".to_string()), (Op::Add, "b".to_string())]);
+        assert_eq!(intent_changes("Files:\n  a.rs", "Files:\n  a.rs\n  b.rs").0, vec![(Op::Add, "Files: b.rs".to_string())]);
+        assert!(intent_changes("Title: A\n\nSame.", "Title: B\n\nSame.").1.is_empty());
     }
 
     #[test]
-    fn description_changes_are_per_sentence() {
-        let changes = description_changes("Loads it. Saves it.", "Loads it. Saves it — twice. Logs it.");
+    fn prose_diff_marks_words_and_keeps_paragraphs_and_punctuation() {
+        let changes = prose_diff("Loads “it”. Saves it.\n\nÄr klar.", "Loads “it”. Saves it — twice.\n\nÄr klar.");
         assert_eq!(
             changes,
-            vec![(Op::Del, "Saves it.".to_string()), (Op::Add, "Saves it — twice.".to_string()), (Op::Add, "Logs it.".to_string())]
+            vec![(Op::Same, "Loads “it”. Saves ".to_string()), (Op::Del, "it.\n".to_string()), (Op::Add, "it — twice.\n".to_string()), (Op::Same, "\nÄr klar.".to_string())]
         );
+        let after: String = changes.iter().filter(|(op, _)| *op != Op::Del).map(|(_, t)| t.as_str()).collect();
+        assert_eq!(after, "Loads “it”. Saves it — twice.\n\nÄr klar.");
     }
 }

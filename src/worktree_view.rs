@@ -68,6 +68,76 @@ pub fn AgentChips(agents: Vec<AgentProc>) -> Element {
     }
 }
 
+/// Asks what the ✕ on a sidebar worktree should do: close it (delete the worktree folder and
+/// close its chat sessions; the branch stays) or just hide it from the sidebar. The worktree
+/// that is open can only be hidden.
+#[component]
+pub fn WorktreeClosePrompt(repo_path: String, worktree: Worktree, on_done: EventHandler<()>) -> Element {
+    let mut st = use_context::<AppState>();
+    let mut error = use_signal(|| None::<String>);
+    let mut working = use_signal(|| false);
+    let open_here = same_dir(&worktree.path, &st.cwd.read());
+    let label = worktree.label();
+    let warning = match worktree.changes {
+        Some(n) if n > 0 => format!(" It has {n} uncommitted change(s), so git will refuse; commit or stash them first."),
+        _ => String::new(),
+    };
+    let hide_path = worktree.path.clone();
+    let close = move |_| {
+        let w = worktree.clone();
+        let repo = PathBuf::from(&repo_path);
+        working.set(true);
+        error.set(None);
+        spawn(async move {
+            let r = tokio::task::spawn_blocking({
+                let w = w.clone();
+                move || git::remove_worktree(&repo, &w)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            working.set(false);
+            match r {
+                Ok(()) => {
+                    st.close_sessions_in(&w.path);
+                    refresh_worktrees(st).await;
+                    on_done.call(());
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    rsx! {
+        li { class: "sidebar-worktree-ask", onclick: move |e| e.stop_propagation(),
+            div { class: "small-text",
+                "Close ⑂ {label}, deleting its folder and chat sessions (the branch stays), or just hide it here?{warning}"
+            }
+            div { class: "inspector-actions",
+                button {
+                    class: "small danger",
+                    disabled: open_here || working(),
+                    title: if open_here { "Open another folder first; this worktree is open" } else { "git worktree remove" },
+                    onclick: close,
+                    if working() { "Closing…" } else { "Close worktree" }
+                }
+                button {
+                    class: "small",
+                    title: "Leave the worktree as it is and take it out of the sidebar. The project view can show it again.",
+                    onclick: move |_| {
+                        st.set_worktree_hidden(&hide_path, true);
+                        on_done.call(());
+                    },
+                    "Just hide"
+                }
+                button { class: "small", onclick: move |_| on_done.call(()), "Cancel" }
+            }
+            if let Some(e) = error.read().clone() {
+                div { class: "branch-error", "{e}" }
+            }
+        }
+    }
+}
+
 /// The worktrees of one project repository, with their agents, and a form to add one.
 #[component]
 pub fn WorktreeList(repo_path: String) -> Element {
@@ -77,6 +147,7 @@ pub fn WorktreeList(repo_path: String) -> Element {
     let mut working = use_signal(|| false);
     let list = st.worktrees.read().get(&repo_path).cloned();
     let activity = st.agent_activity();
+    let hidden = st.hidden_worktrees.read().clone();
     let cwd = st.cwd.read().clone();
     let repo_dir = PathBuf::from(&repo_path);
     let main_dir = list.as_ref().and_then(|l| l.iter().find(|w| w.main).map(|w| w.path.clone())).unwrap_or_else(|| repo_dir.clone());
@@ -132,6 +203,17 @@ pub fn WorktreeList(repo_path: String) -> Element {
                                             None => rsx! {},
                                         }
                                         div { class: "spacer" }
+                                        if hidden.contains(&w.path) {
+                                            button {
+                                                class: "small",
+                                                title: "This worktree is hidden from the projects sidebar",
+                                                onclick: {
+                                                    let path = w.path.clone();
+                                                    move |_| st.set_worktree_hidden(&path, false)
+                                                },
+                                                "Show in sidebar"
+                                            }
+                                        }
                                         if here {
                                             span { class: "chip", "open" }
                                         } else {

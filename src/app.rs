@@ -156,8 +156,11 @@ fn create_requested_chats(mut st: AppState) {
                     st.active_chat.set(Some(chat));
                 }
             }
-            ChatRequest::NewAgent { session, name, task, activate, provider, model } => {
-                let Some(chat) = st.create_agent(&session, name, provider, model) else { continue };
+            ChatRequest::NewAgent { session, name, task, activate, provider, model, full_auto } => {
+                let Some(mut chat) = st.create_agent(&session, name, provider, model) else { continue };
+                if full_auto {
+                    chat.chat_mode.set(ChatMode::FullAuto);
+                }
                 if let Some(text) = task {
                     chat.send(Cmd::Prompt { label: "Task from the session".into(), text });
                 }
@@ -165,8 +168,11 @@ fn create_requested_chats(mut st: AppState) {
                     st.active_chat.set(Some(chat));
                 }
             }
-            ChatRequest::AgentInRepo { dir, name, task, provider, model } => {
-                let chat = st.create_named_session(dir, name, provider, model);
+            ChatRequest::AgentInRepo { dir, name, task, provider, model, full_auto } => {
+                let mut chat = st.create_named_session(dir, name, provider, model);
+                if full_auto {
+                    chat.chat_mode.set(ChatMode::FullAuto);
+                }
                 chat.send(Cmd::Prompt { label: "Task from another agent".into(), text: task });
             }
         }

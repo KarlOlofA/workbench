@@ -143,6 +143,13 @@ function defineEx() {
 function mount(host, send) {
   defineEx();
 
+  // Esc belongs to the editor (Vim normal mode, closing completions). On macOS an Esc the page
+  // leaves unhandled travels on to the window, which leaves full screen (PRO-242). This runs after
+  // CodeMirror has seen the key, since it listens on the host around the editor.
+  host.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") e.preventDefault();
+  });
+
   const language = new Compartment();
   const numbers = new Compartment();
   let path = "";
@@ -254,6 +261,14 @@ function mount(host, send) {
       current = api;
     },
     focus() {
+      view.focus();
+    },
+    // Puts the cursor on `line` (from 1) at `col` (from 1; 0 = line start) and scrolls to it.
+    goto(line, col) {
+      const doc = view.state.doc;
+      const target = doc.line(Math.min(Math.max(line, 1), doc.lines));
+      const pos = Math.min(target.from + Math.max(col - 1, 0), target.to);
+      view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
       view.focus();
     },
   };

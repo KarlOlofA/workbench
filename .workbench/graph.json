@@ -13,7 +13,8 @@
         "src/theme.css"
       ],
       "links": [
-        "app-root"
+        "app-root",
+        "intent-query"
       ]
     },
     {
@@ -63,7 +64,7 @@
       "id": "session-loop",
       "title": "Workbench session loop",
       "kind": "service",
-      "description": "One long-running loop per agent that receives that agent's Cmd values (Send, Prompt, Interrupt, Restart, Resume, Close; Close stops the agent and ends the loop) and owns its live agent, so agents in a session work at the same time. With Workbench it spawns the agent process lazily in the agent's folder, respawns it when the rules version changes, and resumes the agent's stored session id. A generation counter drops events from killed processes. Streamed events become the agent's chat items; when the agent works in the open folder, file-touching tool results bump repo_version and reload the open file, and Done settles its chat turn or graph job against the baseline. A reply that ends with focus blocks has them stripped and shown as node choices in the chat, and a single match is focused on the graph right away. Tool results of a scoped run are recorded as its live edits. A reply that ends with spawn-agent blocks starts those agents with their tasks: in the same session, or, when a block names a repository of the agent's project, in a new session in that repository. A project-level agent gets the project's repositories as its context instead of the open folder's graph. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench session ids are saved for resuming. Each agent runs on its own provider and model when it was started on one (AppState::agent_provider), otherwise on the ones in the settings; a spawn-agent block can name a provider and model for the new agent, and an unknown provider id is shown as an error instead of starting it. The provider and model of a turn come from agent_provider. A job's route wins over the agent's own provider.",
+      "description": "One long-running loop per agent that receives that agent's Cmd values (Send, Prompt, Interrupt, Restart, Resume, Close; Close stops the agent and ends the loop) and owns its live agent, so agents in a session work at the same time. With Workbench it spawns the agent process lazily in the agent's folder, respawns it when the rules version changes, and resumes the agent's stored session id. A generation counter drops events from killed processes. Streamed events become the agent's chat items; when the agent works in the open folder, file-touching tool results bump repo_version and reload the open file, and Done settles its chat turn or graph job against the baseline. A reply that ends with focus blocks has them stripped and shown as node choices in the chat, and a single match is focused on the graph right away. Tool results of a scoped run are recorded as its live edits. A reply that ends with spawn-agent blocks starts those agents with their tasks: in the same session, or, when a block names a repository of the agent's project, in a new session in that repository. A project-level agent gets the project's repositories as its context instead of the open folder's graph. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench session ids are saved for resuming. Each agent runs on its own provider and model when it was started on one (AppState::agent_provider), otherwise on the ones in the settings; a spawn-agent block can name a provider and model for the new agent, and an unknown provider id is shown as an error instead of starting it. The provider and model of a turn come from agent_provider. A job's route wins over the agent's own provider. When a turn fails because the provider ran out of tokens and a fallback is set, the agent moves to the fallback and gets the recent conversation as its next prompt. After a successful turn the files it changed that no node owns are named in the chat.",
       "files": [
         "src/session.rs",
         "src/history.rs"
@@ -73,7 +74,9 @@
         "prompt-builder",
         "app-state",
         "mcp-connections",
-        "chat-sessions"
+        "chat-sessions",
+        "blast-radius",
+        "llm-providers"
       ]
     },
     {
@@ -103,7 +106,7 @@
       "id": "prompt-builder",
       "title": "Prompt builder",
       "kind": "service",
-      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create, and is told which nodes and files other branches are also changing), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply. It also builds the project-level agent's prompt (the project and its repositories) and the spawn-agent instructions, which name the project's repositories an agent can start another agent in. The spawn-agent instructions also list every provider id with its models, so when the user names a provider or model in the chat (\"use vibe large 4 to build X\") the agent adds provider and model to the block. The Process prompt is built from typed work orders, each with its own instruction and declared blast radius. Agents with a graph are also told to answer \"what handles X?\" questions with focus blocks naming the responsible nodes and a confidence, which focus_requests parses out of the reply.",
+      "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create, and is told which nodes and files other branches are also changing), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply. It also builds the project-level agent's prompt (the project and its repositories) and the spawn-agent instructions, which name the project's repositories an agent can start another agent in. The spawn-agent instructions also list every provider id with its models, so when the user names a provider or model in the chat (\"use vibe large 4 to build X\") the agent adds provider and model to the block. The Process prompt is built from typed work orders, each with its own instruction and declared blast radius. Agents with a graph are also told to answer any request to see or find a feature (\"show me X\", \"where is X\", \"what handles X?\") quickly from the graph, without searching the code first, and to end the reply with focus blocks naming the responsible nodes and a confidence, which focus_requests parses out of the reply; after changing code they add blocks for the nodes they changed. They are also told to find code through the intent query command first and to search the file system only for what the graph doesn't cover.",
       "files": [
         "src/prompts.rs"
       ],
@@ -114,7 +117,8 @@
         "external-references",
         "project-view",
         "claims",
-        "work-orders"
+        "work-orders",
+        "intent-query"
       ]
     },
     {
@@ -210,7 +214,7 @@
       "id": "run-mode",
       "title": "Chat modes (Plan / Accept edits / Auto / Full auto)",
       "kind": "model",
-      "description": "One mode decides both how the agent acts and what it may do without asking; the toggle sits under the chat and every session starts in Plan. Plan is read only: Workbench runs in its own plan mode and presents its plan with ExitPlanMode, which Workbench turns into a prompt asking whether to run it in Auto, Full auto or Accept edits, or keep planning; picking a mode answers the request and switches the running session's mode. Other providers get plan instructions instead, and their plan-mode reply gets the same prompt, which then asks them to implement the plan. Accept edits asks before every change and command, Auto answers every permission request itself except deleting files, and Full auto never asks. For Draft and Process jobs, Plan mode also lets Workbench ask numbered questions ending in a marker, pausing the job until the user answers.",
+      "description": "One mode decides both how the agent acts and what it may do without asking; the toggle sits under the chat and every session starts in Plan. Plan is read only: Workbench runs in its own plan mode and presents its plan with ExitPlanMode, which Workbench turns into a prompt asking whether to run it in Auto, Full auto or Accept edits, or keep planning; picking a mode answers the request and switches the running session's mode. Other providers get plan instructions instead, and their plan-mode reply gets the same prompt, which then asks them to implement the plan. Accept edits asks before every change and command, Auto answers every permission request itself except deleting files, and Full auto never asks. For Draft and Process jobs, Plan mode also lets Workbench ask numbered questions ending in a marker, pausing the job until the user answers. An agent spawned by an agent in Full auto starts in Full auto too when its provider can run it; any other mode starts the new agent in Plan.",
       "files": [
         "src/claude.rs",
         "src/state.rs",
@@ -263,7 +267,7 @@
       "id": "changes-pane",
       "title": "Changes pane (commit graph)",
       "kind": "component",
-      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. Before processing it reads the claims of the other git branches and warns when they change the same nodes or files, or nodes these changes depend on; the user can process anyway or process only the changes no other branch touches. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated. Description changes are flagged. Descriptions that agents proposed are listed for the user to accept or reject. Possibly stale dependents are shown, and a Strict toggle makes out-of-scope edits get undone. Each proposal shows the description sentences it adds and removes as + and − rows like a code diff.",
+      "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. Before processing it reads the claims of the other git branches and warns when they change the same nodes or files, or nodes these changes depend on; the user can process anyway or process only the changes no other branch touches. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated. Description changes are flagged. Descriptions that agents proposed are listed for the user to accept or reject. Possibly stale dependents are shown, and a Strict toggle makes out-of-scope edits get undone. Each proposal lists the description sentences it adds and removes.",
       "files": [
         "src/graph_view.rs"
       ],
@@ -310,7 +314,7 @@
       "id": "chat-pane",
       "title": "Chat pane",
       "kind": "screen",
-      "description": "Conversation view of the agent the chat shows: user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy. ChatTabs, in the chat's top bar next to “Chat”, shows the session's title and one tab per agent with its provider's logo (and a dot while it works and ! while it waits for an answer); clicking a tab switches the chat to that agent, hovering it shows an ✕ on its left that closes the agent (closing the last one closes the session), and + adds an agent. In a project view the session title in the top bar is a session picker: the project's own sessions, every session in its repositories and their worktrees, and + New project session. Picking a repository's session shows it without leaving the project view. A reply that names responsible nodes shows them as buttons with the agent's confidence; clicking one focuses it on the graph.",
+      "description": "Conversation view of the agent the chat shows: user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy. ChatTabs, in the chat's top bar next to “Chat”, shows the session's title and one tab per agent with its provider's logo (and a dot while it works and ! while it waits for an answer); clicking a tab switches the chat to that agent, hovering it shows an ✕ on its left that closes the agent (closing the last one closes the session), and + adds an agent. In a project view the session title in the top bar is a session picker: the project's own sessions, every session in its repositories and their worktrees, and + New project session. Picking a repository's session shows it without leaving the project view. A reply that names responsible nodes shows them as buttons with the agent's confidence; clicking one focuses it on the graph. File references in messages (a path, path:line or path:line:col) are links: clicking one opens the file in the editor at that line, hovering shows its size, and a path in backticks that doesn't exist is shown struck through.",
       "files": [
         "src/chat.rs",
         "src/markdown.rs"
@@ -321,14 +325,15 @@
         "run-mode",
         "chat-sessions",
         "agent-activity",
-        "project-view"
+        "project-view",
+        "code-editor"
       ]
     },
     {
       "id": "code-pane",
       "title": "Code pane (Files / Editor / Diff)",
       "kind": "screen",
-      "description": "Right-hand tabs. Files lists changed files with their git status, then all files as the project's folder tree with folders that open and close on click (open folders are kept in AppState, and typing in the filter opens every folder with a match). Diff shows a syntax-highlighted git diff against a chosen base, long lines scroll horizontally, and each hunk has an Ask Workbench button that pastes it into the chat input. Workbench's own files in .workbench/ are hidden from that diff and its line counts unless the Show Workbench files toggle is on (off by default). Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module, the MCP tab hosts the MCP module, and the Providers tab hosts the LLM providers module.",
+      "description": "Right-hand tabs. Files lists changed files with their git status, then all files as the project's folder tree with folders that open and close on click (open folders are kept in AppState, and typing in the filter opens every folder with a match). Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Workbench button that pastes it into the chat input. Workbench's own files in .workbench/ are hidden from that diff and its line counts unless the Show Workbench files toggle is on (off by default). Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module, the MCP tab hosts the MCP module, and the Providers tab hosts the LLM providers module.",
       "files": [
         "src/code.rs",
         "src/highlight.rs"
@@ -522,10 +527,11 @@
       "id": "history-pane",
       "title": "History pane",
       "kind": "component",
-      "description": "Bottom-panel tab that lists recorded node and module changes newest first, each as the facts (title, kind, links, files, description sentences) that were added or removed, drawn as + and − rows like a code diff, with who made each change (you, a teammate, Workbench, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo. In a git repository the list is grouped against the git state: an Uncommitted section first, for entries not yet in a commit on this branch, then one section per commit (short hash, subject, author, time), newest first. Each entry also carries an uncommitted or commit-hash tag.",
+      "description": "Bottom-panel tab that lists recorded node and module changes newest first, each as the facts (title, kind, links, files) that were added or removed, followed by the description diffed as readable prose: removed words struck through, new words marked, and long unchanged stretches folded behind \"show more context\", with who made each change (you, a teammate, Workbench, or outside Workbench) and when. When one node is selected (or a module is open) it can filter to just that node's history, and Show jumps to the node. The node inspector links here with a History (n) button. There is no clear action because the log is shared with the repo. In a git repository the list is grouped against the git state: an Uncommitted section first, for entries not yet in a commit on this branch, then one section per commit (short hash, subject, author, time), newest first. Each entry also carries an uncommitted or commit-hash tag.",
       "files": [
         "src/graph_view.rs",
-        "src/style.css"
+        "src/style.css",
+        "src/node_history.rs"
       ],
       "links": [
         "app-state",
@@ -588,7 +594,7 @@
       "id": "llm-providers",
       "title": "LLM providers",
       "kind": "module",
-      "description": "Lets the user switch the chat between Workbench Code, Codex and Mistral Vibe (agent CLIs) and the Anthropic, OpenAI, Mistral and OpenRouter APIs, with a model per provider. The header uses it for the provider and model picker, the Code pane for the Providers tab, and the agent layer to run Codex, Vibe and API turns. The provider picked in the settings is only the default: an agent can be started on another provider and model from the chat through a spawn-agent block, and the chat tab, sidebar row and mode toggle show the agent's own provider.",
+      "description": "Lets the user switch the chat between Workbench Code, Codex and Mistral Vibe (agent CLIs) and the Anthropic, OpenAI, Mistral and OpenRouter APIs, with a model per provider. The header uses it for the provider and model picker, the Code pane for the Providers tab, and the agent layer to run Codex, Vibe and API turns. The provider picked in the settings is only the default: an agent can be started on another provider and model from the chat through a spawn-agent block, and the chat tab, sidebar row and mode toggle show the agent's own provider. A fallback provider and model can be set for when a chat's provider runs out of tokens; the chat then continues there with the conversation so far.",
       "files": [
         "src/providers.rs",
         "src/providers_view.rs",
@@ -621,14 +627,15 @@
         "project-view",
         "agent-activity",
         "chat-sessions",
-        "llm-providers"
+        "llm-providers",
+        "git-service"
       ]
     },
     {
       "id": "chat-dock",
       "title": "Floating chat dock",
       "kind": "component",
-      "description": "The chat floats over the graph, code or rules view, at the bottom centre until it is first moved. Dragging its top bar moves it anywhere in the window, even partly past the right and bottom edges, as long as the bar stays in the window; dragging its edges resizes it, and the place and size are saved. A press in the graph fades the chat to a peek at the latest reply unless the Lock toggle is on. Detach moves the chat into a window of its own and Attach puts it back; on macOS, detaching from a full-screen window leaves full screen first. Its top bar holds the agent tabs of the chat session it shows; when the open folder has no session it shows a New session button instead.",
+      "description": "The chat floats over the graph, code or rules view, at the bottom centre until it is first moved. Dragging its top bar moves it anywhere in the window, even partly past the right and bottom edges, as long as the bar stays in the window; dragging its edges resizes it, and the place and size are saved. A press in the graph fades the chat to a peek at the latest reply unless the Lock toggle is on; a locked chat stays open even if it was faded before it was locked. Moves are limited by the page size as the webview measures it, so the chat reaches every edge on wide monitors. Detach moves the chat into a window of its own and Attach puts it back; on macOS, detaching from a full-screen window leaves full screen first. Its top bar holds the agent tabs of the chat session it shows; when the open folder has no session it shows a New session button instead.",
       "files": [
         "src/workbench.rs",
         "src/chat_window.rs",
@@ -654,7 +661,8 @@
       "links": [
         "app-state",
         "llm-providers",
-        "chat-sessions"
+        "chat-sessions",
+        "git-service"
       ]
     },
     {
@@ -733,7 +741,7 @@
       "id": "blast-radius",
       "title": "Blast-radius enforcement",
       "kind": "service",
-      "description": "start snapshots a scoped run: the selected nodes, the files they own and the git state before the run. After the run, enforce compares the files the run changed with that scope (Workbench's own files are always allowed). Out-of-scope changes are reported in the chat. In strict mode they are restored from HEAD, which is safe because they were clean when the run started.",
+      "description": "start snapshots a scoped run: the selected nodes, the files they own and the git state before the run. After the run, enforce compares the files the run changed with that scope (Workbench's own files are always allowed). Out-of-scope changes are reported in the chat. In strict mode they are restored from HEAD, which is safe because they were clean when the run started. After every chat turn it also lists the changed files that no node owns, with how often the agent searched the file system, so gaps in the graph show up in the chat.",
       "files": [
         "src/scope.rs"
       ],
@@ -775,6 +783,20 @@
       "description": "The workbench_auditer crate behind the `workbench check` CI gate, used as a git dependency on github.com/KarlOlofA/workbench_auditer pinned to one commit, together with workbench-graph and workbench-llm. It provides the description lint, the satisfaction check against an Anthropic model, and its config from .workbench/check.toml.",
       "files": [
         "Cargo.toml"
+      ]
+    },
+    {
+      "id": "intent-query",
+      "title": "Intent query CLI",
+      "kind": "api",
+      "description": "Answers questions about the intent graph as JSON when the app binary runs with `query <dir> ...` instead of opening a window. `node` prints a node with the nodes it links to and from, `file` lists the nodes whose files cover a path, `history` prints a node's recorded changes, and `modules` lists every module and where it is attached. Agents are told to find code with it before searching the file system.",
+      "files": [
+        "src/query.rs"
+      ],
+      "links": [
+        "graph-model",
+        "node-history",
+        "workbench-files"
       ]
     }
   ],

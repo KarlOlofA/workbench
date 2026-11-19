@@ -22,7 +22,7 @@ use crate::merge_view::IntentMergeView;
 use crate::project_view::{ProjectView, create_project, pick_repo};
 use crate::rules_view::RulesView;
 use crate::settings_view::SettingsView;
-use crate::worktree_view::{AgentDot, other_worktrees};
+use crate::worktree_view::{AgentDot, WorktreeClosePrompt, other_worktrees};
 use crate::state::{AppState, ChatFocus, ChatItem, ChatRect, WorkbenchView};
 
 const PEEK_CHARS: usize = 180;
@@ -44,6 +44,8 @@ pub fn Body() -> Element {
 fn ProjectSidebar() -> Element {
     let mut st = use_context::<AppState>();
     let mut new_name = use_signal(|| None::<String>);
+    // The worktree whose ✕ was pressed: the sidebar asks whether to close or hide it.
+    let mut closing = use_signal(|| None::<PathBuf>);
 
     if !st.layout.read().projects_open {
         return rsx! {
@@ -124,7 +126,9 @@ fn ProjectSidebar() -> Element {
                             SessionRows { dir: p.folder().unwrap_or_default(), in_worktree: false, project: Some(p.id.clone()) }
                             for r in p.repos.clone() {
                                 {
-                                    let worktrees = other_worktrees(&st, &r.path);
+                                    let hidden = st.hidden_worktrees.read().clone();
+                                    let worktrees: Vec<_> = other_worktrees(&st, &r.path).into_iter().filter(|w| !hidden.contains(&w.path)).collect();
+                                    let repo_path = r.path.clone();
                                     let agents = activity.get(&r.dir()).cloned().unwrap_or_default();
                                     let dir = r.dir();
                                     let repo_key = format!("folder:{}", r.dir().display());
@@ -152,6 +156,9 @@ fn ProjectSidebar() -> Element {
                                                 let missing = w.prunable;
                                                 let worktree_key = format!("folder:{}", w.path.display());
                                                 let worktree_open = !st.is_collapsed(&worktree_key);
+                                                let asking = closing.read().as_ref() == Some(&w.path);
+                                                let ask_path = w.path.clone();
+                                                let worktree = w.clone();
                                                 rsx! {
                                                     li {
                                                         key: "{w.path.display()}",
@@ -170,6 +177,18 @@ fn ProjectSidebar() -> Element {
                                                         Fold { row: worktree_key }
                                                         span { class: "sidebar-label", "⑂ {w.label()}" }
                                                         AgentDot { agents }
+                                                        button {
+                                                            class: "small session-close",
+                                                            title: "Close or hide this worktree",
+                                                            onclick: move |e: MouseEvent| {
+                                                                e.stop_propagation();
+                                                                closing.set(Some(ask_path.clone()));
+                                                            },
+                                                            "✕"
+                                                        }
+                                                    }
+                                                    if asking {
+                                                        WorktreeClosePrompt { repo_path: repo_path.clone(), worktree, on_done: move |_| closing.set(None) }
                                                     }
                                                     if worktree_open {
                                                         SessionRows { dir: w.path.clone(), in_worktree: true }
@@ -526,6 +545,8 @@ struct ChatDrag {
     mx: f64,
     my: f64,
     start: ChatRect,
+    /// The size of the page the chat floats in, in CSS pixels.
+    view: (f64, f64),
 }
 
 /// The size of the current window in logical pixels.
@@ -533,6 +554,14 @@ pub fn window_size() -> (f64, f64) {
     let w = dioxus::desktop::window();
     let size = w.window.inner_size().to_logical::<f64>(w.window.scale_factor());
     (size.width, size.height)
+}
+
+/// The size of the page in CSS pixels, which the chat's position is measured in. The OS
+/// window size divided by the scale factor can be smaller than this (fractional scaling,
+/// wide monitors), which stopped the chat short of the right edge.
+async fn page_size() -> (f64, f64) {
+    let size = document::eval("return [window.innerWidth, window.innerHeight];").join::<(f64, f64)>().await;
+    size.unwrap_or_else(|_| window_size())
 }
 
 /// The rect after dragging by (dx, dy) in a window of `win_w` x `win_h`. A move may push the
@@ -608,7 +637,8 @@ pub fn ChatDock() -> Element {
         spawn(async move {
             if let Ok(rect) = m.get_client_rect().await {
                 let start = ChatRect { x: rect.origin.x, y: rect.origin.y, w: rect.size.width, h: rect.size.height };
-                drag.set(Some(ChatDrag { edges, mx: p.x, my: p.y, start }));
+                let view = page_size().await;
+                drag.set(Some(ChatDrag { edges, mx: p.x, my: p.y, start, view }));
             }
         });
     };
@@ -624,7 +654,8 @@ pub fn ChatDock() -> Element {
         None => String::new(),
     };
     let placed = if layout.chat_rect.is_some() { "placed" } else { "" };
-    let faded = if focus == ChatFocus::Faded && dragging.is_none() { "faded" } else { "" };
+    // A locked chat stays open, even if it was faded before it was locked.
+    let faded = if focus == ChatFocus::Faded && !layout.chat_locked && dragging.is_none() { "faded" } else { "" };
     let overlay_cursor = match dragging.map(|d| d.edges) {
         Some(0) | None => "move".to_string(),
         Some(edges) => {
@@ -664,7 +695,11 @@ pub fn ChatDock() -> Element {
                     class: if layout.chat_locked { "small toggle on" } else { "small toggle" },
                     title: if layout.chat_locked { "Let clicks in the graph fade the chat again" } else { "Lock the chat so clicks in the graph don't fade it" },
                     onmousedown: move |e| e.stop_propagation(),
-                    onclick: move |_| st.set_layout(|l| l.chat_locked = !l.chat_locked),
+                    onclick: move |_| {
+                        st.set_layout(|l| l.chat_locked = !l.chat_locked);
+                        // So unlocking later doesn't fold the chat away by itself.
+                        st.chat_focus.set(ChatFocus::Normal);
+                    },
                     "Lock"
                 }
             }
@@ -684,7 +719,7 @@ pub fn ChatDock() -> Element {
                 onmousemove: move |e: MouseEvent| {
                     let Some(d) = *drag.peek() else { return };
                     let p = e.client_coordinates();
-                    let r = dragged(d, p.x - d.mx, p.y - d.my, window_size());
+                    let r = dragged(d, p.x - d.mx, p.y - d.my, d.view);
                     st.layout.write().chat_rect = Some(r);
                 },
                 onmouseup: move |_| end(),
@@ -701,11 +736,19 @@ mod tests {
     #[test]
     fn a_chat_bigger_than_the_room_left_can_still_move_to_the_edges() {
         let start = ChatRect { x: 100.0, y: 100.0, w: 700.0, h: 500.0 };
-        let d = ChatDrag { edges: 0, mx: 0.0, my: 0.0, start };
-        let r = dragged(d, 10_000.0, 10_000.0, (800.0, 600.0));
+        let d = ChatDrag { edges: 0, mx: 0.0, my: 0.0, start, view: (800.0, 600.0) };
+        let r = dragged(d, 10_000.0, 10_000.0, d.view);
         assert_eq!((r.x, r.y), (800.0 - ChatRect::KEEP_VISIBLE_W, 600.0 - ChatRect::KEEP_VISIBLE_H));
         assert_eq!((r.w, r.h), (700.0, 500.0));
         let r = dragged(d, -10_000.0, -10_000.0, (800.0, 600.0));
         assert_eq!((r.x, r.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_chat_can_move_across_an_ultra_wide_page() {
+        let start = ChatRect { x: 100.0, y: 100.0, w: 680.0, h: 300.0 };
+        let d = ChatDrag { edges: 0, mx: 0.0, my: 0.0, start, view: (5120.0, 1440.0) };
+        let r = dragged(d, 4_800.0, 0.0, d.view);
+        assert_eq!(r.x, 4_900.0);
     }
 }

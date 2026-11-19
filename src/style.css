@@ -147,7 +147,7 @@
 .msg.queued .bubble { opacity: 0.6; border-style: dashed; display: flex; gap: 8px; align-items: flex-start; }
 .queued-tag { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px; border-radius: 8px; background: var(--panel); color: var(--muted); }
 .queued-x { flex: none; padding: 0 6px; }
-.chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column-reverse; }
+.chat-log { flex: 1; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column-reverse; }
 .chat-log-inner { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .empty { color: var(--muted); text-align: center; margin-top: 40px; }
 .thinking { color: var(--muted); font-style: italic; }
@@ -162,6 +162,10 @@
   max-width: 85%;
 }
 .msg.assistant .md { line-height: 1.5; }
+/* File references in chat messages; see markdown::to_html_with_files. */
+a.file-ref { color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+a.file-ref:hover { text-decoration: underline; }
+a.file-ref.missing { color: var(--muted); cursor: not-allowed; text-decoration: line-through; }
 .msg.assistant.streaming .md::after { content: "▍"; color: var(--accent); }
 .md p { margin: 0.4em 0; }
 .md pre { background: var(--panel); padding: 8px; border-radius: 6px; overflow-x: auto; }
@@ -266,6 +270,20 @@
 .hunk-lines tr.removed { background: var(--del-bg); }
 .hunk-lines tr.removed .sign { color: var(--del); }
 .hunk-lines tr.meta { color: var(--muted); }
+/* Intent changes (node history, proposals): changed facts one per row, the description as prose. */
+.intent-facts { font-size: 12px; line-height: 1.6; }
+.intent-facts .added { background: var(--add-bg); padding: 0 6px; }
+.intent-facts .removed { background: var(--del-bg); padding: 0 6px; }
+.intent-facts .sign { display: inline-block; width: 1.2em; user-select: none; }
+.intent-facts .added .sign { color: var(--add); }
+.intent-facts .removed .sign { color: var(--del); }
+.prose-diff { white-space: pre-wrap; line-height: 1.6; margin-top: 4px; }
+.prose-diff ins { text-decoration: none; background: var(--add-bg); color: var(--text); font-weight: 600; border-radius: 3px; }
+.prose-diff del { color: var(--muted); opacity: 0.75; border-radius: 3px; }
+.prose-more { display: inline; }
+.prose-more > summary { display: inline; cursor: pointer; color: var(--muted); font-size: 11px; list-style: none; }
+.prose-more > summary::before { content: "… "; }
+.prose-more[open] > summary { display: none; }
 
 button.small { padding: 1px 8px; font-size: 11px; }
 button.toggle.on { border-color: var(--accent); color: var(--accent); }
@@ -595,6 +613,8 @@ label.check input { width: auto; padding: 0; }
 .sidebar-repos li { display: flex; align-items: center; gap: 6px; }
 .sidebar-repos li.sidebar-worktree { padding-left: 18px; font-size: 12px; }
 .sidebar-repos li.sidebar-worktree.missing { opacity: 0.5; cursor: default; }
+.sidebar-repos li.sidebar-worktree:hover .session-close { visibility: visible; }
+.sidebar-repos li.sidebar-worktree-ask { padding: 6px 8px 6px 18px; cursor: default; display: block; background: var(--panel-2); border-radius: 6px; }
 .sidebar-repos li.sidebar-session { padding-left: 18px; font-size: 12px; }
 .sidebar-repos li.sidebar-no-session { cursor: default; }
 .sidebar-repos li.sidebar-no-session:hover { background: none; }
@@ -652,7 +672,12 @@ label.check input { width: auto; padding: 0; }
 .mode-btn.active.danger { color: var(--warn); }
 .plan-approval { border-color: var(--accent); }
 .plan-approval:focus { box-shadow: 0 0 0 1px var(--accent); }
-.plan-body { max-height: 220px; overflow-y: auto; padding: 4px 8px; border-radius: var(--radius-sm); background: var(--bg); font-size: 12px; }
+/* A plan takes the height it needs, up to most of the chat; past that it scrolls inside (PRO-243). */
+.plan-approval { flex: 0 1 auto; min-height: 0; max-height: 80%; }
+.plan-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px; border-radius: var(--radius-sm); background: var(--bg); font-size: 12px; }
+/* The floating chat grows while a plan waits, so the plan isn't squeezed into the bottom strip. */
+.chat-dock:has(.plan-approval) { height: max(min(var(--h, 300px), 100vh - 24px), min(85vh, 100vh - 24px)); }
+.chat-dock.placed:has(.plan-approval) { top: auto; bottom: 12px; }
 .plan-choices { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .plan-choices .permission-key { margin-right: 6px; }
 .plan-choices .primary .permission-key { color: var(--on-accent); }

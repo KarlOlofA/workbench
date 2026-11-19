@@ -64,6 +64,55 @@ pub fn ProvidersView() -> Element {
                 }
             }
             JobRoutes {}
+            Fallback {}
+        }
+    }
+}
+
+/// The provider a chat moves to when its own runs out of tokens (see `session::fall_back_if_out_of_tokens`).
+#[component]
+fn Fallback() -> Element {
+    let mut st = use_context::<AppState>();
+    let settings = st.provider_settings.read().clone();
+    let fallback = settings.fallback.clone();
+    let suggestions = fallback.as_ref().map(|r| settings.model_choices(r.provider)).unwrap_or_default();
+    let mut choices = vec![Choice::new("", "None: stop with the error")];
+    choices.extend(Provider::ALL.iter().map(|p| Choice::new(p.id(), p.label())));
+
+    rsx! {
+        div { class: "rules-intro muted small-text",
+            "Fallback: when a chat's provider runs out of tokens (usage limit, credit or quota), the chat continues on this provider with the conversation so far."
+        }
+        div { class: "rules-list",
+            div { class: "rule",
+                span { "Out of tokens" }
+                Dropdown {
+                    title: "Provider to continue on",
+                    value: fallback.as_ref().map(|r| r.provider.id().to_string()).unwrap_or_default(),
+                    choices,
+                    onchange: move |id: String| {
+                        st.update_provider_settings(|s| {
+                            s.fallback = (!id.is_empty()).then(|| Route { provider: Provider::from_id(&id), model: String::new() });
+                        });
+                    },
+                }
+                if let Some(r) = fallback {
+                    ComboBox {
+                        class: "model-input",
+                        title: "Model to continue on. Leave empty for the provider's default.",
+                        placeholder: "default model",
+                        value: r.model.clone(),
+                        suggestions,
+                        onchange: move |model: String| {
+                            st.update_provider_settings(|s| {
+                                if let Some(r) = s.fallback.as_mut() {
+                                    r.model = model;
+                                }
+                            });
+                        },
+                    }
+                }
+            }
         }
     }
 }

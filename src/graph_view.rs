@@ -2261,7 +2261,7 @@ fn HistoryPane() -> Element {
                         "removed" => ("−", "removed"),
                         _ => ("~", "modified"),
                     };
-                    let changes = node_history::intent_changes(e.before.as_deref().unwrap_or(""), e.after.as_deref().unwrap_or(""));
+                    let (facts, prose) = node_history::intent_changes(e.before.as_deref().unwrap_or(""), e.after.as_deref().unwrap_or(""));
                     let place = match (&e.scope, e.module) {
                         (Some(m), false) => format!(" · in ▣ {}", module_titles.get(m).cloned().unwrap_or_else(|| m.clone())),
                         _ => String::new(),
@@ -2297,7 +2297,7 @@ fn HistoryPane() -> Element {
                                     }
                                 }
                             }
-                            {intent_list(changes)}
+                            {intent_list(facts, prose)}
                         }
                     }
                 }
@@ -2622,7 +2622,7 @@ fn ProposalsList() -> Element {
                 Subject::Node => g.net(scope).and_then(|n| n.node(id)).map(|n| (n.title.clone(), n.description.clone()))?,
             };
             let who = e.author.clone().map(|a| format!("an agent run by {a}")).unwrap_or_else(|| "an agent".into());
-            Some((e.id.clone(), title, who, node_history::description_changes(&current, proposed)))
+            Some((e.id.clone(), title, who, node_history::prose_diff(&current, proposed)))
         })
         .collect();
     if items.is_empty() {
@@ -2647,7 +2647,7 @@ fn ProposalsList() -> Element {
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&accept_id, true), "Accept" }
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&reject_id, false), "Reject" }
                             }
-                            {intent_list(changes)}
+                            {prose_view(changes)}
                         }
                     }
                 }
@@ -2833,22 +2833,96 @@ fn FlowDraft() -> Element {
 
 /// The facts of a node's intent that were added or removed, drawn like the rows of a code diff
 /// but without the unchanged ones. Used by the node history and the description proposals.
-fn intent_list(changes: Vec<(Op, String)>) -> Element {
-    if changes.is_empty() {
+/// A node's intent change: the facts that changed, one per row, then the description as prose.
+fn intent_list(facts: Vec<(Op, String)>, prose: Vec<(Op, String)>) -> Element {
+    if facts.is_empty() && prose.is_empty() {
         return rsx! { div { class: "muted small-text", "No change to the intent." } };
     }
     rsx! {
-        div { class: "diff-scroll",
-            table { class: "hunk-lines",
-                tbody {
-                    for (i, (op, text)) in changes.into_iter().enumerate() {
-                        match op {
-                            Op::Add => rsx! { tr { key: "{i}", class: "added", td { class: "sign", "+" } td { class: "src", "{text}" } } },
-                            Op::Del => rsx! { tr { key: "{i}", class: "removed", td { class: "sign", "−" } td { class: "src", "{text}" } } },
+        if !facts.is_empty() {
+            div { class: "intent-facts",
+                for (i, (op, text)) in facts.into_iter().enumerate() {
+                    match op {
+                        Op::Add => rsx! { div { key: "{i}", class: "added", span { class: "sign", "+" } "{text}" } },
+                        _ => rsx! { div { key: "{i}", class: "removed", span { class: "sign", "−" } "{text}" } },
+                    }
+                }
+            }
+        }
+        if !prose.is_empty() { {prose_view(prose)} }
+    }
+}
+
+/// Unchanged text longer than this is folded, keeping a little on each side of a change.
+const PROSE_CONTEXT_CHARS: usize = 160;
+
+/// A description diff that reads like the text itself: removed words struck through and dimmed,
+/// new words marked, unchanged text plain, with long unchanged stretches folded.
+fn prose_view(parts: Vec<(Op, String)>) -> Element {
+    let last = parts.len().saturating_sub(1);
+    rsx! {
+        div { class: "prose-diff",
+            for (i, (op, text)) in parts.into_iter().enumerate() {
+                match op {
+                    Op::Add => rsx! { ins { key: "{i}", "{text}" } },
+                    Op::Del => rsx! { del { key: "{i}", "{text}" } },
+                    Op::Same => {
+                        let (head, middle, tail) = fold(&text, i > 0, i < last);
+                        rsx! {
+                            span { key: "{i}",
+                                "{head}"
+                                if !middle.is_empty() {
+                                    details { class: "prose-more",
+                                        summary { "show more context" }
+                                        "{middle}"
+                                    }
+                                }
+                                "{tail}"
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// Splits unchanged text into what stays shown and the folded middle, on word boundaries.
+/// `keep_start` keeps about `PROSE_CONTEXT_CHARS` of its start (it follows a change) and
+/// `keep_end` as much of its end (a change follows). Short text isn't folded.
+fn fold(text: &str, keep_start: bool, keep_end: bool) -> (String, String, String) {
+    let words: Vec<&str> = text.split_inclusive(char::is_whitespace).collect();
+    let take = |words: &mut dyn Iterator<Item = &&str>| {
+        let mut chars = 0;
+        words.take_while(|w| {
+            let more = chars < PROSE_CONTEXT_CHARS;
+            chars += w.chars().count();
+            more
+        }).count()
+    };
+    let head = if keep_start { take(&mut words.iter()) } else { 0 };
+    let tail = if keep_end { take(&mut words.iter().rev()) } else { 0 };
+    let folded_chars: usize = words.iter().map(|w| w.chars().count()).sum::<usize>();
+    if head + tail >= words.len() || folded_chars <= PROSE_CONTEXT_CHARS * 3 {
+        return (text.to_string(), String::new(), String::new());
+    }
+    let tail_start = words.len() - tail;
+    (words[..head].concat(), words[head..tail_start].concat(), words[tail_start..].concat())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_unchanged_prose_folds_but_keeps_context_round_a_change() {
+        let text = "word ".repeat(200);
+        let (head, middle, tail) = fold(&text, true, true);
+        assert_eq!(format!("{head}{middle}{tail}"), text);
+        assert!(head.len() >= PROSE_CONTEXT_CHARS && tail.len() >= PROSE_CONTEXT_CHARS && !middle.is_empty());
+        // Text at the very start only keeps its end, next to the change after it.
+        assert!(fold(&text, false, true).0.is_empty());
+        // Short text stays as it is.
+        assert_eq!(fold("A short line.", true, true), ("A short line.".to_string(), String::new(), String::new()));
     }
 }

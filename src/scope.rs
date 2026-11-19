@@ -100,6 +100,26 @@ pub fn enforce(cwd: &Path, scope: &RunScope, g: &Graph, strict: bool) -> Result<
     Ok(violations)
 }
 
+/// The files changed since `dirty_before` was taken that no node in `g` owns (PRO-233).
+/// Agents should find code through the graph; these show where the graph has a gap.
+pub fn unowned(g: &Graph, status: Vec<StatusEntry>, dirty_before: &[String]) -> Vec<String> {
+    let owned: Vec<String> = g.all_nodes().into_iter().flat_map(|(_, n)| n.files.iter().cloned()).collect();
+    status.into_iter().map(|e| e.path).filter(|p| !dirty_before.contains(p) && !covers(&owned, p)).collect()
+}
+
+/// The chat notice for files no node owns, and how often the agent searched the file system.
+pub fn report_unowned(paths: &[String], searches: usize) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let list = paths.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    let searched = match searches {
+        0 => String::new(),
+        n => format!(" The agent searched the file system {n} time(s) this turn."),
+    };
+    Some(format!("Not in the graph: {list}. No node owns these files, so agents can't find them through the graph. Add them to a node's files.{searched}"))
+}
+
 /// The chat message for a run's violations.
 pub fn report(violations: &[Violation], strict: bool) -> Option<String> {
     if violations.is_empty() {
@@ -121,6 +141,16 @@ mod tests {
 
     fn node(id: &str, files: &[&str]) -> Node {
         Node { id: id.into(), title: id.into(), files: files.iter().map(|s| s.to_string()).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn changed_files_no_node_owns_are_flagged() {
+        let g = Graph { nodes: vec![node("api", &["src/api"])], ..Default::default() };
+        let entry = |p: &str| StatusEntry { code: " M".into(), path: p.into() };
+        let status = vec![entry("src/api/x.rs"), entry("src/new.rs"), entry("old.rs"), entry(".workbench/graph.json")];
+        assert_eq!(unowned(&g, status, &["old.rs".to_string()]), vec!["src/new.rs".to_string()]);
+        assert!(report_unowned(&[], 3).is_none());
+        assert!(report_unowned(&["src/new.rs".into()], 2).unwrap().contains("2 time(s)"));
     }
 
     #[test]

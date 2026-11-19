@@ -170,11 +170,12 @@ pub enum ChatRequest {
     /// A project-level session for the project with this id, shown in the chat.
     NewProjectSession { project: String },
     /// `task` is sent to the new agent as its first prompt. `activate` shows it in the chat.
-    /// `provider` and `model` override the settings for this agent.
-    NewAgent { session: String, name: Option<String>, task: Option<String>, activate: bool, provider: Option<Provider>, model: Option<String> },
+    /// `provider` and `model` override the settings for this agent. `full_auto` starts it in
+    /// Full auto, as the agent that spawned it runs, when its provider can.
+    NewAgent { session: String, name: Option<String>, task: Option<String>, activate: bool, provider: Option<Provider>, model: Option<String>, full_auto: bool },
     /// A new session in `dir` (a project repository) whose agent `name` gets `task` as its
     /// first prompt; asked for by an agent in another folder of the project.
-    AgentInRepo { dir: PathBuf, name: String, task: String, provider: Option<Provider>, model: Option<String> },
+    AgentInRepo { dir: PathBuf, name: String, task: String, provider: Option<Provider>, model: Option<String>, full_auto: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +277,7 @@ pub enum ChatFocus {
 /// Old layout files with `chat_anchor`/`chat_expanded` still load: unknown fields are ignored.
 /// Where the folded rows of the projects sidebar are saved.
 const COLLAPSED_FILE: &str = "sidebar_collapsed.json";
+const HIDDEN_WORKTREES_FILE: &str = "sidebar_hidden_worktrees.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -319,6 +321,8 @@ pub struct AppState {
     pub graph: Signal<Graph>,
     pub baseline: Signal<Option<Graph>>,
     pub turn_start: Signal<Option<Graph>>,
+    /// The files already changed when the tracked chat turn started (see `unowned_changes`).
+    pub turn_dirty_before: Signal<Option<Vec<String>>>,
     pub turn_user_edits: Signal<HashSet<String>>,
     pub rules: Signal<Vec<Rule>>,
     pub rules_version: Signal<u64>,
@@ -345,6 +349,8 @@ pub struct AppState {
     pub layout: Signal<Layout>,
     /// The folded rows of the projects sidebar, saved across restarts. See `toggle_collapsed`.
     pub collapsed: Signal<HashSet<String>>,
+    /// Worktree folders left out of the projects sidebar; the project view still lists them.
+    pub hidden_worktrees: Signal<HashSet<PathBuf>>,
     pub chat_focus: Signal<ChatFocus>,
     /// The detached chat's window, while it is open.
     pub chat_window: Signal<Option<dioxus::desktop::tao::window::WindowId>>,
@@ -383,6 +389,8 @@ pub struct AppState {
     pub open_file: Signal<Option<OpenFile>>,
     pub editor_error: Signal<Option<String>>,
     pub editor_load: Signal<(u64, bool)>,
+    /// The line and column (from 1; 0 = start of line) to put the cursor on after the next load.
+    pub editor_goto: Signal<Option<(u32, u32)>>,
     /// Folder paths the user has opened in the Files tree; kept here so they stay open across tab switches.
     pub files_open_dirs: Signal<HashSet<String>>,
 }
@@ -393,6 +401,7 @@ impl AppState {
             graph: Signal::new(Graph::default()),
             baseline: Signal::new(None),
             turn_start: Signal::new(None),
+            turn_dirty_before: Signal::new(None),
             turn_user_edits: Signal::new(HashSet::new()),
             rules: Signal::new(Vec::new()),
             rules_version: Signal::new(0),
@@ -416,6 +425,7 @@ impl AppState {
             graph_pane: Signal::new(GraphPane::Node),
             layout: Signal::new(config::load_json(Layout::FILE)),
             collapsed: Signal::new(config::load_json(COLLAPSED_FILE)),
+            hidden_worktrees: Signal::new(config::load_json(HIDDEN_WORKTREES_FILE)),
             chat_focus: Signal::new(ChatFocus::Normal),
             chat_window: Signal::new(None),
             node_history: Signal::new(NodeHistory::default()),
@@ -440,6 +450,7 @@ impl AppState {
             open_file: Signal::new(None),
             editor_error: Signal::new(None),
             editor_load: Signal::new((0, false)),
+            editor_goto: Signal::new(None),
             files_open_dirs: Signal::new(HashSet::new()),
         }
     }
@@ -474,6 +485,16 @@ impl AppState {
         }
         self.tab.set(Tab::Editor);
         self.view.set(WorkbenchView::Code);
+    }
+
+    /// Opens a file with the cursor on `line` (from 1; 0 leaves it at the top).
+    pub fn open_at(&mut self, rel: &str, line: u32, col: u32) {
+        self.editor_goto.set((line > 0).then_some((line, col)));
+        self.open(rel);
+        // Reopening the open file keeps its cursor unless asked to move it.
+        if line > 0 {
+            self.request_editor_load(false);
+        }
     }
 
     pub fn save(&mut self) {
@@ -578,6 +599,7 @@ impl AppState {
         self.active_flow.set(None);
         self.job.set(None);
         self.turn_start.set(None);
+        self.turn_dirty_before.set(None);
         self.turn_user_edits.write().clear();
         self.workbench_error.set(if errors.is_empty() { None } else { Some(errors.join("\n")) });
         *self.fit_request.write() += 1;
@@ -837,6 +859,27 @@ impl AppState {
         }
         if let Err(e) = config::save_json(COLLAPSED_FILE, &*collapsed) {
             self.workbench_error.set(Some(e));
+        }
+    }
+
+    /// Hides a worktree from the projects sidebar, or shows it again, and saves the choice.
+    pub fn set_worktree_hidden(&mut self, path: &Path, hidden: bool) {
+        let mut set = self.hidden_worktrees.write();
+        if hidden {
+            set.insert(path.to_path_buf());
+        } else {
+            set.remove(path);
+        }
+        if let Err(e) = config::save_json(HIDDEN_WORKTREES_FILE, &*set) {
+            self.workbench_error.set(Some(e));
+        }
+    }
+
+    /// Closes every chat session in `dir`, e.g. before its worktree is deleted.
+    pub fn close_sessions_in(&mut self, dir: &Path) {
+        let ids: Vec<String> = self.sessions.peek().iter().filter(|s| crate::projects::same_dir(&s.dir, dir)).map(|s| s.id.clone()).collect();
+        for id in ids {
+            self.close_session(&id);
         }
     }
 
@@ -1291,6 +1334,16 @@ impl AppState {
         }
         self.turn_start.set(Some(g));
         self.turn_user_edits.write().clear();
+        let dirty = git::status(&self.cwd.peek()).unwrap_or_default().into_iter().map(|e| e.path).collect();
+        self.turn_dirty_before.set(Some(dirty));
+    }
+
+    /// The files the finished chat turn changed that no node owns. Empty for jobs, which
+    /// don't snapshot the files they start with. Blocking: runs git.
+    pub fn unowned_changes(&mut self) -> Vec<String> {
+        let Some(before) = self.turn_dirty_before.take() else { return Vec::new() };
+        let status = git::status(&self.cwd.peek()).unwrap_or_default();
+        scope::unowned(&self.graph.peek(), status, &before)
     }
 
     /// The files the running scoped work is editing now that `node` (in module `scope`) claims.

@@ -36,6 +36,7 @@ mod platform;
 mod project_view;
 mod projects;
 mod prompts;
+mod query;
 mod providers;
 mod providers_view;
 mod reference;
@@ -60,6 +61,10 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 pub const STYLE: &str = concat!(include_str!("theme.css"), include_str!("style.css"));
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("query") {
+        std::process::exit(query::run(&args[1..]));
+    }
     let window = WindowBuilder::new()
         .with_title("Workbench")
         .with_inner_size(LogicalSize::new(1400.0, 900.0))

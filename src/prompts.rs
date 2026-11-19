@@ -116,14 +116,30 @@ pub struct FocusRequest {
     pub confidence: String,
 }
 
-/// Told to every agent with a graph, so a question about a behaviour can zoom the graph to the
-/// node that handles it.
+/// Told to every agent with a graph, so asking about a feature zooms the graph to the node(s)
+/// that implement it, quickly and without a code search first.
 pub fn focus_instructions() -> String {
     format!(
-        "\n\nWhen the user asks which part of the code handles a behaviour (for example \"what handles login rate limiting?\"), \
-         find the responsible node(s) in `{GRAPH_FILE}` from their descriptions and links, then answer and end your reply with one block per node: \
+        "\n\nShowing features on the graph: whenever the user asks to see, find or understand a feature or behaviour \
+         (\"show me X\", \"where is X\", \"what handles X?\", \"which part does X?\"), or names a part of the app you then talk about, \
+         point the graph at it. Be quick: read `{GRAPH_FILE}` and match the request against node titles, descriptions and links. \
+         Don't search or read the code first, and don't ask a follow-up question; answer from the graph in a few sentences, and read code only if the user asks for more. \
+         End the reply with one block per node: \
          `{FOCUS_OPEN}node=\"<node id>\" module=\"<module id, only for nodes inside a module>\" confidence=\"high|medium|low\"{SPAWN_HEADER_END}`. \
-         Workbench shows the graph at that node. When several nodes plausibly match, list them all with honest confidences so the user can pick; don't pick one for them.\n"
+         Workbench zooms the graph to the node and makes it glow; with one block it zooms there right away. \
+         When several nodes plausibly match, list them all with honest confidences, best first, so the user can pick; don't pick one for them. \
+         After you change code, also add blocks for the nodes you changed so the user can see where the work landed.\n"
+    )
+}
+
+/// Told to every agent with a graph: find code through the graph first (PRO-233). `command` runs
+/// `query` (see `crate::query`) on the agent's folder.
+pub fn query_instructions(command: &str) -> String {
+    format!(
+        "\n\nFind code through the graph before searching the file system. `{command} file <path>` lists the nodes that own a file, \
+         `{command} node <id> [--module <m>]` prints a node with the nodes it links to and from, `{command} history <id>` its recorded changes, \
+         and `{command} modules` every module. All print JSON. Search the file system (grep, glob) only for what the graph doesn't cover; \
+         Workbench flags files you change that no node owns, so say which node they belong to.\n"
     )
 }
 

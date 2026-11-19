@@ -219,6 +219,20 @@ pub struct Settings {
     /// the chat's provider.
     #[serde(default)]
     pub routes: BTreeMap<String, Route>,
+    /// Where a chat continues when its provider runs out of tokens (PRO-236). None: it stops
+    /// with the provider's error, as before.
+    #[serde(default)]
+    pub fallback: Option<Route>,
+}
+
+/// Whether a provider's error says its tokens, quota or usage limit ran out, rather than that
+/// the request was wrong. Covers Claude Code's usage limit, Anthropic's credit balance and
+/// HTTP 429 / quota errors of the API providers.
+pub fn out_of_tokens(error: &str) -> bool {
+    let e = error.to_lowercase();
+    ["usage limit", "hit your limit", "credit balance", "insufficient_quota", "exceeded your current quota", "quota exceeded", "rate limit", "429"]
+        .iter()
+        .any(|sign| e.contains(sign))
 }
 
 /// Which provider and model run one kind of Workbench job instead of the chat's own.
@@ -274,6 +288,14 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn running_out_of_tokens_is_told_apart_from_other_errors() {
+        assert!(super::out_of_tokens("Claude AI usage limit reached|1763500000"));
+        assert!(super::out_of_tokens("400 Bad Request: Your credit balance is too low to access the Anthropic API."));
+        assert!(super::out_of_tokens("429 Too Many Requests: You exceeded your current quota"));
+        assert!(!super::out_of_tokens("401 Unauthorized: invalid x-api-key"));
+    }
+
     use super::*;
 
     #[test]

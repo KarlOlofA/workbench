@@ -1066,7 +1066,7 @@
           "id": "vibe-runner",
           "title": "Vibe runner",
           "kind": "service",
-          "description": "Builds one `vibe -p --output streaming` turn (resume, agent from the chat mode, model and MCP servers through VIBE_* variables, Workbench instructions at the top of a new session's first prompt) and parses its history entries into chat events, skipping the entries a resumed session replays.",
+          "description": "Builds one `vibe -p --output streaming` turn (resume, agent from the chat mode, model and MCP servers through VIBE_* variables, Workbench instructions at the top of a new session's first prompt) and parses its history entries into chat events, skipping the entries a resumed session replays. It also passes the project's other repositories and worktrees with --add-dir, because Vibe asks before touching a path outside its folder and a headless run cannot answer.",
           "files": [
             "src/vibe.rs"
           ],

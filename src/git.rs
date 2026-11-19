@@ -452,6 +452,15 @@ pub fn default_worktree_path(main: &Path, branch: &str) -> PathBuf {
 
 /// Adds a worktree at `path` on `branch`: checks out the branch if it exists, otherwise
 /// creates it from the repository's current HEAD.
+/// Deletes a worktree's folder and its git entry; its branch stays. Git refuses when the
+/// worktree has uncommitted changes. A worktree whose folder is already gone is pruned.
+pub fn remove_worktree(repo: &Path, w: &Worktree) -> Result<(), String> {
+    if w.prunable {
+        return run_git(repo, &["worktree", "prune"]).map(|_| ());
+    }
+    run_git(repo, &["worktree", "remove", &w.path.to_string_lossy()]).map(|_| ())
+}
+
 pub fn add_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
     let branch = branch.trim();
     if branch.is_empty() || branch.contains(char::is_whitespace) {
@@ -487,6 +496,24 @@ mod tests {
         assert_eq!(w[2].label(), "detached 3333333");
         assert!(w[2].prunable);
         assert_eq!(default_worktree_path(Path::new("/code/app"), "feat/x y"), PathBuf::from("/code/app-feat-x-y"));
+    }
+
+    #[test]
+    fn a_removed_worktree_is_gone_and_its_branch_stays() {
+        let root = std::env::temp_dir().join(format!("wb-wt-{}", std::process::id()));
+        let repo = root.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]] {
+            run_git(&repo, args).unwrap();
+        }
+        let path = root.join("app-feat");
+        add_worktree(&repo, &path, "feat").unwrap();
+        let w = worktrees(&repo).unwrap().into_iter().find(|w| w.branch.as_deref() == Some("feat")).unwrap();
+        remove_worktree(&repo, &w).unwrap();
+        assert!(!path.exists());
+        assert_eq!(worktrees(&repo).unwrap().len(), 1);
+        assert!(run_git(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/feat"]).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

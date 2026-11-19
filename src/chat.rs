@@ -10,9 +10,36 @@ use crate::markdown;
 use crate::prompts;
 use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
 
+/// Clicks on file references in replies (`a.file-ref`, see `markdown::to_html_with_files`)
+/// open the file in the editor at the line they name. One listener per window; a new one
+/// replaces the last, whose bridge is gone with its component.
+const FILE_REF_JS: &str = r#"
+if (window.__wbFileRef) document.removeEventListener("click", window.__wbFileRef);
+window.__wbFileRef = (e) => {
+  const a = e.target.closest && e.target.closest("a.file-ref");
+  if (!a) return;
+  e.preventDefault();
+  if (!a.classList.contains("missing")) dioxus.send([a.dataset.path, Number(a.dataset.line) || 0, Number(a.dataset.col) || 0]);
+};
+document.addEventListener("click", window.__wbFileRef);
+await new Promise(() => {});
+"#;
+
+fn use_file_ref_clicks(mut st: AppState) {
+    use_hook(move || {
+        let mut eval = document::eval(FILE_REF_JS);
+        spawn(async move {
+            while let Ok((path, line, col)) = eval.recv::<(String, u32, u32)>().await {
+                st.open_at(&path, line, col);
+            }
+        });
+    });
+}
+
 #[component]
 pub fn ChatPane() -> Element {
     let st = use_context::<AppState>();
+    use_file_ref_clicks(st);
     let chat = st.chat();
     let items = chat.items.read();
 
@@ -309,16 +336,18 @@ fn PermissionPrompt(req: PermissionRequest, more: usize) -> Element {
 
 #[component]
 fn ChatEntry(item: ChatItem) -> Element {
+    let st = use_context::<AppState>();
     match item {
         ChatItem::User(msg) => {
             let context = msg.context.join(", ");
+            let text = markdown::text_with_files(&msg.text, &st.cwd.peek());
             rsx! {
                 div { class: "msg user",
                     div { class: "bubble",
                         if !context.is_empty() {
                             div { class: "msg-context", title: "Sent with these graph nodes as context", "◇ {context}" }
                         }
-                        "{msg.text}"
+                        span { dangerous_inner_html: "{text}" }
                     }
                 }
             }
@@ -332,7 +361,7 @@ fn ChatEntry(item: ChatItem) -> Element {
             }
         },
         ChatItem::Assistant { text, streaming } => {
-            let html = markdown::to_html(&text);
+            let html = markdown::to_html_with_files(&text, &st.cwd.peek());
             rsx! {
                 div { class: if streaming { "msg assistant streaming" } else { "msg assistant" },
                     div { class: "md", dangerous_inner_html: "{html}" }
@@ -693,7 +722,7 @@ pub fn ChatTabs() -> Element {
             button {
                 class: "small chat-tab-add",
                 title: "Add an agent to this session",
-                onclick: move |_| st.request_chat(ChatRequest::NewAgent { session: session_id.clone(), name: None, task: None, activate: true, provider: None, model: None }),
+                onclick: move |_| st.request_chat(ChatRequest::NewAgent { session: session_id.clone(), name: None, task: None, activate: true, provider: None, model: None, full_auto: false }),
                 "+"
             }
         }
