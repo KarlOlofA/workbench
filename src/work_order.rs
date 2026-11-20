@@ -58,7 +58,7 @@ fn kinds(c: &Change) -> Vec<Kind> {
     let mut out = Vec::new();
     for f in fields {
         let k = match f {
-            Field::Title | Field::Kind | Field::Description | Field::Reference => Kind::Description,
+            Field::Title | Field::Kind | Field::Description | Field::Decisions | Field::Invariants | Field::Reference => Kind::Description,
             Field::Links | Field::Module => Kind::Link,
             Field::Files => Kind::Files,
         };
@@ -131,6 +131,15 @@ mod tests {
             files: files.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_decision_edit_is_an_intent_change() {
+        let base = Graph { nodes: vec![node("api", &[], &["src/api.rs"])], ..Default::default() };
+        let mut cur = base.clone();
+        cur.node_mut("api").unwrap().decisions.push(crate::graph::Decision { decision: "Cache reads".into(), ..Default::default() });
+        let changes = graph::diff(&base, &cur);
+        assert_eq!(kinds(&changes[0]), vec![Kind::Description]);
     }
 
     #[test]

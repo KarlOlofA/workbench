@@ -91,7 +91,7 @@ pub fn resolve(g: &mut Graph, c: &Conflict, side: Side) {
     let mut source = Graph::default();
     match (c.subject, &chosen) {
         (Subject::Module, Some(n)) => {
-            source.modules.push(graph::Module { id: n.id.clone(), title: n.title.clone(), description: n.description.clone(), net: Graph::default() });
+            source.modules.push(graph::Module { id: n.id.clone(), title: n.title.clone(), description: n.description.clone(), decisions: n.decisions.clone(), invariants: n.invariants.clone(), net: Graph::default() });
         }
         (Subject::Node, Some(n)) => match &c.scope {
             Some(m) => source.modules.push(graph::Module { id: m.clone(), net: Graph { nodes: vec![n.clone()], ..Default::default() }, ..Default::default() }),

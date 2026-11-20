@@ -22,6 +22,15 @@
       "title": "App root & header",
       "kind": "ui",
       "description": "Root component. Resolves the working directory from argv[1] or the current dir, optionally opens a file from argv[2], provides AppState as context, starts the session loop of every saved agent and creates the sessions and agents other parts of the app ask for. It reloads .workbench data when cwd or repo_version changes. The header has the graph toggle, folder picker (rfd), the provider and model picker, model and cost badges, a warning badge in Full auto mode, a branch picker and a New session button. The branch picker shows the current branch and opens a filterable list of local and remote branches; picking one runs git switch (remote-only branches get a local tracking branch), and typing a new name offers to create it, which also starts a new chat session. New session starts a chat session in the open folder. open_folder switches the working folder (used by the folder picker and the project view) and the chat to a session in it, or to no chat when the folder has none, and a project chip in the header jumps to the project that contains the open folder. The header also shows the self-updater's button when a newer build is available on GitHub.",
+      "decisions": [
+        {
+          "decision": "The header holds Graph and Code tabs and the branch picker sits on the right next to the model; the project chip and working-directory path were removed and Open folder moved to the projects sidebar",
+          "why": "The user wanted those controls in more fitting places: the project and folder are already shown in the sidebar, the branch belongs with the model, and graph and code should share the main screen as tabs",
+          "instead_of": "Open folder, a project chip, the folder path and the branch on the left of the header, with Code opened from the rail in the bottom left",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
+      ],
       "files": [
         "src/app.rs"
       ],
@@ -84,6 +93,15 @@
       "title": "Workbench agent process",
       "kind": "service",
       "description": "Finds the agent binary, then spawns it with stream-json input/output, partial messages, the permission mode of the chat mode, AskUserQuestion turned off (the agent asks in its reply instead), an optional --resume, --model, --append-system-prompt and --mcp-config. It writes user messages, interrupt control requests and permission answers (a plan approval also sets the session's mode) to stdin. Stdout lines are parsed into AgentEvent values (Init with the MCP server statuses, TextDelta, ToolUse, ToolResult, Done, Stderr, Exited) and tagged with a generation number. Also provides tool summaries and file-path extraction. ClaudeProcess implements the AgentAdapter trait. Event shapes it doesn't know, and CLI versions outside TESTED_CLI_VERSIONS (2.1.322, pinned by a recorded fixture), come back as Unsupported events and are shown in the chat.",
+      "decisions": [
+        {
+          "decision": "The task_started, task_progress and task_notification system events are ignored on purpose, while other unknown events still raise the 'output Workbench doesn't recognise' warning",
+          "why": "They only track subagents and background tasks, which the chat already shows through the tool call, its result and the model's reply; the user asked to keep such events only if they serve a purpose",
+          "instead_of": "warning that agent output may be missing on every subagent or background task",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/claude.rs",
         "tests/fixtures/claude-2.1.322.ndjson"
@@ -107,6 +125,20 @@
       "title": "Prompt builder",
       "kind": "service",
       "description": "Builds every structured prompt sent to Workbench: generate or refresh the architecture graph (with the JSON schema, including modules), draft nodes into the network the user is looking at, process graph changes into code edits (new, removed and edited modules and attachments included; Workbench may add nodes for new units it had to create, and is told which nodes and files other branches are also changing), debug a flow (several modes), audit code against rules, ask about a node, review a pull request, and the per-session system-prompt append, which tells Workbench to keep the graph in step with every code change (files, new nodes for new units, removed nodes, updated descriptions and links), plus, when the open folder belongs to a project, the project's name and the other repositories (folder, GitHub name, description) Workbench may read, the modules guide, enabled rules and the related GitHub repositories. Every agent is also told how to start more agents in its session: a spawn-agent block with a name and the full task, which spawn_requests parses out of the reply. It also builds the project-level agent's prompt (the project and its repositories) and the spawn-agent instructions, which name the project's repositories an agent can start another agent in. The spawn-agent instructions also list every provider id with its models, so when the user names a provider or model in the chat (\"use vibe large 4 to build X\") the agent adds provider and model to the block. The Process prompt is built from typed work orders, each with its own instruction and declared blast radius. Agents with a graph are also told to answer any request to see or find a feature (\"show me X\", \"where is X\", \"what handles X?\") quickly from the graph, without searching the code first, and to end the reply with focus blocks naming the responsible nodes and a confidence, which focus_requests parses out of the reply; after changing code they add blocks for the nodes they changed. They are also told to find code through the intent query command first and to search the file system only for what the graph doesn't cover.",
+      "decisions": [
+        {
+          "decision": "Agents are told to append a decision with its why and source whenever they change a node's logic or add a node, and to follow the decisions and invariants of the nodes they work on",
+          "why": "The knowledge stays in step with the code without the user asking each time",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "A Mine decisions job reads commits, comments, tickets, docs and past chat transcripts to backfill decisions",
+          "why": "Existing projects have their reasons scattered over places the graph never showed",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/prompts.rs"
       ],
@@ -126,6 +158,15 @@
       "title": "Graph model",
       "kind": "model",
       "description": "Serde types Node, Flow, Module and Graph, plus helpers: lookup, unique ids, slugify, node removal, edges, auto-layout into columns, kind colours, and diff(base, current), which produces field-level Change records. A Module is an isolated node network stored in graph.modules; a node whose `module` field names it is an attachment point, and one module can be attached in many places (never inside itself). The diff covers the main network, every module network and module title/description, tagging each change with its scope. absorb applies a set of changes from a current graph onto a baseline. load and save read and write the graph JSON under .workbench.",
+      "decisions": [
+        {
+          "decision": "Nodes and modules carry `decisions` (decision, why, instead_of, source, date) and `invariants` next to the description",
+          "why": "The graph should show how and why the app was steered, not only what each part does, so it is more than a pretty map",
+          "instead_of": "only a free-text description that mixes what and why",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/graph.rs"
       ],
@@ -171,6 +212,15 @@
       "title": "Graph tab & toolbar",
       "kind": "component",
       "description": "Hosts the canvas with the floating chat and, on its right, the node menu with the Node, Flows, Changes, History and Prompt panes. The toolbar adds nodes and starts a Generate job, which sends the mapping prompt to Workbench with the graph locked until the job finishes. The nodes have draggable inputs and outputs so they're easily able to change their links. The breadcrumb row always shows project › repository › modules, and Up from the repository root opens the project view. The node menu can be hidden and resized by dragging the splitter to its left; its width and open state are saved in the workbench layout.",
+      "decisions": [
+        {
+          "decision": "The right-hand node menu is part of the main panel, split from the canvas by a hairline, with no background, inset margin, rounding or shadow of its own",
+          "why": "The user asked for the side pane to be the pane itself, not a card with its own background",
+          "instead_of": "an inset floating card with a panel-2 background",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/graph_view.rs",
         "src/style.css",
@@ -234,6 +284,20 @@
       "title": "Graph canvas",
       "kind": "component",
       "description": "SVG and HTML node diagram with pan, zoom, fit-to-view, node dragging (saves the position) and link creation by clicking. It highlights the active flow path and colours nodes by kind. It always shows one network: the main graph or the module the user has opened. Module attachment nodes are drawn with a double teal border, the module name and node count, and are marked edited when their module has pending changes; double-clicking one opens the module, and a breadcrumb bar leads back up. The toolbar's + Module… menu creates a new module or attaches an existing one here. A press in the canvas or on a node fades the floating chat. Nodes that an intent edit may have made stale get a marker. When the chat names a node, the next fit zooms smoothly to it and its direct links and the node glows briefly. A node whose claimed files the running work order is editing shows an editing tag.",
+      "decisions": [
+        {
+          "decision": "Link routes are memoised and recomputed only when nodes move or links change, not on hover or selection",
+          "why": "Routing is the slow part of drawing a big graph",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "Links into collapsed hubs are routed last, and lit links are drawn on top of dimmed ones",
+          "why": "Hub links show as stubs until lit, so the always-drawn links should get first pick of the gaps; links share trunks, so a dimmed link would otherwise cover a lit one",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/graph_view.rs"
       ],
@@ -241,7 +305,8 @@
         "app-state",
         "graph-model",
         "ghost-branches",
-        "claims"
+        "claims",
+        "edge-routing"
       ]
     },
     {
@@ -249,6 +314,14 @@
       "title": "Node inspector",
       "kind": "component",
       "description": "Editor for the selected node's title, kind, description, files and links. It shows incoming callers, can revert the node to the baseline, and has an Ask Workbench action that sends a node-specific question. Here a node holds a explicit list of links to other nodes. One list of inputs flows and one for output flows. The nodes also hold a list of the files that is related to it and in what manner, like its own dependencies, where its used and such. For reference nodes it shows the source, its detected type, whether it is a Workbench project, and a picker for the referenced project's nodes. While a scoped run works on the node, Being edited now lists the files it has edited so far, limited to the files the node claims.",
+      "decisions": [
+        {
+          "decision": "The inspector edits decisions as cards and invariants as rows, and a Decisions tab lists every decision newest first",
+          "why": "Seeing why a part is built a certain way should be one click from the node, and the timeline shows how the app was steered",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/graph_view.rs",
         "src/style.css"
@@ -268,6 +341,15 @@
       "title": "Changes pane (commit graph)",
       "kind": "component",
       "description": "Lists the field-level differences between the current graph and the baseline, including nodes inside modules (labelled with their module) and added, removed or edited modules. Show opens the right module and selects the node. Before processing it reads the claims of the other git branches and warns when they change the same nodes or files, or nodes these changes depend on; the user can process anyway or process only the changes no other branch touches. With an optional note, it sends a Process job that asks Workbench to change the code to match the edited graph. When the job succeeds, the baseline is updated. Description changes are flagged. Descriptions that agents proposed are listed for the user to accept or reject. Possibly stale dependents are shown, and a Strict toggle makes out-of-scope edits get undone. Each proposal lists the description sentences it adds and removes.",
+      "decisions": [
+        {
+          "decision": "Each pending node or module change is shown as a code diff (the Code tab's FileDiffView with git-style hunks and three lines of context) of the node written out as text, with the intent flag, Show and Revert in the diff's header",
+          "why": "The user found the old list of changed field names unreadable and asked for the same format as code diffs",
+          "instead_of": "a row with the title and the names of the changed fields",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/graph_view.rs"
       ],
@@ -276,7 +358,9 @@
         "prompt-builder",
         "session-loop",
         "claims",
-        "intent-ledger"
+        "intent-ledger",
+        "code-pane",
+        "node-history"
       ]
     },
     {
@@ -327,6 +411,15 @@
         "agent-activity",
         "project-view",
         "code-editor"
+      ],
+      "decisions": [
+        {
+          "decision": "The node buttons under a reply are labelled 'Node in this reply:' / 'Nodes in this reply:'",
+          "why": "Replies name nodes both as candidates to pick from and as the nodes a code change touched, so 'pick one' was wrong after changes and 'Nodes affected' would be wrong for 'where is X?' answers; the user asked for a neutral label",
+          "instead_of": "'Responsible node:' / 'Possible nodes, pick one:'",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
       ]
     },
     {
@@ -334,6 +427,14 @@
       "title": "Code pane (Files / Editor / Diff)",
       "kind": "screen",
       "description": "Right-hand tabs. Files lists changed files with their git status, then all files as the project's folder tree with folders that open and close on click (open folders are kept in AppState, and typing in the filter opens every folder with a match). Diff shows a syntax-highlighted git diff against a chosen base, and each hunk has an Ask Workbench button that pastes it into the chat input. Workbench's own files in .workbench/ are hidden from that diff and its line counts unless the Show Workbench files toggle is on (off by default). Editor hosts the CodeMirror view. The GitHub tab hosts the GitHub module, the MCP tab hosts the MCP module, and the Providers tab hosts the LLM providers module.",
+      "decisions": [
+        {
+          "decision": "FileDiffView takes optional actions shown in the file header, and clicks on them don't fold the block",
+          "why": "The Changes tab reuses the code diff view for graph changes and needs its Show and Revert buttons there",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/code.rs",
         "src/highlight.rs"
@@ -388,6 +489,15 @@
       "links": [
         "desktop-entry",
         "code-editor"
+      ],
+      "decisions": [
+        {
+          "decision": "The Cargo package and binary are named workbench instead of rust-ui-test; the install script kills and deletes a leftover rust-ui-test binary from earlier installs.",
+          "why": "The user asked to rename the project from rust-ui-test to workbench.",
+          "instead_of": "Keeping the rust-ui-test binary name",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
       ]
     },
     {
@@ -395,6 +505,15 @@
       "title": "Workbench layout",
       "kind": "screen",
       "description": "The window body under the header: the projects sidebar on the left and the workbench on the right. The workbench switches between the Graph, Code and Rules views, shows workbench load errors, and shows the project view when a project is picked. The layout (sidebar open, node menu width and open state, chat anchor, expanded and locked) is saved in ~/.config/workbench/layout.json.",
+      "decisions": [
+        {
+          "decision": "Code is no longer a rail item with a back bar; it is a header tab sharing the main screen with the graph, and only Rules and Settings get the back bar",
+          "why": "The user asked for graph and code to share the space and be switched with a tab menu at the top",
+          "instead_of": "a Code button in the bottom-left rail",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
+      ],
       "files": [
         "src/workbench.rs",
         "src/state.rs",
@@ -512,6 +631,14 @@
       "title": "Node history",
       "kind": "store",
       "description": "Shared, append-only history of node and module changes (title, kind, module, reference, links, files and description) stored as before/after text. Each entry has a unique id, a time, an author (git user.name) and a source: a person in Workbench, Workbench working for that person, or an edit outside Workbench. The log is .workbench/node-history.jsonl, one entry per line, with a .workbench/.gitattributes union-merge rule so logs from several people merge without conflicts; on load lines are de-duplicated by id and sorted by time. What this client last saw of the graph is kept locally in ~/.config/workbench/node-snapshots/, and a change already in the shared log (for example pulled from a teammate) is not logged again. Rapid edits by the same person are merged into one entry, and intent_changes (an LCS over the rendered lines) lists only the facts an entry added or removed; description_changes does the same per sentence.",
+      "decisions": [
+        {
+          "decision": "line_diff turns two rendered nodes into a git FileDiff, and diffs show links one per line (links_one_per_line) while the stored history keeps them on one line",
+          "why": "Reusing render_node keeps the Changes tab and the history describing a node the same way; changing render_node's links format would have recorded a spurious edit for every node",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
       "files": [
         "src/node_history.rs",
         "src/state.rs",
@@ -615,6 +742,14 @@
       "title": "Projects sidebar",
       "kind": "component",
       "description": "Collapsible list on the left of every project with its repositories and worktrees, read from the projects saved in ~/.config/workbench/projects.json. Under each repository and worktree it lists its chat sessions, with a dot while one of their agents works and a ✕ on hover that closes the session; clicking the name of the open session renames it. Any session can be closed, and a folder without sessions shows a New session button instead. Under each session it lists its agents with their provider's logo and name and their state (working, waiting, or needs you when a permission or plan waits for an answer). Clicking a session or an agent opens its folder and shows it in the chat. Under each project it also lists coding agents running outside Workbench, with their provider's logo, the folder they run in and whether they are working or waiting for a prompt. Clicking a project shows its project view; clicking a repository, worktree or agent opens that folder. It can create a project and add a repository to a project. A project's project-level sessions are listed right under its name. Each project, repository, worktree and session with agents has a ▾ in front of it that folds away the rows under it; the folded rows are saved in ~/.config/workbench/sidebar_collapsed.json.",
+      "decisions": [
+        {
+          "decision": "An Open folder… row under New project opens any folder with the folder picker",
+          "why": "Open folder moved out of the header so the header only holds the view tabs and the session controls",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
+      ],
       "files": [
         "src/workbench.rs",
         "src/projects.rs",
@@ -670,11 +805,37 @@
       "title": "Theme & dropdowns",
       "kind": "component",
       "description": "theme.css holds every colour, radius, font and shadow as a CSS variable, plus the base control styles; style.css only uses these variables. The webview draws native <select> and <datalist> popups with the system theme, so dropdown.rs draws themed ones instead: Dropdown picks one of a list of choices, and ComboBox is a text field with suggestions, used for model names and node kinds. Their open list is fixed to the window and opens upwards when there is more room above.",
+      "decisions": [
+        {
+          "decision": "The UI follows the Codex app's calm shell and Floorplan's floating panels and soft cards, keeping the existing colours",
+          "why": "The user asked for that look while keeping their colour scheme and every feature",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "The turquoise used for projects and modules became periwinkle #93a1e8",
+          "why": "Turquoise clashed with the warm beige accent; periwinkle is cool against it and clear of the status, reference and merged colours",
+          "instead_of": "turquoise #56b6c2",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "Floating panels are nearly opaque instead of see-through glass",
+          "why": "The desktop webview does not apply backdrop blur, so see-through panels showed the content under them",
+          "instead_of": "see-through glass like Floorplan",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
+      "invariants": [
+        "Component styles in style.css use only theme.css variables, never raw colours"
+      ],
       "files": [
         "src/theme.css",
         "src/dropdown.rs",
         "src/style.css",
-        "src/main.rs"
+        "src/main.rs",
+        "src/icons.rs"
       ]
     },
     {
@@ -728,6 +889,18 @@
       "title": "Intent ledger",
       "kind": "model",
       "description": "The append-only log in .workbench/ledger.ndjson, the source of truth for the graph. Every entry is a ULID-stamped op from a closed set (node.add, node.merge, node.remove, ref.add, flow.put, flow.remove, tombstone), attributed to a person, an agent or an edit from outside. record diffs the materialized ledger against graph.json and appends the ops that explain the difference. materialize rebuilds the graph from the entries and takes positions from graph.json. When an agent edits a description, the edit becomes a proposal that a person accepts or rejects (verdict). Workbench refuses to append if earlier lines were changed or dropped (extends). The frozen schema is in docs/ledger-spec.md.",
+      "decisions": [
+        {
+          "decision": "An agent appending decisions or invariants is applied directly; rewriting or removing them becomes a proposal",
+          "why": "Appends record what happened and would be skipped if every one needed accepting, while rewriting what was decided changes intent the user owns",
+          "instead_of": "every agent change to decisions as a proposal",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
+      "invariants": [
+        "Agents never change a node's description, or rewrite its decisions or invariants, without a person accepting the proposal"
+      ],
       "files": [
         "src/ledger.rs",
         "docs/ledger-spec.md"
@@ -797,6 +970,48 @@
         "graph-model",
         "node-history",
         "workbench-files"
+      ]
+    },
+    {
+      "id": "edge-routing",
+      "title": "Link routing",
+      "kind": "service",
+      "description": "Works out the path of every link on the graph canvas, Floorplan style: links leave a node's right side and enter the next node's left side, turning only at right angles with rounded corners. Ports are spread down each side in the order of the other ends, and all links into one node share a vertical trunk just left of it, so they stack into one path. A link passes every column between its ends through a gap between two nodes, stepping up or down in the space between columns, so no link is drawn through a node. Backward links that close a cycle travel leftwards the same way.",
+      "decisions": [
+        {
+          "decision": "Links are routed orthogonally (right angles, rounded corners) with a shared trunk per target, modelled on Floorplan's ELK layered layout with ORTHOGONAL edge routing",
+          "why": "Floorplan's graphs are easier to read: no lines crossing everywhere, and links into the same node stack into the same path",
+          "instead_of": "cubic Bezier curves straight from source to target",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "A small router of our own in Rust instead of ELK",
+          "why": "There is no ELK for Rust, and our nodes keep user-pinned positions, so routes must work for any placement, not only a layout ELK computed",
+          "instead_of": "embedding elkjs and letting it place and route",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "Links cross each column through a gap between its nodes, jogging in the space between columns, and backward links do the same leftwards",
+          "why": "The project graph has real backward links (22 of 175 root links close a cycle, mostly into app-state, session-loop and chat-sessions), and long or backward links must never be drawn through nodes",
+          "instead_of": "one horizontal detour above or below everything the link spans",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        },
+        {
+          "decision": "Links into different targets keep a lane apart in a gap when a free lane is near, and otherwise share the nearest lane",
+          "why": "A gap between rows only holds about two lanes; sharing reads better than a long loop round the whole column, and searching only the nearby gaps keeps routing fast (about 44 ms for 1500 nodes and 4000 links)",
+          "instead_of": "always finding a free lane, which sent links round whole columns and took 200 ms on big graphs",
+          "source": "chat 2026-11-20",
+          "date": "2026-11-20"
+        }
+      ],
+      "files": [
+        "src/routing.rs"
+      ],
+      "links": [
+        "graph-model"
       ]
     }
   ],

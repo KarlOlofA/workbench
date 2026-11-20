@@ -5,6 +5,10 @@
  * app means changing this file. This file also styles the base controls (buttons, inputs,
  * text areas) and the themed dropdowns from src/dropdown.rs.
  *
+ * The look: calm chrome in the spirit of the Codex app and Floorplan. Surfaces are told apart
+ * by soft fills and shadows rather than lines, panels float, corners are round, and colour is
+ * kept for meaning (the accent, status, kinds, modules and references).
+ *
  * Don't use <select> or <datalist>: the webview draws their popups with the system theme.
  * Use `Dropdown` (pick one option) or `ComboBox` (text with suggestions) instead.
  */
@@ -16,6 +20,15 @@
   --panel-2: #2a2e37;
   --overlay: rgba(34, 37, 44, 0.75);
   --border: #353a45;
+  /* Floating panels: the panel colour, nearly opaque, over a blur where the webview has one. */
+  --elev: rgba(34, 37, 44, 0.97);
+  --blur: blur(18px) saturate(1.2);
+
+  /* A white tint for hover and active fills: rgba(var(--ink), alpha). */
+  --ink: 255, 255, 255;
+  --fill: rgba(var(--ink), 0.05);
+  --fill-hover: rgba(var(--ink), 0.09);
+  --hairline: rgba(var(--ink), 0.07);
 
   /* Text. */
   --text: #d8dbe2;
@@ -25,7 +38,7 @@
   /* The brand accent: selection, focus and primary actions. */
   --accent: #c8b8a4;
   --accent-soft: rgba(200, 184, 164, 0.12);
-  --on-accent: #fff;
+  --on-accent: #1b1d23;
 
   /* Status colours. */
   --add: #56d364;
@@ -36,39 +49,56 @@
   --on-warn: #1b1f24;
   --danger: #8b2c2c;
   --danger-border: #a33;
-  --hint-bg: rgba(56, 139, 253, 0.1);
+  --hint-bg: rgba(147, 161, 232, 0.08);
   --open: #238636;
   --merged: #8957e5;
 
-  /* Projects and modules (teal) and external references (gold). */
-  --info: #56b6c2;
-  --info-soft: rgba(86, 182, 194, 0.1);
-  --info-line: rgba(86, 182, 194, 0.4);
+  /* Projects and modules (periwinkle) and external references (gold). */
+  --info: #93a1e8;
+  --info-soft: rgba(147, 161, 232, 0.1);
+  --info-line: rgba(147, 161, 232, 0.4);
   --ref: #e5c07b;
   --ref-soft: rgba(229, 192, 123, 0.08);
   --ref-line: rgba(229, 192, 123, 0.6);
 
+  /* Work on other branches; each ghost node sets its own branch colour. */
+  --ghost: var(--muted);
+
   /* The graph canvas. */
   --grid-dot: #2c313b;
+  --grid-gap: 24px;
   --edge: #4a505c;
   --edge-hl: #c8ced8;
 
   /* Shape. */
-  --radius-sm: 4px;
-  --radius: 6px;
-  --radius-lg: 8px;
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
   --shadow: rgba(0, 0, 0, 0.45);
   --shadow-sm: rgba(0, 0, 0, 0.35);
-  --popup-shadow: 0 8px 24px var(--shadow);
+  --shadow-card: 0 1px 0 rgba(var(--ink), 0.04) inset, 0 10px 28px -18px rgba(0, 0, 0, 0.9);
+  --shadow-float: 0 0 0 1px var(--hairline), 0 22px 56px -22px rgba(0, 0, 0, 0.9);
+  --popup-shadow: var(--shadow-float);
+
+  /* Motion. */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --fast: 0.12s;
 
   /* Type. */
-  --font: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  --mono: "SF Mono", Menlo, Monaco, monospace;
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
   --font-size: 13px;
   --font-size-small: 11px;
+  --label-size: 11.5px;
 
   /* Stacking. */
+  --z-panel: 5;
+  --z-dock: 40;
+  --z-menu: 50;
   --z-popup: 60;
+  --z-drag: 200;
 
   color-scheme: dark;
 }
@@ -81,27 +111,43 @@ html, body, #main {
   background: var(--bg);
   color: var(--text);
   font: var(--font-size) var(--font);
+  -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 
 code, pre { font-family: var(--mono); font-size: 12px; }
 
-/* Base controls. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--fill-hover); border: 3px solid transparent; border-radius: var(--radius-pill); background-clip: padding-box; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+
+/* Base controls: soft filled buttons and fields without visible lines. The border stays
+   (transparent) so states like "on" or "active" can colour it without moving anything. */
 button, input {
   font: inherit;
   color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
+  background: var(--fill);
+  border: 1px solid transparent;
   border-radius: var(--radius);
   padding: 4px 10px;
+  transition: background var(--fast), border-color var(--fast), color var(--fast), transform var(--fast);
 }
 button { cursor: pointer; }
-button:hover:not(:disabled) { border-color: var(--muted); }
+button:hover:not(:disabled) { background: var(--fill-hover); }
+button:active:not(:disabled) { transform: scale(0.97); }
 button:disabled { opacity: 0.4; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-button.danger { background: var(--danger); border-color: var(--danger-border); color: var(--on-accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+button.danger { background: var(--danger); border-color: var(--danger); color: var(--text); }
+button.danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger-border); }
+input { background: var(--fill); }
 textarea:focus, input:focus { outline: none; border-color: var(--accent); }
 ::placeholder { color: var(--muted); }
+
+/* Icons from src/icons.rs: line icons in the text colour. */
+.icon { flex: none; width: 15px; height: 15px; vertical-align: -3px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+button.icon-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px; background: transparent; color: var(--muted); }
+button.icon-btn:hover:not(:disabled) { color: var(--text); background: var(--fill-hover); }
 
 /* Dropdowns (src/dropdown.rs). The list is fixed to the window so scrolling or clipping
    containers never cut it off; the backdrop closes it on a click outside. */
@@ -115,18 +161,24 @@ textarea:focus, input:focus { outline: none; border-color: var(--accent); }
   position: fixed;
   z-index: calc(var(--z-popup) + 1);
   margin: 0;
-  padding: 4px;
+  padding: 5px;
   list-style: none;
   overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--elev);
+  backdrop-filter: var(--blur);
+  border: none;
   border-radius: var(--radius-lg);
   box-shadow: var(--popup-shadow);
 }
-.dropdown-list li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius); border: 1px solid transparent; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dropdown-list li.active { border-color: var(--accent); background: var(--accent-soft); }
+.dropdown-list li { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: var(--radius); border: 1px solid transparent; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dropdown-list li:hover { background: var(--fill); }
+.dropdown-list li.active { background: var(--fill-hover); }
 .dropdown-list li.selected { color: var(--accent); }
 .dropdown-list li.empty { color: var(--muted); cursor: default; }
 .dropdown-check { margin-left: auto; padding-left: 12px; font-size: 11px; }
 .combobox { position: relative; display: inline-flex; min-width: 0; }
 .combobox input { width: 100%; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}

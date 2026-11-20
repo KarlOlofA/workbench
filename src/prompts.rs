@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::claims::BranchClaim;
-use crate::graph::{BASELINE_FILE, Change, ChangeKind, Field, Flow, GRAPH_FILE, Graph, Node, Reference, Subject};
+use crate::graph::{BASELINE_FILE, Change, ChangeKind, Decision, Field, Flow, GRAPH_FILE, Graph, Node, Reference, Subject};
 use crate::projects::Project;
 use crate::reference::{self, Refs};
 use crate::rules::{self, Rule};
@@ -256,7 +256,9 @@ const SCHEMA: &str = r#"{
       "id": "kebab-case-unique-id",
       "title": "Short human name, e.g. `POST /users` or `Billing service`",
       "kind": "one of: app, api, route, handler, service, model, store, db, external, ui, screen, component, job, module, reference",
-      "description": "2-5 plain sentences: what this part does, its inputs/outputs, and notable behaviour or constraints.",
+      "description": "2-4 plain sentences: what this part is responsible for and its inputs/outputs. Reasons go in `decisions`, must-hold rules in `invariants`.",
+      "decisions": [{ "decision": "a choice that shaped this part", "why": "the reason, from the user, a commit, a ticket or a constraint", "instead_of": "optional: the alternative not taken", "source": "where it is recorded: `commit <sha>`, a ticket id, `chat <YYYY-MM-DD>` or `<file> comment`", "date": "YYYY-MM-DD" }],
+      "invariants": ["optional: rules that must stay true of this part, e.g. `Never blocks the UI thread`"],
       "files": ["repo/relative/path.ext"],
       "links": ["ids of nodes this one calls, renders, or depends on"],
       "module": "optional: id of a module this node stands for (the node is an attachment point of that module)",
@@ -271,11 +273,18 @@ const SCHEMA: &str = r#"{
       "id": "kebab-case-module-id",
       "title": "Name of the isolated feature, e.g. `GitHub integration`",
       "description": "2-5 sentences: what the feature does and the interface the rest of the system uses.",
+      "decisions": ["same decision shape as on nodes"],
+      "invariants": ["same as on nodes"],
       "nodes": ["same node shape as above; ids only need to be unique inside this module"],
       "flows": ["same flow shape as above, using node ids of this module"]
     }
   ]
 }"#;
+
+const KNOWLEDGE_GUIDE: &str = "Decisions and invariants: the graph records how the app was steered, not only what each part is. \
+A node's `decisions` list the non-obvious choices that shaped it, oldest first, each with its `why`, the alternative it replaced when known (`instead_of`), \
+a `source` someone can check (`commit <sha>`, a ticket id such as PRO-123, `chat <YYYY-MM-DD>` for something the user asked for in a chat, or `<file> comment`) and a `date`. \
+Its `invariants` are rules that must stay true of it. Only record reasons you found or were told; never invent a why. Leave both out when there is nothing to record.";
 
 const MODULES_GUIDE: &str = "Modules: a module is an isolated feature with its own node network, stored in `modules[]`. \
 It is attached to the main network (or to another module) by a node whose `module` field is the module id; one module can be attached in several places, \
@@ -402,6 +411,36 @@ fn titles(graph: &Graph, ids: &[String]) -> String {
     ids.iter().map(|id| format!("`{id}` ({})", graph.title_of(id))).collect::<Vec<_>>().join(", ")
 }
 
+fn decision_lines(n: &Node) -> Vec<String> {
+    n.decisions.iter().map(Decision::line).collect()
+}
+
+/// The entries of `after` missing from `before`, and the entries of `before` missing from `after`.
+fn added_removed<'a>(before: &'a [String], after: &'a [String]) -> (Vec<&'a String>, Vec<&'a String>) {
+    let added = after.iter().filter(|x| !before.contains(x)).collect();
+    let removed = before.iter().filter(|x| !after.contains(x)).collect();
+    (added, removed)
+}
+
+/// A node's decisions and invariants, for prompts that work on the node. Empty when it has none.
+fn knowledge(n: &Node) -> String {
+    let mut out = String::new();
+    if !n.decisions.is_empty() {
+        out.push_str("Decisions made for it (keep to them unless the user asks otherwise):\n");
+        for d in &n.decisions {
+            out.push_str(&format!("- {}\n", d.line()));
+        }
+    }
+    let invariants: Vec<&String> = n.invariants.iter().filter(|i| !i.trim().is_empty()).collect();
+    if !invariants.is_empty() {
+        out.push_str("Invariants (must stay true):\n");
+        for i in invariants {
+            out.push_str(&format!("- {i}\n"));
+        }
+    }
+    out
+}
+
 fn files_line(n: &Node) -> String {
     if n.files.is_empty() {
         "Files: unknown — locate them by searching the codebase.\n".into()
@@ -418,6 +457,7 @@ pub fn generate(existing: Option<&Graph>, rules: &[Rule]) -> String {
                 "Update the Workbench architecture graph in `{GRAPH_FILE}` so it accurately reflects this codebase as it is now.\n\n\
                  - Keep existing node `id`s, `pos` values and flows wherever the node still exists.\n\
                  - Keep the user's existing descriptions unless they are factually wrong about the current code; then correct them.\n\
+                 - Keep existing `decisions` and `invariants`; add the ones you find while reading the code, its comments and `git log`.\n\
                  - Add nodes for parts that are missing, remove nodes whose code no longer exists, and fix `files` and `links`.\n"
             ));
         }
@@ -436,7 +476,9 @@ pub fn generate(existing: Option<&Graph>, rules: &[Rule]) -> String {
          - Add 2-6 `flows` covering the most important end-to-end paths (e.g. a request from route to database).\n\
          - `files` are repo-relative paths.\n\
          - Keep existing `modules` and their attachment nodes. When a self-contained feature has many nodes or is used from several places, or a network would grow past about 25 nodes, put the feature in a module.\n\
-         - Keep existing `reference` nodes and their `reference` field exactly as they are; they point outside this project.\n\n\
+         - Keep existing `reference` nodes and their `reference` field exactly as they are; they point outside this project.\n\
+         - Record `decisions` and `invariants` you can source from code comments, docs and commit messages (`git log`).\n\n\
+         {KNOWLEDGE_GUIDE}\n\n\
          {MODULES_GUIDE}\n\n\
          {REFERENCES_GUIDE}\n\n\
          Use exactly this JSON shape:\n\n```json\n{SCHEMA}\n```\n\n\
@@ -451,6 +493,43 @@ pub fn generate(existing: Option<&Graph>, rules: &[Rule]) -> String {
         ));
     }
     p
+}
+
+/// Asks the agent to fill in the decisions and invariants of nodes from the project's history:
+/// commits, comments, docs, tickets and past chats. `ids` are nodes of the `scope` network;
+/// none means every node and module of the graph.
+pub fn mine_decisions(root: &Graph, scope: Option<&str>, ids: &[String], transcripts: Option<&Path>) -> String {
+    let target = if ids.is_empty() {
+        "every node and module in the graph".to_string()
+    } else {
+        let net = root.net(scope).unwrap_or(root);
+        let place = scope.map(|m| format!(" in module `{m}`")).unwrap_or_default();
+        format!("these nodes{place}:\n{}", ids.iter().filter_map(|id| net.node(id)).map(|n| format!("- `{}` — {}\n  {}", n.id, n.title, files_line(n))).collect::<String>())
+    };
+    let chats = match transcripts {
+        Some(dir) => format!(
+            "- The past agent chats for this folder in `{}` (JSONL, one event per line). The user's own messages are the record of how they steered the app; \
+             a decision from a chat has the source `chat <date of the message>`.\n",
+            dir.display()
+        ),
+        None => String::new(),
+    };
+    format!(
+        "Record in `{GRAPH_FILE}` how the app was steered: the decisions and invariants behind {target}\n\
+         {KNOWLEDGE_GUIDE}\n\n\
+         For each node, read:\n\
+         - `git log --follow` on its files, the commit bodies above all.\n\
+         - The comments in its files, and the tickets they name (PRO-123 style ids): read them through the Linear tools when you have them.\n\
+         - `docs/`, the README and `{}`.\n\
+         {chats}\n\
+         Then:\n\
+         - Append the `decisions` and `invariants` you can source to each node. Keep the existing ones and don't add duplicates.\n\
+         - Where a node's `description` explains reasons or rules, or is wrong about the current code, rewrite it as 2-4 sentences on what the part is responsible for \
+         and move the reasons into `decisions` and the rules into `invariants`. Description rewrites become proposals the user reviews.\n\
+         - Change nothing else: no source code, no `files`, `links`, `pos` or flows, and never `{BASELINE_FILE}`.\n\n\
+         Finish with a short list per node of what you recorded and the descriptions you proposed.\n",
+        crate::ledger::LEDGER_FILE
+    )
 }
 
 pub fn draft_nodes(graph: &Graph, scope: Option<&str>, request: &str, selection: Option<&str>, mode: ChatMode, rules: &[Rule]) -> String {
@@ -566,6 +645,7 @@ pub fn process(graph: &Graph, orders: &[WorkOrder], rules: &[Rule], note: &str, 
             ChangeKind::Added => {
                 p.push_str(&format!("### New node `{}` — {} ({}){place}\n", n.id, n.title, n.kind));
                 p.push_str(&quote(&n.description));
+                p.push_str(&knowledge(n));
                 if let Some(m) = &n.module {
                     p.push_str(&format!(
                         "This node attaches module `{m}` ({}): wire this place up to use that module's interface.\n",
@@ -589,6 +669,7 @@ pub fn process(graph: &Graph, orders: &[WorkOrder], rules: &[Rule], note: &str, 
                 let after = c.after.as_ref().unwrap();
                 p.push_str(&format!("### Changed node `{}` — {} ({}){place}\n", after.id, after.title, after.kind));
                 p.push_str(&files_line(after));
+                p.push_str(&knowledge(after));
                 for f in fields {
                     match f {
                         Field::Module => match &after.module {
@@ -606,6 +687,25 @@ pub fn process(graph: &Graph, orders: &[WorkOrder], rules: &[Rule], note: &str, 
                             p.push_str(&quote(&before.description));
                             p.push_str("Description now:\n");
                             p.push_str(&quote(&after.description));
+                        }
+                        Field::Decisions => {
+                            let (old, new) = (decision_lines(before), decision_lines(after));
+                            let (added, removed) = added_removed(&old, &new);
+                            for d in added {
+                                p.push_str(&format!("New decision to follow: {d}\n"));
+                            }
+                            for d in removed {
+                                p.push_str(&format!("Dropped decision (the code no longer has to follow it): {d}\n"));
+                            }
+                        }
+                        Field::Invariants => {
+                            let (added, removed) = added_removed(&before.invariants, &after.invariants);
+                            for i in added {
+                                p.push_str(&format!("New invariant the code must keep: {i}\n"));
+                            }
+                            for i in removed {
+                                p.push_str(&format!("Dropped invariant: {i}\n"));
+                            }
                         }
                         Field::Files => p.push_str(&format!(
                             "Files re-sliced: [{}] → [{}]. Move the code so exactly these files implement this node.\n",
@@ -870,11 +970,12 @@ pub fn node_question(root: &Graph, scope: Option<&str>, n: &Node, refs: Option<&
         .map(|(x, r)| format!("It links to an external reference. {}", reference_context(&x.title, r, refs)))
         .collect();
     format!(
-        "About graph node `{}` — {} ({}){place}:\n{}{module}{files}Calls: {}\n{linked}\n",
+        "About graph node `{}` — {} ({}){place}:\n{}{}{module}{files}Calls: {}\n{linked}\n",
         n.id,
         n.title,
         n.kind,
         quote(&n.description),
+        knowledge(n),
         titles(net, &n.links)
     )
 }
@@ -945,10 +1046,15 @@ pub fn system_append(graph: Option<&Graph>, rules: &[Rule], related: &[String], 
              - Descriptions belong to the user: when you change what an existing node does, you may write its new `description`, but it only becomes a proposal \
              the user accepts or rejects; say in your summary which descriptions you proposed.\n\
              - Group small helpers into the node that owns them instead of giving them their own node. Put a new isolated feature with several parts in a module.\n\
-             - Keep existing `id`s and `pos` values, keep the file valid JSON, and list the graph changes you made in your final summary.\n\
+             - When you change a node's logic or add a node, append to its `decisions` every non-obvious choice you made or the user asked for, with the `why` \
+             (the user's reason or the constraint that forced it), `instead_of` when you rejected an alternative, a `source` (`chat <today's date>` for this conversation, \
+             or the commit or ticket) and the `date`. When the user states a rule that must always hold for a part, add it to that node's `invariants`. \
+             Appending is applied right away; rewriting or removing an existing decision or invariant only becomes a proposal, like a description.\n\
+             - Follow the `decisions` and `invariants` of the nodes you work on. If a change has to break one, say so and why instead of doing it silently.\n\
+             - Keep existing `id`s and `pos` values, keep the file valid JSON, and list the graph changes you made, including the decisions you recorded, in your final summary.\n\
              Never edit `{BASELINE_FILE}`.\n\n"
         ));
-        out.push_str(&format!("{MODULES_GUIDE}\n\n"));
+        out.push_str(&format!("{KNOWLEDGE_GUIDE}\n\n{MODULES_GUIDE}\n\n"));
     }
     if let Some(g) = graph {
         out.push_str(&references_section(g, refs));
@@ -1251,6 +1357,21 @@ mod tests {
         assert!(p.contains("Module `github` — GitHub"));
         assert!(p.contains("`gh-service` — gh service (service)"));
         assert!(!p.contains("## Selected nodes"));
+    }
+
+    #[test]
+    fn agents_see_and_keep_decisions_and_invariants() {
+        let mut graph = g();
+        let db = graph.node_mut("db").unwrap();
+        db.decisions.push(Decision { decision: "Use Postgres".into(), why: "we need transactions".into(), source: "commit abc123".into(), ..Default::default() });
+        db.invariants.push("Never drops rows".into());
+        let q = node_question(&graph, None, graph.node("db").unwrap(), None);
+        assert!(q.contains("Use Postgres — because we need transactions [commit abc123]"));
+        assert!(q.contains("Invariants (must stay true):\n- Never drops rows"));
+        let sys = system_append(Some(&graph), &[], &[], None).unwrap();
+        assert!(sys.contains("append to its `decisions`") && sys.contains(KNOWLEDGE_GUIDE));
+        let mine = mine_decisions(&graph, None, &["db".into()], Some(Path::new("/tmp/chats")));
+        assert!(mine.contains("`db` — Postgres") && mine.contains("/tmp/chats") && mine.contains("git log --follow"));
     }
 
     #[test]

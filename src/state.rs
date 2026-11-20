@@ -183,10 +183,11 @@ pub enum JobKind {
     Generate,
     Process,
     Draft,
+    Mine,
 }
 
 impl JobKind {
-    pub const ALL: [JobKind; 3] = [JobKind::Generate, JobKind::Process, JobKind::Draft];
+    pub const ALL: [JobKind; 4] = [JobKind::Generate, JobKind::Process, JobKind::Draft, JobKind::Mine];
 
     /// The key of the job's route in the provider settings.
     pub fn key(self) -> &'static str {
@@ -194,6 +195,7 @@ impl JobKind {
             JobKind::Generate => "generate",
             JobKind::Process => "process",
             JobKind::Draft => "draft",
+            JobKind::Mine => "mine",
         }
     }
 
@@ -202,6 +204,7 @@ impl JobKind {
             JobKind::Generate => "Generate or refresh the graph",
             JobKind::Process => "Commit & process graph changes",
             JobKind::Draft => "Draft nodes from a description",
+            JobKind::Mine => "Mine decisions from history",
         }
     }
 }
@@ -240,6 +243,7 @@ pub enum GraphPane {
     Flows,
     Changes,
     History,
+    Decisions,
     Prompt,
 }
 
@@ -1569,8 +1573,9 @@ impl AppState {
                 let changes = graph::diff(self.baseline.peek().as_ref().unwrap_or(&Graph::default()), &cur);
                 self.absorb_verified(changes, cur, true);
             }
-            // A generated graph is read from the code, so it is in sync by construction.
-            JobKind::Generate if success => self.mark_in_sync(),
+            // A generated graph and mined decisions are read from the code and its history,
+            // so they are in sync by construction.
+            JobKind::Generate | JobKind::Mine if success => self.mark_in_sync(),
             _ => {}
         }
         out_of_scope

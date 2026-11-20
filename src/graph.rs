@@ -33,6 +33,61 @@ pub struct Reference {
     pub nodes: Vec<RefNode>,
 }
 
+/// One architectural choice made for a node: what was chosen, why, what it replaced, and
+/// where that is recorded (a commit, a ticket, a chat, a code comment). Together a node's
+/// decisions show how that part of the app was steered.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Decision {
+    pub decision: String,
+    #[serde(default)]
+    pub why: String,
+    /// The alternative that was considered and not taken.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instead_of: String,
+    #[serde(default)]
+    pub source: String,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub date: String,
+}
+
+/// Today's date as `YYYY-MM-DD` (UTC), for new decisions.
+pub fn today() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The calendar date of a day count since 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+impl Decision {
+    /// The decision as one line, for prompts and intent diffs.
+    pub fn line(&self) -> String {
+        let mut s = self.decision.trim().to_string();
+        if !self.why.trim().is_empty() {
+            s.push_str(&format!(" — because {}", self.why.trim()));
+        }
+        if !self.instead_of.trim().is_empty() {
+            s.push_str(&format!(" (instead of {})", self.instead_of.trim()));
+        }
+        if !self.source.trim().is_empty() {
+            s.push_str(&format!(" [{}]", self.source.trim()));
+        }
+        s
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
@@ -41,6 +96,12 @@ pub struct Node {
     pub kind: String,
     #[serde(default)]
     pub description: String,
+    /// Why this part is built the way it is, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+    /// What must stay true of this part, whatever changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -65,6 +126,10 @@ pub struct Module {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariants: Vec<String>,
     #[serde(flatten)]
     pub net: Graph,
 }
@@ -82,6 +147,8 @@ impl Module {
             title: self.title.clone(),
             kind: "module".into(),
             description: self.description.clone(),
+            decisions: self.decisions.clone(),
+            invariants: self.invariants.clone(),
             files,
             ..Default::default()
         }
@@ -113,6 +180,8 @@ pub enum Field {
     Title,
     Kind,
     Description,
+    Decisions,
+    Invariants,
     Links,
     Files,
     Module,
@@ -120,11 +189,18 @@ pub enum Field {
 }
 
 impl Field {
+    /// Fields that say what a node is meant to do and why, as opposed to where it lives.
+    pub fn is_intent(self) -> bool {
+        matches!(self, Field::Description | Field::Decisions | Field::Invariants)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Field::Title => "title",
             Field::Kind => "kind",
             Field::Description => "description",
+            Field::Decisions => "decisions",
+            Field::Invariants => "invariants",
             Field::Links => "links",
             Field::Files => "files",
             Field::Module => "module",
@@ -651,6 +727,12 @@ pub fn diff(base: &Graph, cur: &Graph) -> Vec<Change> {
                 if b.description.trim() != c.description.trim() {
                     fields.push(Field::Description);
                 }
+                if b.decisions != c.decisions {
+                    fields.push(Field::Decisions);
+                }
+                if b.invariants != c.invariants {
+                    fields.push(Field::Invariants);
+                }
                 if !fields.is_empty() {
                     out.push(change(ChangeKind::Modified(fields), Some(b), Some(c)));
                 }
@@ -686,6 +768,12 @@ fn diff_net(base: &Graph, cur: &Graph, scope: Option<&str>) -> Vec<Change> {
                 }
                 if before.description.trim() != after.description.trim() {
                     fields.push(Field::Description);
+                }
+                if before.decisions != after.decisions {
+                    fields.push(Field::Decisions);
+                }
+                if before.invariants != after.invariants {
+                    fields.push(Field::Invariants);
                 }
                 if sorted(&before.links) != sorted(&after.links) {
                     fields.push(Field::Links);
@@ -788,7 +876,7 @@ pub fn kind_color(kind: &str) -> &'static str {
         "ui" | "screen" | "page" | "view" => "#f778ba",
         "component" | "widget" => "#ffa198",
         "job" | "worker" | "queue" | "event" => "#79c0ff",
-        "module" | "package" | "feature" => "#56b6c2",
+        "module" | "package" | "feature" => "#93a1e8",
         "reference" | "ref" | "docs" => "#e5c07b",
         _ => "#8a909c",
     }
@@ -826,6 +914,28 @@ mod tests {
         assert_eq!(changes[1].id, "d");
         assert_eq!(changes[2].kind, ChangeKind::Removed);
         assert_eq!(changes[2].id, "c");
+    }
+
+    #[test]
+    fn diff_reports_decisions_and_invariants_and_old_graphs_round_trip() {
+        let base = Graph { nodes: vec![node("a", &[])], ..Default::default() };
+        let text = serde_json::to_string_pretty(&base).unwrap();
+        assert!(!text.contains("decisions") && !text.contains("invariants"));
+        assert_eq!(serde_json::from_str::<Graph>(&text).unwrap(), base);
+
+        let mut cur = base.clone();
+        cur.nodes[0].decisions.push(Decision { decision: "Poll".into(), ..Default::default() });
+        cur.nodes[0].invariants.push("Never blocks".into());
+        let changes = diff(&base, &cur);
+        assert!(matches!(&changes[0].kind, ChangeKind::Modified(f) if f == &vec![Field::Decisions, Field::Invariants]));
+        assert!(Field::Decisions.is_intent() && !Field::Files.is_intent());
+    }
+
+    #[test]
+    fn civil_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_412), (2025, 11, 20));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
     }
 
     #[test]
@@ -933,6 +1043,7 @@ mod tests {
             title: "GitHub".into(),
             description: "PRs".into(),
             net: Graph { nodes: vec![node("view", &["svc"]), node("svc", &[])], ..Default::default() },
+            ..Default::default()
         });
         g
     }
@@ -1022,6 +1133,7 @@ mod tests {
             title: "Billing".into(),
             description: "Charges".into(),
             net: Graph { nodes: vec![node("invoice", &[])], ..Default::default() },
+            ..Default::default()
         });
 
         let made = diff(&start, &cur);

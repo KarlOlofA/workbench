@@ -414,7 +414,7 @@ fn ProjectCanvas(project: Project) -> Element {
                             div { key: "{r.path}", class: "repo-item",
                                 div {
                                     class: "{classes}",
-                                    style: "left: {x}px; top: {y}px; width: {REPO_W}px; height: {REPO_H}px; --kind: #56b6c2;",
+                                    style: "left: {x}px; top: {y}px; width: {REPO_W}px; height: {REPO_H}px; --kind: var(--info);",
                                     title: "{r.path}\n\nDouble-click to open this repository's graph",
                                     onmousedown: move |e: MouseEvent| {
                                         if e.trigger_button() != Some(MouseButton::Primary) {

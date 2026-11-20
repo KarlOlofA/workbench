@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 
 use crate::activity::AgentProc;
 use crate::app::open_folder;
+use crate::icons::{Icon, IconSvg};
 use crate::logos::{Logo, LogoIcon};
 use crate::projects::Project;
 use crate::chat::{self, ChatPane, ChatTabs, NewSessionButton};
@@ -26,6 +27,17 @@ use crate::worktree_view::{AgentDot, WorktreeClosePrompt, other_worktrees};
 use crate::state::{AppState, ChatFocus, ChatItem, ChatRect, WorkbenchView};
 
 const PEEK_CHARS: usize = 180;
+
+/// Asks for a folder and opens it (`open_folder`), starting the dialog in the open folder.
+fn pick_folder(mut st: AppState) {
+    spawn(async move {
+        let start = st.cwd.peek().clone();
+        if let Some(handle) = rfd::AsyncFileDialog::new().set_directory(start).pick_folder().await {
+            st.view.set(WorkbenchView::Graph);
+            open_folder(st, handle.path().to_path_buf());
+        }
+    });
+}
 
 #[component]
 pub fn Body() -> Element {
@@ -72,10 +84,23 @@ fn ProjectSidebar() -> Element {
     rsx! {
         div { class: "projects-sidebar",
             div { class: "sidebar-head",
-                b { "Projects" }
+                span { class: "sidebar-title", "Projects" }
                 div { class: "spacer" }
-                button { class: "small", title: "New project", onclick: move |_| new_name.set(Some(String::new())), "+" }
-                button { class: "small", title: "Hide projects", onclick: move |_| st.set_layout(|l| l.projects_open = false), "«" }
+                button { class: "icon-btn", title: "Hide projects", onclick: move |_| st.set_layout(|l| l.projects_open = false), IconSvg { icon: Icon::ChevronLeft } }
+            }
+            button {
+                class: "sidebar-new-row",
+                title: "Create a project that groups related repositories",
+                onclick: move |_| new_name.set(Some(String::new())),
+                IconSvg { icon: Icon::Plus }
+                span { "New project" }
+            }
+            button {
+                class: "sidebar-new-row",
+                title: "Open any folder's graph and files, whether or not it is in a project",
+                onclick: move |_| pick_folder(st),
+                IconSvg { icon: Icon::Folder }
+                span { "Open folder…" }
             }
             if let Some(name) = new_name.read().clone() {
                 input {
@@ -110,15 +135,16 @@ fn ProjectSidebar() -> Element {
                                 st.project_view.set(Some(show_id.clone()));
                             },
                             Fold { row: project_key }
-                            span { class: "sidebar-label", "◈ {p.name}" }
+                            span { class: "sidebar-folder", IconSvg { icon: Icon::Folder } }
+                            span { class: "sidebar-label", "{p.name}" }
                             button {
-                                class: "small",
+                                class: "icon-btn",
                                 title: "Add a local clone of a repository to {p.name}",
                                 onclick: move |e: MouseEvent| {
                                     e.stop_propagation();
                                     pick_repo(st, add_id.clone());
                                 },
-                                "+"
+                                IconSvg { icon: Icon::Plus }
                             }
                         }
                         if project_open {
@@ -442,17 +468,16 @@ fn RailFooter() -> Element {
     let mut st = use_context::<AppState>();
     let view = *st.view.read();
     let wide = st.layout.read().projects_open;
-    let dirty = st.open_file.read().as_ref().is_some_and(|f| f.dirty());
     let n_rules = st.rules.read().iter().filter(|r| r.enabled).count();
 
-    let item = move |v: WorkbenchView, icon: &'static str, label: String| {
+    let item = move |v: WorkbenchView, icon: Icon, label: String| {
         let on = view == v;
         rsx! {
             button {
                 class: if on { "rail-btn active" } else { "rail-btn" },
                 title: if on { format!("Close {}", v.title()) } else { format!("Open {}", v.title()) },
                 onclick: move |_| st.view.set(if on { WorkbenchView::Graph } else { v }),
-                span { class: "rail-icon", "{icon}" }
+                span { class: "rail-icon", IconSvg { icon } }
                 if wide { span { "{label}" } }
             }
         }
@@ -460,9 +485,8 @@ fn RailFooter() -> Element {
 
     rsx! {
         div { class: if wide { "rail-footer" } else { "rail-footer narrow" },
-            {item(WorkbenchView::Code, "</>", if dirty { "Code ●".into() } else { "Code".into() })}
-            {item(WorkbenchView::Rules, "☰", format!("Rules ({n_rules})"))}
-            {item(WorkbenchView::Settings, "⚙", "Settings".into())}
+            {item(WorkbenchView::Rules, Icon::List, format!("Rules ({n_rules})"))}
+            {item(WorkbenchView::Settings, Icon::Settings, "Settings".into())}
         }
     }
 }
@@ -486,13 +510,15 @@ fn Workbench() -> Element {
 
     rsx! {
         div { class: "workbench",
-            if view != WorkbenchView::Graph {
+            // Graph and Code are tabs in the header; the other screens replace them with a way back.
+            if !matches!(view, WorkbenchView::Graph | WorkbenchView::Code) {
                 div { class: "screen-bar",
                     button {
                         class: "screen-close",
                         title: "Close {view.title()} and go back to the graph",
                         onclick: move |_| st.view.set(WorkbenchView::Graph),
-                        "✕"
+                        IconSvg { icon: Icon::ArrowLeft }
+                        span { "Graph" }
                     }
                     span { class: "screen-title", "{view.title()}" }
                 }

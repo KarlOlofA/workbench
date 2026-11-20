@@ -12,7 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{Graph, Module, Node};
+use crate::graph::{Decision, Graph, Module, Node};
+use crate::git::{DiffLine, FileDiff, Hunk, LineKind};
 use crate::config;
 
 pub const HISTORY_FILE: &str = ".workbench/node-history.jsonl";
@@ -175,14 +176,42 @@ pub fn render_node(n: &Node) -> String {
         out.push("Files:".into());
         out.extend(n.files.iter().map(|f| format!("  {f}")));
     }
+    push_knowledge(&mut out, &n.decisions, &n.invariants);
     push_description(&mut out, &n.description);
     out.join("\n")
 }
 
+/// `text` from `render_node` with its links one per line under `Links:`, for diffs: a link
+/// added or removed then shows as one line, not as the whole list changed. The history keeps the
+/// one-line form, so nodes already tracked don't count as edited.
+pub fn links_one_per_line(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.strip_prefix("Links: ") {
+            Some(links) => std::iter::once("Links:".to_string()).chain(links.split(", ").map(|l| format!("  {l}"))).collect::<Vec<_>>().join("\n"),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn render_module(m: &Module) -> String {
     let mut out = vec![format!("Title: {}", m.title.trim())];
+    push_knowledge(&mut out, &m.decisions, &m.invariants);
     push_description(&mut out, &m.description);
     out.join("\n")
+}
+
+/// Decisions and invariants as facts: a heading, then one indented line each.
+fn push_knowledge(out: &mut Vec<String>, decisions: &[Decision], invariants: &[String]) {
+    if !decisions.is_empty() {
+        out.push("Decisions:".into());
+        out.extend(decisions.iter().map(|d| format!("  {}", d.line())));
+    }
+    let invariants: Vec<&String> = invariants.iter().filter(|i| !i.trim().is_empty()).collect();
+    if !invariants.is_empty() {
+        out.push("Invariants:".into());
+        out.extend(invariants.iter().map(|i| format!("  {}", i.trim())));
+    }
 }
 
 pub fn track(g: &Graph) -> BTreeMap<String, Tracked> {
@@ -425,6 +454,63 @@ pub fn prose_diff(before: &str, after: &str) -> Vec<(Op, String)> {
     out
 }
 
+/// Lines of context kept round each change, as in `git diff`.
+const CONTEXT: usize = 3;
+
+/// A line diff of two rendered nodes (`render_node`, `render_module`) in the shape of a git file
+/// diff, so the Changes tab shows it with the code diff view: hunks of the changed lines with
+/// three lines of context round them. `name` stands where the file path would.
+pub fn line_diff(name: &str, before: &str, after: &str) -> FileDiff {
+    let lines = |text: &str| text.lines().map(String::from).collect::<Vec<_>>();
+    let (mut old_no, mut new_no) = (0u32, 0u32);
+    let rows: Vec<DiffLine> = diff(&lines(before), &lines(after))
+        .into_iter()
+        .map(|(op, text)| {
+            let (kind, old, new) = match op {
+                Op::Same => {
+                    old_no += 1;
+                    new_no += 1;
+                    (LineKind::Context, Some(old_no), Some(new_no))
+                }
+                Op::Del => {
+                    old_no += 1;
+                    (LineKind::Removed, Some(old_no), None)
+                }
+                Op::Add => {
+                    new_no += 1;
+                    (LineKind::Added, None, Some(new_no))
+                }
+            };
+            DiffLine { kind, old_no: old, new_no: new, text }
+        })
+        .collect();
+    let changed: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].kind != LineKind::Context).collect();
+    let near_a_change = |i: usize| changed.iter().any(|&c| i + CONTEXT >= c && i <= c + CONTEXT);
+    let mut hunks: Vec<Hunk> = Vec::new();
+    let mut last_kept: Option<usize> = None;
+    for (i, row) in rows.into_iter().enumerate() {
+        if !near_a_change(i) {
+            continue;
+        }
+        // A row that doesn't follow the last kept one starts a new hunk.
+        if last_kept.is_none_or(|k| k + 1 != i) {
+            hunks.push(Hunk { header: String::new(), lines: Vec::new() });
+        }
+        hunks.last_mut().unwrap().lines.push(row);
+        last_kept = Some(i);
+    }
+    for h in &mut hunks {
+        let range = |nos: Vec<u32>| format!("{},{}", nos.first().copied().unwrap_or(0), nos.len());
+        h.header = format!(
+            "@@ -{} +{} @@",
+            range(h.lines.iter().filter_map(|l| l.old_no).collect()),
+            range(h.lines.iter().filter_map(|l| l.new_no).collect()),
+        );
+    }
+    let count = |kind: LineKind| hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == kind).count();
+    FileDiff { path: name.to_string(), added: count(LineKind::Added), removed: count(LineKind::Removed), binary: false, hunks }
+}
+
 /// The non-empty lines of a rendered node. An indented line, such as a file under `Files:`,
 /// gets the heading above it, so it reads `Files: src/x.rs` on its own. A heading followed by
 /// indented lines is not a fact itself; its lines carry it.
@@ -456,6 +542,47 @@ mod tests {
 
     fn graph(nodes: Vec<Node>) -> Graph {
         Graph { nodes, ..Default::default() }
+    }
+
+    fn numbered(n: usize) -> String {
+        (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn line_diff_keeps_three_lines_of_context_round_a_change() {
+        let before = numbered(10);
+        let after = before.replace("line 5", "line five");
+        let d = line_diff("Node", &before, &after);
+        assert_eq!((d.added, d.removed, d.hunks.len()), (1, 1, 1));
+        let h = &d.hunks[0];
+        assert_eq!(h.header, "@@ -2,7 +2,7 @@");
+        assert_eq!(h.lines.first().unwrap().text, "line 2");
+        assert_eq!(h.lines.last().unwrap().text, "line 8");
+    }
+
+    #[test]
+    fn an_added_link_is_one_added_line() {
+        let before = links_one_per_line("Title: A\nLinks: b, c\nKind: x");
+        let after = links_one_per_line("Title: A\nLinks: b, c, d\nKind: x");
+        assert_eq!(before, "Title: A\nLinks:\n  b\n  c\nKind: x");
+        let d = line_diff("A", &before, &after);
+        assert_eq!((d.added, d.removed), (1, 0));
+    }
+
+    #[test]
+    fn line_diff_of_an_added_node_is_all_added_lines() {
+        let d = line_diff("Node", "", "Title: A\nKind: service");
+        assert_eq!((d.added, d.removed), (2, 0));
+        assert!(d.hunks[0].lines.iter().all(|l| l.kind == LineKind::Added));
+        assert_eq!(d.hunks[0].lines[0].new_no, Some(1));
+    }
+
+    #[test]
+    fn line_diff_splits_changes_far_apart_and_skips_equal_texts() {
+        let before = numbered(20);
+        let after = before.replace("line 2\n", "line two\n").replace("line 18", "line eighteen");
+        assert_eq!(line_diff("Node", &before, &after).hunks.len(), 2);
+        assert!(line_diff("Node", &before, &before).hunks.is_empty());
     }
 
     #[test]

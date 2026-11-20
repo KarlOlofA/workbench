@@ -5,6 +5,7 @@ use crate::claude::{ChatMode, PermissionDecision, PermissionRequest, tool_summar
 use crate::dropdown::{self, Dropdown};
 use crate::projects::Project;
 use crate::worktree_view::other_worktrees;
+use crate::icons::{Icon, IconSvg};
 use crate::logos::{Logo, LogoIcon};
 use crate::markdown;
 use crate::prompts;
@@ -401,7 +402,7 @@ fn FocusMatches(matches: Vec<prompts::FocusRequest>) -> Element {
     let g = st.graph.read().clone();
     rsx! {
         div { class: "msg info focus-matches",
-            span { class: "muted small-text", if matches.len() == 1 { "Responsible node:" } else { "Possible nodes, pick one:" } }
+            span { class: "muted small-text", if matches.len() == 1 { "Node in this reply:" } else { "Nodes in this reply:" } }
             for (i, m) in matches.into_iter().enumerate() {
                 {
                     let title = g.net(m.module.as_deref()).and_then(|n| n.node(&m.node)).map(|n| n.title.clone());
@@ -575,39 +576,54 @@ fn ChatInput() -> Element {
         "Message Workbench…  (Enter to send, Shift+Enter for newline)"
     };
 
+    let empty = chat.input.read().trim().is_empty();
+
     rsx! {
-        div { class: "chat-toolbar",
-            ModeToggle {}
-            div { class: "spacer" }
-            if context.is_empty() {
-                span { class: "muted small-text", title: "Select nodes in the graph, or ghost nodes from other branches, to send them as context", "Context: project" }
-            } else {
-                span { class: "context-chip", title: "Messages include these graph nodes as context:\n{context_tip}",
-                    "Context: ◇ {context_label}"
-                    span {
-                        class: "chip-x",
-                        title: "Clear the selection and use the normal context",
-                        onclick: move |_| st.clear_context(),
-                        "✕"
+        div { class: "chat-input",
+            div { class: "composer",
+                textarea {
+                    placeholder: "{placeholder}",
+                    value: "{chat.input}",
+                    oninput: move |e| chat.input.set(e.value()),
+                    onkeydown: move |e: KeyboardEvent| {
+                        let m = e.modifiers();
+                        if e.key() == Key::Enter && !m.shift() {
+                            e.prevent_default();
+                            send(m.ctrl());
+                        } else if m.ctrl() && !m.meta() && e.code() == Code::KeyC && *chat.busy.peek() {
+                            e.prevent_default();
+                            chat.send(Cmd::Interrupt);
+                        }
+                    },
+                }
+                div { class: "chat-toolbar",
+                    ModeToggle {}
+                    if context.is_empty() {
+                        span { class: "muted small-text", title: "Select nodes in the graph, or ghost nodes from other branches, to send them as context", "Context: project" }
+                    } else {
+                        span { class: "context-chip", title: "Messages include these graph nodes as context:\n{context_tip}",
+                            "Context: ◇ {context_label}"
+                            span {
+                                class: "chip-x",
+                                title: "Clear the selection and use the normal context",
+                                onclick: move |_| st.clear_context(),
+                                "✕"
+                            }
+                        }
+                    }
+                    div { class: "spacer" }
+                    if busy && empty {
+                        button { class: "send-btn stop", title: "Stop the agent (Ctrl+C)", onclick: move |_| chat.send(Cmd::Interrupt), span { class: "stop-square" } }
+                    } else {
+                        button {
+                            class: "send-btn",
+                            disabled: empty,
+                            title: if busy { "Queue this message (Ctrl+Enter sends it now)" } else { "Send (Enter)" },
+                            onclick: move |_| send(false),
+                            IconSvg { icon: Icon::ArrowUp }
+                        }
                     }
                 }
-            }
-        }
-        div { class: "chat-input",
-            textarea {
-                placeholder: "{placeholder}",
-                value: "{chat.input}",
-                oninput: move |e| chat.input.set(e.value()),
-                onkeydown: move |e: KeyboardEvent| {
-                    let m = e.modifiers();
-                    if e.key() == Key::Enter && !m.shift() {
-                        e.prevent_default();
-                        send(m.ctrl());
-                    } else if m.ctrl() && !m.meta() && e.code() == Code::KeyC && *chat.busy.peek() {
-                        e.prevent_default();
-                        chat.send(Cmd::Interrupt);
-                    }
-                },
             }
         }
     }

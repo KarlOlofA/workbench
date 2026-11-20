@@ -29,7 +29,8 @@ pub fn project_key(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
-fn transcripts_dir(cwd: &Path) -> Option<PathBuf> {
+/// Where the Workbench agent keeps the chat transcripts of a folder.
+pub fn transcripts_dir(cwd: &Path) -> Option<PathBuf> {
     claude_home().map(|h| h.join("projects").join(project_key(cwd)))
 }
 

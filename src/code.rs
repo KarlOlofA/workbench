@@ -283,8 +283,9 @@ fn DiffView() -> Element {
     }
 }
 
+/// One file's diff: a collapsible block of hunks. `actions` go in its header, next to the counts.
 #[component]
-pub fn FileDiffView(file: FileDiff, #[props(default = true)] local: bool) -> Element {
+pub fn FileDiffView(file: FileDiff, #[props(default = true)] local: bool, actions: Option<Element>) -> Element {
     let mut st = use_context::<AppState>();
     let path = file.path.clone();
 
@@ -295,6 +296,14 @@ pub fn FileDiffView(file: FileDiff, #[props(default = true)] local: bool) -> Ele
                 span { class: "add", " +{file.added}" }
                 span { class: "del", " −{file.removed}" }
                 div { class: "spacer" }
+                if let Some(actions) = actions {
+                    // A click here must not fold the block, which is what a click in a summary does.
+                    span {
+                        class: "file-diff-actions",
+                        onclick: |e: MouseEvent| e.prevent_default(),
+                        {actions}
+                    }
+                }
                 if local {
                     button {
                         onclick: {

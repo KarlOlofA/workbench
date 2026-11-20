@@ -5,7 +5,8 @@ APP_NAME="Workbench"
 BUNDLE_ID="se.codebrain.workbench"
 LEGACY_APP_NAME="Claude Workbench"
 LEGACY_BUNDLE_ID="se.codebrain.claude-workbench"
-BIN_NAME="rust-ui-test"
+BIN_NAME="workbench"
+LEGACY_BIN_NAME="rust-ui-test"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 LAUNCHER="$BIN_DIR/wbrs"
 
@@ -29,6 +30,7 @@ LEGACY_APP_PATH="$INSTALL_DIR/$LEGACY_APP_NAME.app"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 LINUX_LIB_DIR="${LINUX_LIB_DIR:-$HOME/.local/lib/workbench}"
 LINUX_BIN="$LINUX_LIB_DIR/$BIN_NAME"
+LEGACY_LINUX_BIN="$LINUX_LIB_DIR/$LEGACY_BIN_NAME"
 DESKTOP_FILE="$DATA_HOME/applications/$BUNDLE_ID.desktop"
 
 # =============================================================================
@@ -317,6 +319,7 @@ PLIST
   echo "==> Installing to $APP_PATH"
   osascript -e "quit app id \"$BUNDLE_ID\"" >/dev/null 2>&1 || true
   pkill -f "$APP_PATH/Contents/MacOS/$BIN_NAME" 2>/dev/null || true
+  pkill -f "$APP_PATH/Contents/MacOS/$LEGACY_BIN_NAME" 2>/dev/null || true
   macos_remove_legacy
   mkdir -p "$INSTALL_DIR"
   rm -rf "$APP_PATH"
@@ -345,6 +348,7 @@ SH
 
 linux_uninstall() {
   pkill -f "$LINUX_BIN" 2>/dev/null || true
+  pkill -f "$LEGACY_LINUX_BIN" 2>/dev/null || true
   rm -rf "$LINUX_LIB_DIR" "$LAUNCHER" "$DESKTOP_FILE"
   command -v update-desktop-database >/dev/null 2>&1 \
     && update-desktop-database "$DATA_HOME/applications" >/dev/null 2>&1 || true
@@ -354,6 +358,9 @@ linux_uninstall() {
 linux_install() {
   echo "==> Installing to $LINUX_BIN"
   pkill -f "$LINUX_BIN" 2>/dev/null || true
+  # Before the rename the binary was called rust-ui-test; remove that copy.
+  pkill -f "$LEGACY_LINUX_BIN" 2>/dev/null || true
+  rm -f "$LEGACY_LINUX_BIN"
   mkdir -p "$LINUX_LIB_DIR"
   # Copy to a temp name then rename, so a running binary isn't overwritten in place.
   cp "target/release/$BIN_NAME" "$LINUX_BIN.new"

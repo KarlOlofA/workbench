@@ -126,10 +126,10 @@ The install script and the self-updater do not run on Windows yet, so build the 
 git clone https://github.com/KarlOlofA/workbench.git
 cd workbench
 cargo build --release
-.\target\release\rust-ui-test.exe C:\path\to\your\project
+.\target\release\workbench.exe C:\path\to\your\project
 ```
 
-You can copy `rust-ui-test.exe` to any folder and make a shortcut to it. Workbench finds CLIs installed by npm (`.cmd` shims) on your `PATH`. To update, run `git pull` and `cargo build --release` again.
+You can copy `workbench.exe` to any folder and make a shortcut to it. Workbench finds CLIs installed by npm (`.cmd` shims) on your `PATH`. To update, run `git pull` and `cargo build --release` again.
 
 ### Updating and uninstalling (Linux and macOS)
 

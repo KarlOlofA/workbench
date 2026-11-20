@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::ghost;
 use crate::git;
-use crate::graph::{self, Change, ChangeKind, Field, Graph, Subject};
+use crate::graph::{self, Change, ChangeKind, Graph, Subject};
 
 /// A node in a graph: (module scope, node id).
 pub type NodeKey = (Option<String>, String);
@@ -107,7 +107,7 @@ pub struct Stale {
 /// is on. Nodes whose own intent changed too are left out: someone already rewrote them.
 pub fn stale(cur: &Graph, changes: &[Change]) -> Vec<Stale> {
     let intent: Vec<&Change> =
-        changes.iter().filter(|c| matches!(&c.kind, ChangeKind::Modified(f) if f.contains(&Field::Description))).collect();
+        changes.iter().filter(|c| matches!(&c.kind, ChangeKind::Modified(f) if f.iter().any(|f| f.is_intent()))).collect();
     let edited: Vec<NodeKey> = intent.iter().filter(|c| c.subject == Subject::Node).map(|c| key(c)).collect();
     let mut out: Vec<Stale> = Vec::new();
     let mut add = |k: NodeKey, because: &str, flow: Option<&str>| {

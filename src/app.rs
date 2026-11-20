@@ -182,42 +182,29 @@ fn create_requested_chats(mut st: AppState) {
 #[component]
 fn Header() -> Element {
     let mut st = use_context::<AppState>();
-    let cwd = st.cwd.read().display().to_string();
-    let project = st.current_project();
     let is_repo = *use_memo(move || git::is_repo(&st.cwd.read())).read();
     let chat = *st.active_chat.read();
     let model = chat.map(|c| c.model.read().clone()).unwrap_or_default();
     let full_auto = chat.is_some_and(|c| *c.chat_mode.read() == ChatMode::FullAuto);
     let cost = chat.and_then(|c| *c.last_cost.read());
-
-    let pick_folder = move |_| {
-        spawn(async move {
-            let start = st.cwd.peek().clone();
-            if let Some(handle) = rfd::AsyncFileDialog::new().set_directory(start).pick_folder().await {
-                open_folder(st, handle.path().to_path_buf());
+    let view = *st.view.read();
+    let dirty = st.open_file.read().as_ref().is_some_and(|f| f.dirty());
+    // The graph and the code share the main screen; these tabs switch between them.
+    let tab = move |v: WorkbenchView, label: &'static str| {
+        rsx! {
+            button {
+                class: if view == v { "view-tab active" } else { "view-tab" },
+                onclick: move |_| st.view.set(v),
+                "{label}"
             }
-        });
+        }
     };
 
     rsx! {
         div { class: "header",
-            button { onclick: pick_folder, "Open folder…" }
-            if let Some((pid, pname)) = project.map(|p| (p.id, p.name)) {
-                button {
-                    class: "project-chip",
-                    title: "Show all repositories in {pname}",
-                    onclick: move |_| {
-                        st.view.set(WorkbenchView::Graph);
-                        st.show_project(Some(pid.clone()));
-                    },
-                    "◈ {pname}"
-                }
-            }
-            span { class: "cwd", title: "{cwd}", "{cwd}" }
-            if is_repo {
-                BranchMenu {}
-            } else {
-                span { class: "badge warn", "not a git repo" }
+            div { class: "view-tabs",
+                {tab(WorkbenchView::Graph, "Graph")}
+                {tab(WorkbenchView::Code, if dirty { "Code ●" } else { "Code" })}
             }
             div {
                 class: "spacer",
@@ -234,6 +221,11 @@ fn Header() -> Element {
                 },
             }
             UpdateMenu {}
+            if is_repo {
+                BranchMenu {}
+            } else {
+                span { class: "badge warn", "not a git repo" }
+            }
             if !model.is_empty() { span { class: "badge", "{model}" } }
             if let Some(c) = cost { span { class: "badge", "${c:.4}" } }
             if full_auto {

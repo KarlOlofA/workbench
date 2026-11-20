@@ -158,12 +158,14 @@ pub fn append(cwd: &Path, entries: &[Entry]) -> Result<(), String> {
 /// ledger. The ledger is read from disk each time, so entries that a git pull or another
 /// Workbench window added count too.
 ///
-/// Agents don't own intent: the description part of an agent's edit becomes a proposal.
+/// Agents don't own intent: the description part of an agent's edit becomes a proposal, and so
+/// do changes to decisions and invariants other than appending to them.
 /// While that proposal is open, the same text in a later edit is still the agent's, so it is
 /// not recorded as anyone else's change.
 pub fn record(cwd: &Path, known: &[Entry], g: &Graph, source: Source, author: Option<&str>, at: u64) -> Result<Vec<Entry>, String> {
     let mut entries = load_checked(cwd, known)?;
-    let (ops, intent) = split_intent(ops_for(&entries, &materialize(&entries, g), g));
+    let base = materialize(&entries, g);
+    let (ops, intent) = split_intent(&base, ops_for(&entries, &base, g));
     let open: Vec<Op> = open_proposals(&entries).into_iter().map(|e| e.op.clone()).collect();
     let intent: Vec<Op> = intent.into_iter().filter(|op| !open.contains(op)).collect();
     let mut new = stamp(ops, source, author, at);
@@ -181,28 +183,47 @@ pub fn record(cwd: &Path, known: &[Entry], g: &Graph, source: Source, author: Op
     Ok(entries)
 }
 
-/// Moves the `description` of every `node.merge` into its own `node.merge`.
-fn split_intent(ops: Vec<Op>) -> (Vec<Op>, Vec<Op>) {
+/// Moves the intent part of every `node.merge` into its own `node.merge`: the description,
+/// and the decisions and invariants unless the merge only appends to them. Appending records
+/// what happened; rewriting or dropping what was decided changes intent.
+fn split_intent(base: &Graph, ops: Vec<Op>) -> (Vec<Op>, Vec<Op>) {
     let mut rest = Vec::new();
     let mut intent = Vec::new();
     for op in ops {
-        match op {
-            Op::NodeMerge { scope, subject, id, mut patch } if patch.contains_key("description") => {
-                let description = patch.remove("description").unwrap_or_default();
-                intent.push(Op::NodeMerge {
-                    scope: scope.clone(),
-                    subject,
-                    id: id.clone(),
-                    patch: Map::from_iter([("description".to_string(), description)]),
-                });
-                if !patch.is_empty() {
-                    rest.push(Op::NodeMerge { scope, subject, id, patch });
-                }
+        let Op::NodeMerge { scope, subject, id, mut patch } = op else {
+            rest.push(op);
+            continue;
+        };
+        let old = merge_base(base, scope.as_deref(), subject, &id).map(|n| fields(&n)).unwrap_or_default();
+        let mut moved = Map::new();
+        for key in ["description", "decisions", "invariants"] {
+            let Some(new) = patch.get(key) else { continue };
+            if key == "description" || !only_appends(old.get(key), new) {
+                moved.insert(key.to_string(), patch.remove(key).unwrap_or_default());
             }
-            op => rest.push(op),
+        }
+        if !moved.is_empty() {
+            intent.push(Op::NodeMerge { scope: scope.clone(), subject, id: id.clone(), patch: moved });
+        }
+        if !patch.is_empty() {
+            rest.push(Op::NodeMerge { scope, subject, id, patch });
         }
     }
     (rest, intent)
+}
+
+/// The node or module a merge applies to, as it is before the merge.
+fn merge_base(base: &Graph, scope: Option<&str>, subject: Subject, id: &str) -> Option<Node> {
+    match subject {
+        Subject::Module => base.module(id).map(Module::as_node),
+        Subject::Node => base.net(scope).and_then(|net| net.node(id)).cloned(),
+    }
+}
+
+/// Whether `new` is the list `old` (missing means empty) with entries added at the end.
+fn only_appends(old: Option<&Value>, new: &Value) -> bool {
+    let old = old.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    new.as_array().is_some_and(|new| new.len() > old.len() && new.starts_with(old))
 }
 
 /// The node or module a `node.merge` changes.
@@ -298,11 +319,31 @@ fn fields(n: &Node) -> Map<String, Value> {
     }
 }
 
+/// The node with a `node.merge` patch applied; a null value clears the field.
+pub fn with_patch(n: &Node, patch: &Map<String, Value>) -> Node {
+    let mut f = fields(n);
+    for (k, v) in patch {
+        if v.is_null() {
+            f.remove(k);
+        } else {
+            f.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::from_value(Value::Object(f)).unwrap_or_else(|_| n.clone())
+}
+
 fn apply(g: &mut Graph, op: &Op) {
     match op {
         Op::NodeAdd { subject: Subject::Module, node, .. } => {
             if g.module(&node.id).is_none() {
-                g.modules.push(Module { id: node.id.clone(), title: node.title.clone(), description: node.description.clone(), net: Graph::default() });
+                g.modules.push(Module {
+                    id: node.id.clone(),
+                    title: node.title.clone(),
+                    description: node.description.clone(),
+                    decisions: node.decisions.clone(),
+                    invariants: node.invariants.clone(),
+                    net: Graph::default(),
+                });
             }
         }
         Op::NodeAdd { scope, node, .. } => {
@@ -321,20 +362,16 @@ fn apply(g: &mut Graph, op: &Op) {
             if let Some(d) = text("description") {
                 m.description = d;
             }
+            if let Some(v) = patch.get("decisions") {
+                m.decisions = serde_json::from_value(v.clone()).unwrap_or_default();
+            }
+            if let Some(v) = patch.get("invariants") {
+                m.invariants = serde_json::from_value(v.clone()).unwrap_or_default();
+            }
         }
         Op::NodeMerge { scope, id, patch, .. } => {
             let Some(n) = g.net_mut(scope.as_deref()).and_then(|net| net.node_mut(id)) else { return };
-            let mut f = fields(n);
-            for (k, v) in patch {
-                if v.is_null() {
-                    f.remove(k);
-                } else {
-                    f.insert(k.clone(), v.clone());
-                }
-            }
-            if let Ok(merged) = serde_json::from_value(Value::Object(f)) {
-                *n = merged;
-            }
+            *n = with_patch(n, patch);
         }
         Op::NodeRemove { subject: Subject::Module, id, .. } => g.modules.retain(|m| m.id != *id),
         Op::NodeRemove { scope, id, .. } => {
@@ -473,6 +510,7 @@ mod tests {
             title: "Billing".into(),
             description: "Charges customers".into(),
             net: Graph { nodes: vec![node("invoice", &[])], ..Default::default() },
+            ..Default::default()
         });
         g
     }
@@ -561,6 +599,29 @@ mod tests {
         let mut rejected = entries.clone();
         rejected.extend(reject);
         assert!(open_proposals(&rejected).is_empty());
+    }
+
+    #[test]
+    fn agent_appends_decisions_but_only_proposes_rewrites() {
+        let dir = std::env::temp_dir().join(format!("wb-ledger-{}", new_id()));
+        let g = sample();
+        record(&dir, &[], &g, Source::Person, None, 0).unwrap();
+        let decision = |text: &str| graph::Decision { decision: text.into(), why: "reasons".into(), ..Default::default() };
+
+        let mut appended = g.clone();
+        appended.nodes[1].decisions.push(decision("Use Postgres"));
+        appended.nodes[1].invariants.push("Never drops rows".into());
+        let entries = record(&dir, &[], &appended, Source::Agent, None, 0).unwrap();
+        let m = materialize(&entries, &appended);
+        assert_eq!(m.nodes[1].decisions, vec![decision("Use Postgres")]);
+        assert_eq!(m.nodes[1].invariants, vec!["Never drops rows".to_string()]);
+        assert!(open_proposals(&entries).is_empty());
+
+        let mut rewritten = appended.clone();
+        rewritten.nodes[1].decisions[0] = decision("Use SQLite");
+        let entries = record(&dir, &entries, &rewritten, Source::Agent, None, 0).unwrap();
+        assert_eq!(materialize(&entries, &rewritten).nodes[1].decisions, vec![decision("Use Postgres")]);
+        assert_eq!(open_proposals(&entries).len(), 1);
     }
 
     #[test]

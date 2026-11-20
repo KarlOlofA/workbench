@@ -33,7 +33,21 @@ pub enum ClaudeEvent {
 
 /// Top-level event types Workbench knows and has nothing to show for.
 const IGNORED_TYPES: [&str; 3] = ["control_response", "rate_limit_event", "keep_alive"];
-const IGNORED_SYSTEM: [&str; 7] = ["status", "hook_started", "hook_progress", "hook_response", "thinking_tokens", "compact_boundary", "api_retry"];
+/// System events that carry nothing the chat shows. The `task_*` events track subagents and
+/// background tasks, which the chat already shows through their tool call (Agent, or Bash run in
+/// the background), its tool result, and the model's reply once a task finishes.
+const IGNORED_SYSTEM: [&str; 10] = [
+    "status",
+    "hook_started",
+    "hook_progress",
+    "hook_response",
+    "thinking_tokens",
+    "compact_boundary",
+    "api_retry",
+    "task_started",
+    "task_progress",
+    "task_notification",
+];
 const STREAM_EVENTS: [&str; 8] =
     ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "ping", "error"];
 const STREAM_DELTAS: [&str; 5] = ["text_delta", "input_json_delta", "thinking_delta", "signature_delta", "citations_delta"];
@@ -629,5 +643,6 @@ mod tests {
         assert!(unsupported(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"audio_delta"}}}"#));
         assert!(unsupported(r#"{"type":"assistant","message":{"content":[{"type":"hologram"}]}}"#));
         assert!(!unsupported(r#"{"type":"rate_limit_event","rate_limit_info":{}}"#));
+        assert!(!unsupported(r#"{"type":"system","subtype":"task_started","task_id":"t1","description":"Explore"}"#));
     }
 }

@@ -7,12 +7,16 @@ use dioxus::prelude::*;
 
 use crate::claims;
 use crate::claude::ChatMode;
+use crate::code::FileDiffView;
 use crate::dropdown::{Choice, ComboBox, Dropdown};
 use crate::ghost::{self, GhostPick};
 use crate::git;
 use crate::ledger;
-use crate::graph::{self, ChangeKind, Field, Flow, Graph, KNOWN_KINDS, Module, NODE_H, NODE_W, Node, REFERENCE_KIND, RefNode, Reference, Subject};
+use crate::graph::{self, ChangeKind, Decision, Flow, Graph, KNOWN_KINDS, Module, NODE_H, NODE_W, Node, REFERENCE_KIND, RefNode, Reference, Subject};
 use crate::prompts::{self, DebugMode};
+use crate::icons::{Icon, IconSvg};
+use crate::routing;
+use crate::rules;
 use crate::reference::{self, RefState, Source};
 use crate::node_history::{self, Entry, Op};
 use crate::work_order;
@@ -131,6 +135,7 @@ pub fn GraphTab() -> Element {
     let n_flows = net.flows.len();
     let pane = *st.graph_pane.read();
     let n_history = st.node_history.read().entries.len();
+    let n_decisions = decision_timeline(&st.graph.read()).len();
     let layout = *st.layout.read();
     let mut row_el = use_signal(|| None::<Rc<MountedData>>);
     let mut split_drag = use_signal(|| None::<(f64, f64, Option<f64>)>);
@@ -211,116 +216,126 @@ pub fn GraphTab() -> Element {
 
     rsx! {
         div { class: "graph-tab",
-            div { class: "graph-toolbar",
-                button {
-                    disabled: busy || rescan_blocked || job.is_some(),
-                    title: if rescan_blocked { "Process or revert your graph changes before rescanning" } else { "Let Workbench explore the code and (re)build the graph" },
-                    onclick: generate,
-                    if has_nodes { "Rescan code" } else { "Map codebase" }
-                }
-                button { disabled: job.is_some(), onclick: move |_| add_node(st, None), "+ Node" }
-                button {
-                    disabled: job.is_some(),
-                    title: "Reference an external project, file, website or package to give Workbench more context",
-                    onclick: move |_| add_reference(st),
-                    "+ Reference"
-                }
-                Dropdown {
-                    class: "add-module",
-                    disabled: job.is_some(),
-                    title: "Attach a module (an isolated node network) here as a single node",
-                    value: "",
-                    placeholder: "+ Module…",
-                    choices: std::iter::once(Choice::new("__new__", "New module"))
-                        .chain(attachable.into_iter().map(|(mid, title)| Choice::new(mid, format!("Attach “{title}”"))))
-                        .collect::<Vec<_>>(),
-                    onchange: move |v: String| match v.as_str() {
-                        "__new__" => new_module(st),
-                        id => attach_module(st, id.to_string()),
-                    },
-                }
-                button {
-                    disabled: job.is_some(),
-                    title: "Describe what you want and let Workbench add the nodes",
-                    onclick: move |_| st.show_pane(GraphPane::Prompt),
-                    "+ From prompt"
-                }
-                div { class: "spacer" }
-                match job {
-                    Some(Job { awaiting: true, .. }) => rsx! {
-                        span { class: "badge warn", title: "Answer Workbench's questions in the chat to continue", "Waiting for your answers" }
-                        button {
-                            class: "small",
-                            onclick: move |_| {
-                                st.finish_job(false);
-                            },
-                            "Cancel"
-                        }
-                    },
-                    Some(Job { kind: JobKind::Generate, .. }) => rsx! { span { class: "badge busy", "Mapping…" } },
-                    Some(Job { kind: JobKind::Process, .. }) => rsx! { span { class: "badge busy", "Processing…" } },
-                    Some(Job { kind: JobKind::Draft, .. }) => rsx! { span { class: "badge busy", "Drafting nodes…" } },
-                    None => rsx! {},
-                }
-                if n_changes > 0 && job.is_none() {
-                    button {
-                        class: "primary",
-                        onclick: move |_| st.show_pane(GraphPane::Changes),
-                        "Commit {n_changes} change{plural(n_changes)}"
-                    }
-                }
-            }
-            div { class: "crumbs",
-                button {
-                    class: "crumb project",
-                    title: "Show every repository in the project",
-                    onclick: move |_| st.show_project(None),
-                    match project_name.clone() {
-                        Some(name) => rsx! { "◈ {name}" },
-                        None => rsx! { "◈ Projects" },
-                    }
-                }
-                span { class: "crumb-sep", "›" }
-                button {
-                    class: if at_root { "crumb current" } else { "crumb" },
-                    title: "{cwd_label}",
-                    onclick: move |_| st.set_scope(Vec::new()),
-                    "{repo_label}"
-                }
-                for (depth, title) in crumbs {
-                    {
-                        let target: Vec<String> = path[..depth].to_vec();
-                        let current = depth == path.len();
-                        rsx! {
-                            span { key: "{depth}", class: "crumb-item",
-                                span { class: "crumb-sep", "›" }
-                                button {
-                                    class: if current { "crumb current" } else { "crumb" },
-                                    onclick: move |_| st.set_scope(target.clone()),
-                                    "▣ {title}"
-                                }
-                            }
-                        }
-                    }
-                }
-                div { class: "spacer" }
-                button {
-                    class: "small",
-                    title: if at_root { "Show the other repositories in this project" } else { "Leave this module" },
-                    onclick: move |_| {
-                        let mut p = st.scope.peek().clone();
-                        if p.pop().is_none() {
-                            st.show_project(None);
-                        } else {
-                            st.set_scope(p);
-                        }
-                    },
-                    "↑ Up"
-                }
-            }
             div { class: "graph-row", onmounted: move |e| row_el.set(Some(e.data())),
                 div { class: "graph-canvas-wrap",
                     GraphCanvas {}
+                    div { class: "graph-float-top",
+                        div { class: "graph-toolbar",
+                            button {
+                                disabled: busy || rescan_blocked || job.is_some(),
+                                title: if rescan_blocked { "Process or revert your graph changes before rescanning" } else { "Let Workbench explore the code and (re)build the graph" },
+                                onclick: generate,
+                                if has_nodes { "Rescan code" } else { "Map codebase" }
+                            }
+                            button {
+                                disabled: busy || rescan_blocked || job.is_some() || !has_nodes,
+                                title: if rescan_blocked { "Process or revert your graph changes before mining decisions" } else { "Read commits, comments, docs, tickets and past chats, and record why each part is built the way it is" },
+                                onclick: move |_| mine_decisions(st, Vec::new()),
+                                "Mine decisions"
+                            }
+                            button { disabled: job.is_some(), onclick: move |_| add_node(st, None), "+ Node" }
+                            button {
+                                disabled: job.is_some(),
+                                title: "Reference an external project, file, website or package to give Workbench more context",
+                                onclick: move |_| add_reference(st),
+                                "+ Reference"
+                            }
+                            Dropdown {
+                                class: "add-module",
+                                disabled: job.is_some(),
+                                title: "Attach a module (an isolated node network) here as a single node",
+                                value: "",
+                                placeholder: "+ Module…",
+                                choices: std::iter::once(Choice::new("__new__", "New module"))
+                                    .chain(attachable.into_iter().map(|(mid, title)| Choice::new(mid, format!("Attach “{title}”"))))
+                                    .collect::<Vec<_>>(),
+                                onchange: move |v: String| match v.as_str() {
+                                    "__new__" => new_module(st),
+                                    id => attach_module(st, id.to_string()),
+                                },
+                            }
+                            button {
+                                disabled: job.is_some(),
+                                title: "Describe what you want and let Workbench add the nodes",
+                                onclick: move |_| st.show_pane(GraphPane::Prompt),
+                                "+ From prompt"
+                            }
+                            div { class: "spacer" }
+                            match job {
+                                Some(Job { awaiting: true, .. }) => rsx! {
+                                    span { class: "badge warn", title: "Answer Workbench's questions in the chat to continue", "Waiting for your answers" }
+                                    button {
+                                        class: "small",
+                                        onclick: move |_| {
+                                            st.finish_job(false);
+                                        },
+                                        "Cancel"
+                                    }
+                                },
+                                Some(Job { kind: JobKind::Generate, .. }) => rsx! { span { class: "badge busy", "Mapping…" } },
+                                Some(Job { kind: JobKind::Process, .. }) => rsx! { span { class: "badge busy", "Processing…" } },
+                                Some(Job { kind: JobKind::Draft, .. }) => rsx! { span { class: "badge busy", "Drafting nodes…" } },
+                                Some(Job { kind: JobKind::Mine, .. }) => rsx! { span { class: "badge busy", "Mining decisions…" } },
+                                None => rsx! {},
+                            }
+                            if n_changes > 0 && job.is_none() {
+                                button {
+                                    class: "primary",
+                                    onclick: move |_| st.show_pane(GraphPane::Changes),
+                                    "Commit {n_changes} change{plural(n_changes)}"
+                                }
+                            }
+                        }
+                        div { class: "crumbs",
+                            button {
+                                class: "crumb project",
+                                title: "Show every repository in the project",
+                                onclick: move |_| st.show_project(None),
+                                match project_name.clone() {
+                                    Some(name) => rsx! { "◈ {name}" },
+                                    None => rsx! { "◈ Projects" },
+                                }
+                            }
+                            span { class: "crumb-sep", "›" }
+                            button {
+                                class: if at_root { "crumb current" } else { "crumb" },
+                                title: "{cwd_label}",
+                                onclick: move |_| st.set_scope(Vec::new()),
+                                "{repo_label}"
+                            }
+                            for (depth, title) in crumbs {
+                                {
+                                    let target: Vec<String> = path[..depth].to_vec();
+                                    let current = depth == path.len();
+                                    rsx! {
+                                        span { key: "{depth}", class: "crumb-item",
+                                            span { class: "crumb-sep", "›" }
+                                            button {
+                                                class: if current { "crumb current" } else { "crumb" },
+                                                onclick: move |_| st.set_scope(target.clone()),
+                                                "▣ {title}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "spacer" }
+                            button {
+                                class: "small",
+                                title: if at_root { "Show the other repositories in this project" } else { "Leave this module" },
+                                onclick: move |_| {
+                                    let mut p = st.scope.peek().clone();
+                                    if p.pop().is_none() {
+                                        st.show_project(None);
+                                    } else {
+                                        st.set_scope(p);
+                                    }
+                                },
+                                IconSvg { icon: Icon::ArrowUp }
+                                " Up"
+                            }
+                        }
+                    }
                     if scope.is_some() && net_empty && job.is_none() {
                         div { class: "graph-empty",
                             p { "This module has no nodes yet." }
@@ -355,13 +370,14 @@ pub fn GraphTab() -> Element {
                                 {pane_btn(GraphPane::Flows, format!("Flows ({n_flows})"))}
                                 {pane_btn(GraphPane::Changes, format!("Changes ({n_changes})"))}
                                 {pane_btn(GraphPane::History, format!("History ({n_history})"))}
+                                {pane_btn(GraphPane::Decisions, format!("Decisions ({n_decisions})"))}
                                 {pane_btn(GraphPane::Prompt, "Prompt".into())}
                                 div { class: "spacer" }
                                 button {
                                     class: "pane-toggle",
                                     title: "Hide the node menu to give the graph more room",
                                     onclick: move |_| st.set_layout(|l| l.node_menu_open = false),
-                                    "▸"
+                                    IconSvg { icon: Icon::ChevronRight }
                                 }
                             }
                             div { class: "pane-body",
@@ -370,6 +386,7 @@ pub fn GraphTab() -> Element {
                                     GraphPane::Flows => rsx! { FlowsPane {} },
                                     GraphPane::Changes => rsx! { ChangesPane {} },
                                     GraphPane::History => rsx! { HistoryPane {} },
+                                    GraphPane::Decisions => rsx! { DecisionsPane {} },
                                     GraphPane::Prompt => rsx! { PromptPane {} },
                                 }
                             }
@@ -401,6 +418,21 @@ pub fn GraphTab() -> Element {
             }
         }
     }
+}
+
+/// Starts the job that records the decisions and invariants of `ids` (every node when empty)
+/// from the project's history.
+fn mine_decisions(mut st: AppState, ids: Vec<String>) {
+    if st.chat_busy() || st.job.peek().is_some() {
+        return;
+    }
+    let cwd = st.cwd.peek().clone();
+    let scope = st.scope.peek().last().cloned();
+    let transcripts = crate::history::transcripts_dir(&cwd).filter(|d| d.is_dir());
+    let text = prompts::mine_decisions(&st.graph.peek(), scope.as_deref(), &ids, transcripts.as_deref());
+    let label = if ids.is_empty() { "Mine decisions for the whole graph".to_string() } else { format!("Mine decisions for {}", ids.join(", ")) };
+    st.start_job(JobKind::Mine);
+    st.chat_or_new().send(Cmd::Prompt { label, text });
 }
 
 fn plural(n: usize) -> &'static str {
@@ -515,16 +547,13 @@ fn ghost_clicked(mut st: AppState, pick: GhostPick, shift: bool) {
 
 fn ghost_edges_svg(edges: &[(String, String, usize)], positions: &HashMap<String, [f64; 2]>) -> String {
     let mut out = String::from(r#"<svg class="edges-svg" width="1" height="1">"#);
-    for (from, to, bi) in edges {
-        let (Some(a), Some(b)) = (positions.get(from), positions.get(to)) else { continue };
-        let (x1, y1) = (a[0] + NODE_W, a[1] + NODE_H / 2.0);
-        let (x2, y2) = (b[0], b[1] + NODE_H / 2.0);
-        let dx = ((x2 - x1).abs() / 2.0).max(50.0);
+    let pairs: Vec<(String, String)> = edges.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect();
+    for ((_, _, bi), route) in edges.iter().zip(routing::route(&pairs, positions)) {
+        let Some(pts) = route else { continue };
         out.push_str(&format!(
-            r#"<path class="edge ghost" style="stroke: {}" d="M{x1:.1},{y1:.1} C{:.1},{y1:.1} {:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wb-arrow)"/>"#,
+            r#"<path class="edge ghost" style="stroke: {}" d="{}" marker-end="url(#wb-arrow)"/>"#,
             ghost::color(*bi),
-            x1 + dx,
-            x2 - dx,
+            routing::svg_path(&pts, routing::CORNER),
         ));
     }
     out.push_str("</svg>");
@@ -576,10 +605,11 @@ struct EdgeView<'a> {
     hubs: Option<&'a HashMap<String, usize>>,
 }
 
+/// Draws `edges` along their `routes` (one per edge, from `routing::route`).
 fn edges_svg(
     edges: &[(String, String)],
+    routes: &[Option<Vec<routing::Point>>],
     nodes: &HashMap<&str, &Node>,
-    positions: &HashMap<String, [f64; 2]>,
     view: EdgeView,
 ) -> String {
     let on_path: HashSet<(&str, &str)> =
@@ -591,8 +621,9 @@ fn edges_svg(
 <marker id="wb-arrow-hl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#c8ced8"/></marker>
 </defs>"##,
     );
-    for (from, to) in edges {
-        let (Some(a), Some(b)) = (positions.get(from), positions.get(to)) else { continue };
+    let mut on_top = String::new();
+    for ((from, to), route) in edges.iter().zip(routes) {
+        let Some(pts) = route else { continue };
         let (class, marker) = match view.emphasis {
             _ if on_path.contains(&(from.as_str(), to.as_str())) => ("edge on", "wb-arrow-on"),
             Emphasis::Path { dim_rest: true } => ("edge dim", "wb-arrow"),
@@ -602,8 +633,9 @@ fn edges_svg(
             Emphasis::Faint => ("edge faint", "wb-arrow"),
             _ => ("edge", "wb-arrow"),
         };
-        let (x1, y1) = (a[0] + NODE_W, a[1] + NODE_H / 2.0);
-        let stub = class != "edge on" && class != "edge hl" && view.hubs.is_some_and(|h| h.contains_key(to));
+        let (x1, y1) = pts[0];
+        let lit = class == "edge on" || class == "edge hl";
+        let stub = !lit && view.hubs.is_some_and(|h| h.contains_key(to));
         if stub {
             let color = nodes.get(to.as_str()).map(|n| graph::kind_color(&n.kind)).unwrap_or("#8a909c");
             out.push_str(&format!(
@@ -613,14 +645,14 @@ fn edges_svg(
             ));
             continue;
         }
-        let (x2, y2) = (b[0], b[1] + NODE_H / 2.0);
-        let dx = ((x2 - x1).abs() / 2.0).max(50.0);
-        out.push_str(&format!(
-            r#"<path class="{class}" d="M{x1:.1},{y1:.1} C{:.1},{y1:.1} {:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#{marker})"/>"#,
-            x1 + dx,
-            x2 - dx,
+        // Links share trunks, so lit links are drawn last to stay on top of the dimmed ones.
+        let layer = if lit { &mut on_top } else { &mut out };
+        layer.push_str(&format!(
+            r#"<path class="{class}" d="{}" marker-end="url(#{marker})"/>"#,
+            routing::svg_path(pts, routing::CORNER),
         ));
     }
+    out.push_str(&on_top);
     out.push_str("</svg>");
     out
 }
@@ -989,9 +1021,9 @@ fn GraphCanvas() -> Element {
                 div { class: "select-box", style: "left: {bx}px; top: {by}px; width: {bw}px; height: {bh}px;" }
             }
             div { class: "zoom-controls", onmousedown: move |e| e.stop_propagation(),
-                button { onclick: move |_| zoom_center(1.0 / 1.2), "−" }
-                button { onclick: move |_| zoom_center(1.2), "+" }
-                button { onclick: move |_| *st.fit_request.write() += 1, "Fit" }
+                button { class: "icon-btn", title: "Zoom out", onclick: move |_| zoom_center(1.0 / 1.2), IconSvg { icon: Icon::ZoomOut } }
+                button { class: "icon-btn", title: "Fit the graph", onclick: move |_| *st.fit_request.write() += 1, IconSvg { icon: Icon::Fit } }
+                button { class: "icon-btn", title: "Zoom in", onclick: move |_| zoom_center(1.2), IconSvg { icon: Icon::ZoomIn } }
                 span { class: "zoom-sep" }
                 button {
                     class: if *focus_only.read() { "toggle on" } else { "toggle" },
@@ -1057,7 +1089,7 @@ fn GraphCanvas() -> Element {
                             onclick: move |_| st.show_team(),
                             "Team"
                         }
-                        button { class: "small", onclick: move |_| ghost_menu.set(false), "✕" }
+                        button { class: "icon-btn", title: "Close", onclick: move |_| ghost_menu.set(false), IconSvg { icon: Icon::X } }
                     }
                     div { class: "muted small-text",
                         "Show the graph work on other branches as ghost nodes. Click a ghost to send it to Workbench as context."
@@ -1158,6 +1190,17 @@ fn GraphWorld(
     let st = use_context::<AppState>();
     let marks = use_memo(move || node_marks(st));
     let hub_count = use_memo(move || if *collapse_hubs.read() { hubs(&st.net()) } else { HashMap::new() });
+    // Routing every link is the slow part of drawing, so it reruns only when nodes move or links
+    // change, not on hover or selection. Links into collapsed hubs are routed last: they show as
+    // stubs until lit, so the links always drawn get first pick of the gaps.
+    let routed = use_memo(move || {
+        let mut positions = placed.read().positions.clone();
+        positions.extend(dragged.read().iter().map(|(id, pos)| (id.clone(), *pos)));
+        let mut edges = st.net().edges();
+        edges.sort_by_key(|(_, to)| hub_count.read().contains_key(to));
+        let routes = routing::route(&edges, &positions);
+        (edges, routes)
+    });
 
     let g = st.net();
     let scope = st.current_scope();
@@ -1184,7 +1227,8 @@ fn GraphWorld(
     for (i, id) in path.iter().enumerate() {
         steps.entry(id.as_str()).or_default().push((i + 1).to_string());
     }
-    let edges = g.edges();
+    let routed = routed.read();
+    let (edges, routes) = (&routed.0, &routed.1);
     let by_id = g.by_id();
     let focus: HashSet<String> = match hovered.read().clone() {
         Some(h) if by_id.contains_key(h.as_str()) => HashSet::from([h]),
@@ -1214,9 +1258,9 @@ fn GraphWorld(
     };
     let hub_count = hub_count.read();
     let svg = edges_svg(
-        &edges,
+        edges,
+        routes,
         &by_id,
-        &positions,
         EdgeView { path: &path, focus: &focus, emphasis, hubs: (!hub_count.is_empty()).then_some(&hub_count) },
     );
     let marks = marks.read();
@@ -1245,7 +1289,13 @@ fn GraphWorld(
                 (None, Some(label)) => label.clone(),
                 (None, None) => n.kind.clone(),
             };
-            let tip = if module.is_some() { format!("{}\n\nDouble-click to open the module", n.description) } else { n.description.clone() };
+            let mut tip = n.description.clone();
+            if let Some(d) = n.decisions.last() {
+                tip.push_str(&format!("\n\nLatest decision: {}", d.line()));
+            }
+            if module.is_some() {
+                tip.push_str("\n\nDouble-click to open the module");
+            }
             let sel = if selected.contains(&n.id) { "selected" } else { "" };
             let pulsing = if pulse_id.as_deref() == Some(n.id.as_str()) { "pulse" } else { "" };
             let editing = st.live_edits_of(scope.as_deref(), n);
@@ -1290,6 +1340,7 @@ fn GraphWorld(
                 hub: hub_count.get(&n.id).copied(),
                 module: n.module.clone(),
                 can_link,
+                knowledge: (n.decisions.len(), n.invariants.iter().filter(|i| !i.trim().is_empty()).count()),
             }
         })
         .collect();
@@ -1400,6 +1451,8 @@ struct NodeView {
     hub: Option<usize>,
     module: Option<String>,
     can_link: bool,
+    /// How many decisions and invariants the node records.
+    knowledge: (usize, usize),
 }
 
 #[component]
@@ -1407,7 +1460,7 @@ fn GNode(view: NodeView, drag: Signal<Option<Drag>>, hovered: Signal<Option<Stri
     let mut st = use_context::<AppState>();
     let mut drag = drag;
     let mut hovered = hovered;
-    let NodeView { id, x, y, title, class, color, mark_color, tip, label, status, stale, editing_tip, ghost_tag, steps, hub, module, can_link } =
+    let NodeView { id, x, y, title, class, color, mark_color, tip, label, status, stale, editing_tip, ghost_tag, steps, hub, module, can_link, knowledge } =
         view;
     let mut start_link = move |e: MouseEvent, anchor: String, outgoing: bool| {
         if e.trigger_button() != Some(MouseButton::Primary) {
@@ -1493,6 +1546,12 @@ fn GNode(view: NodeView, drag: Signal<Option<Drag>>, hovered: Signal<Option<Stri
                 }
                 if let Some((n, tip)) = ghost_tag {
                     span { class: "gnode-ghost-tag", title: "{tip}", "⧉ {n}" }
+                }
+                if knowledge.0 > 0 {
+                    span { class: "gnode-knowledge", title: "{knowledge.0} recorded decision(s)", "◆ {knowledge.0}" }
+                }
+                if knowledge.1 > 0 {
+                    span { class: "gnode-knowledge", title: "{knowledge.1} invariant(s)", "⊘ {knowledge.1}" }
                 }
             }
             if !steps.is_empty() {
@@ -1662,6 +1721,12 @@ fn NodePane() -> Element {
     let id_child = id.clone();
     let id_flow = id.clone();
     let id_del = id.clone();
+    let id_know = id.clone();
+    let id_mine = id.clone();
+    let rules_here: Vec<(String, String)> = rules::relevant(&st.rules.read(), Some(std::slice::from_ref(&id)))
+        .into_iter()
+        .map(|r| (r.id.clone(), if r.title.trim().is_empty() { r.body.lines().next().unwrap_or_default().to_string() } else { r.title.clone() }))
+        .collect();
 
     rsx! {
         div { class: "inspector",
@@ -1760,6 +1825,32 @@ fn NodePane() -> Element {
                     let id = id_desc.clone();
                     st.update_net_typing(|g| if let Some(n) = g.node_mut(&id) { n.description = v });
                 },
+            }
+            KnowledgeEditor {
+                decisions: node.decisions.clone(),
+                invariants: node.invariants.clone(),
+                locked,
+                onchange: move |(decisions, invariants): (Vec<Decision>, Vec<String>)| {
+                    let id = id_know.clone();
+                    st.update_net_typing(|g| if let Some(n) = g.node_mut(&id) { n.decisions = decisions; n.invariants = invariants });
+                },
+            }
+            if !rules_here.is_empty() {
+                label { "Rules that apply" }
+                div { class: "chips",
+                    for (rid, title) in rules_here {
+                        span { key: "{rid}", class: "chip", title: "A project rule scoped to this node or the whole project", "{title}" }
+                    }
+                }
+            }
+            div { class: "inspector-actions",
+                button {
+                    class: "small",
+                    disabled: locked || st.chat_busy() || st.job.read().is_some(),
+                    title: "Read this node's commits, comments, tickets and past chats, and record its decisions and invariants",
+                    onclick: move |_| mine_decisions(st, vec![id_mine.clone()]),
+                    "Mine decisions"
+                }
             }
             label { "Inputs — called by" }
             div { class: "chips",
@@ -2167,6 +2258,201 @@ fn SelectionPane() -> Element {
     }
 }
 
+/// The decisions and invariants of a node or module: why it is built the way it is and what
+/// must stay true of it. Each edit hands both lists back through `onchange`.
+#[component]
+fn KnowledgeEditor(decisions: Vec<Decision>, invariants: Vec<String>, locked: bool, onchange: EventHandler<(Vec<Decision>, Vec<String>)>) -> Element {
+    let st = use_context::<AppState>();
+    let mut editing = use_signal(|| None::<usize>);
+    let open_at = *editing.read();
+    let n = decisions.len();
+    let set_decision = {
+        let (decisions, invariants) = (decisions.clone(), invariants.clone());
+        move |i: usize, d: Option<Decision>| {
+            let mut all = decisions.clone();
+            match d {
+                Some(d) if i < all.len() => all[i] = d,
+                Some(d) => all.push(d),
+                None if i < all.len() => {
+                    all.remove(i);
+                }
+                None => {}
+            }
+            onchange.call((all, invariants.clone()));
+        }
+    };
+    let set_invariant = {
+        let (decisions, invariants) = (decisions.clone(), invariants.clone());
+        move |i: usize, text: Option<String>| {
+            let mut all = invariants.clone();
+            match text {
+                Some(t) if i < all.len() => all[i] = t,
+                Some(t) => all.push(t),
+                None if i < all.len() => {
+                    all.remove(i);
+                }
+                None => {}
+            }
+            onchange.call((decisions.clone(), all));
+        }
+    };
+
+    rsx! {
+        label { "Decisions — why it is built this way ({n})" }
+        if decisions.is_empty() {
+            div { class: "muted small-text", "No decisions recorded yet. Agents add them as they change this part; Mine decisions reads them from its history." }
+        }
+        div { class: "decisions",
+            for (i, d) in decisions.iter().cloned().enumerate().rev() {
+                if open_at == Some(i) && !locked {
+                    DecisionForm {
+                        key: "edit-{i}",
+                        decision: d.clone(),
+                        onsave: {
+                            let set = set_decision.clone();
+                            move |d: Decision| {
+                                set(i, Some(d));
+                                editing.set(None);
+                            }
+                        },
+                        onremove: {
+                            let set = set_decision.clone();
+                            move |_| {
+                                set(i, None);
+                                editing.set(None);
+                            }
+                        },
+                    }
+                } else {
+                    div { key: "view-{i}", class: "decision",
+                        onclick: move |_| if !locked { editing.set(Some(i)) },
+                        title: if locked { "" } else { "Click to edit" },
+                        div { class: "decision-what", "{d.decision}" }
+                        if !d.why.trim().is_empty() {
+                            div { class: "decision-why", "{d.why}" }
+                        }
+                        if !d.instead_of.trim().is_empty() {
+                            div { class: "decision-instead", "Instead of {d.instead_of}" }
+                        }
+                        div { class: "decision-meta",
+                            if !d.source.trim().is_empty() {
+                                {source_chip(st, d.source.clone())}
+                            }
+                            if !d.date.trim().is_empty() {
+                                span { class: "muted", "{d.date}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if open_at == Some(n) && !locked {
+            DecisionForm {
+                decision: Decision { source: format!("chat {}", graph::today()), date: graph::today(), ..Default::default() },
+                onsave: {
+                    let set = set_decision.clone();
+                    move |d: Decision| {
+                        set(n, Some(d));
+                        editing.set(None);
+                    }
+                },
+                onremove: move |_| editing.set(None),
+            }
+        } else if !locked {
+            button { class: "small add-row", onclick: move |_| editing.set(Some(n)), "+ Decision" }
+        }
+        label { "Invariants — must stay true ({invariants.len()})" }
+        ul { class: "invariants",
+            for (i, text) in invariants.iter().cloned().enumerate() {
+                li { key: "{i}",
+                    input {
+                        value: "{text}",
+                        disabled: locked,
+                        placeholder: "e.g. Never blocks the UI thread",
+                        onchange: {
+                            let set = set_invariant.clone();
+                            move |e: FormEvent| set(i, Some(e.value()))
+                        },
+                    }
+                    if !locked {
+                        span {
+                            class: "chip-x",
+                            title: "Remove this invariant",
+                            onclick: {
+                                let set = set_invariant.clone();
+                                move |_| set(i, None)
+                            },
+                            "✕"
+                        }
+                    }
+                }
+            }
+        }
+        if !locked {
+            button {
+                class: "small add-row",
+                onclick: {
+                    let set = set_invariant.clone();
+                    let at = invariants.len();
+                    move |_| set(at, Some(String::new()))
+                },
+                "+ Invariant"
+            }
+        }
+    }
+}
+
+/// A decision's source. When it names a file of the project, clicking opens the file.
+fn source_chip(mut st: AppState, source: String) -> Element {
+    let path = source.split_whitespace().find(|w| w.contains('/') || w.contains('.')).map(|w| w.trim_matches(|c: char| c == '`' || c == ',' || c == ':').to_string());
+    let file = path.filter(|p| st.cwd.peek().join(p).is_file());
+    match file {
+        Some(f) => rsx! {
+            span {
+                class: "chip chip-click decision-source",
+                title: "Open {f}",
+                onclick: move |e: MouseEvent| {
+                    e.stop_propagation();
+                    st.open(&f);
+                },
+                "{source}"
+            }
+        },
+        None => rsx! { span { class: "chip decision-source", "{source}" } },
+    }
+}
+
+/// Edits one decision; saves on Done, and Remove drops it (or cancels a new one).
+#[component]
+fn DecisionForm(decision: Decision, onsave: EventHandler<Decision>, onremove: EventHandler<()>) -> Element {
+    let mut d = use_signal(|| decision.clone());
+    let field = move |label: &'static str, placeholder: &'static str, get: fn(&Decision) -> &String, set: fn(&mut Decision, String)| {
+        rsx! {
+            input {
+                value: "{get(&d.read())}",
+                placeholder: "{placeholder}",
+                title: "{label}",
+                oninput: move |e| set(&mut d.write(), e.value()),
+            }
+        }
+    };
+    rsx! {
+        div { class: "decision editing",
+            {field("Decision", "What was decided", |d| &d.decision, |d, v| d.decision = v)}
+            {field("Why", "Why: the reason or the constraint that forced it", |d| &d.why, |d, v| d.why = v)}
+            {field("Instead of", "Instead of: the alternative not taken (optional)", |d| &d.instead_of, |d, v| d.instead_of = v)}
+            div { class: "decision-meta",
+                {field("Source", "Source: commit, ticket, chat date or file", |d| &d.source, |d, v| d.source = v)}
+                {field("Date", "YYYY-MM-DD", |d| &d.date, |d, v| d.date = v)}
+            }
+            div { class: "inspector-actions",
+                button { class: "small primary", disabled: d.read().decision.trim().is_empty(), onclick: move |_| onsave.call(d.peek().clone()), "Done" }
+                button { class: "small", onclick: move |_| onremove.call(()), "Remove" }
+            }
+        }
+    }
+}
+
 #[component]
 fn ModulePane(id: String) -> Element {
     let mut st = use_context::<AppState>();
@@ -2196,6 +2482,7 @@ fn ModulePane(id: String) -> Element {
     let id_desc = id.clone();
     let id_rev = id.clone();
     let id_del = id.clone();
+    let id_know = id.clone();
     let n_uses = uses.len();
     let color = graph::kind_color("module");
 
@@ -2248,6 +2535,15 @@ fn ModulePane(id: String) -> Element {
                     let v = e.value();
                     let id = id_desc.clone();
                     st.update_graph_typing(|g| if let Some(m) = g.module_mut(&id) { m.description = v });
+                },
+            }
+            KnowledgeEditor {
+                decisions: module.decisions.clone(),
+                invariants: module.invariants.clone(),
+                locked,
+                onchange: move |(decisions, invariants): (Vec<Decision>, Vec<String>)| {
+                    let id = id_know.clone();
+                    st.update_graph_typing(|g| if let Some(m) = g.module_mut(&id) { m.decisions = decisions; m.invariants = invariants });
                 },
             }
             label { "Used in ({n_uses})" }
@@ -2616,17 +2912,12 @@ fn ChangesPane() -> Element {
                 {
                     let n = c.node().clone();
                     let is_module = c.subject == Subject::Module;
-                    let what = if is_module { "module" } else { "node" };
-                    let (sign, cls, detail) = match &c.kind {
-                        ChangeKind::Added => ("+", "added", format!("new {what}")),
-                        ChangeKind::Removed => ("−", "removed", format!("{what} removed")),
-                        ChangeKind::Modified(f) => ("~", "modified", f.iter().map(|f| f.label()).collect::<Vec<_>>().join(", ")),
+                    let title = match (&c.scope, is_module) {
+                        (_, true) => format!("▣ {}", n.title),
+                        (Some(m), false) => format!("▣ {} › {}", st.graph.peek().module_title(m), n.title),
+                        (None, false) => n.title.clone(),
                     };
-                    let place = match (&c.scope, is_module) {
-                        (Some(m), false) => format!(" · in ▣ {}", st.graph.peek().module_title(m)),
-                        _ => String::new(),
-                    };
-                    let title = if is_module { format!("▣ {}", n.title) } else { n.title.clone() };
+                    let file = change_diff(st, c, &title);
                     let removed = c.kind == ChangeKind::Removed;
                     let key = c.key();
                     let show_scope = c.scope.clone();
@@ -2634,42 +2925,38 @@ fn ChangesPane() -> Element {
                     let rev_scope = c.scope.clone();
                     let subject = c.subject;
                     let id_rev = n.id.clone();
-                    let intent = matches!(&c.kind, ChangeKind::Modified(f) if f.contains(&Field::Description));
+                    let intent = matches!(&c.kind, ChangeKind::Modified(f) if f.iter().any(|f| f.is_intent()));
                     let verification = st.verification.read().get(&key).cloned();
-                    rsx! {
-                        div { key: "{key}", class: "change {cls}",
-                            span { class: "change-sign", "{sign}" }
-                            div { class: "change-body",
-                                div { class: "change-title",
-                                    "{title}"
-                                    if intent {
-                                        span {
-                                            class: "intent-flag",
-                                            title: "This rewrites what the node is meant to do. Review it like a change to .env: the code will be changed to match it.",
-                                            "⚠ intent"
-                                        }
-                                    }
-                                }
-                                div { class: "muted small-text", "{detail}{place}" }
-                                match verification {
-                                    Some(None) => rsx! { div { class: "muted small-text", "Verifying that the code matches the description…" } },
-                                    Some(Some(why)) => rsx! { div { class: "warn small-text", title: "The agent's work on this node stays pending until it passes", "⚠ Not verified: {why}" } },
-                                    None => rsx! {},
-                                }
+                    let actions = rsx! {
+                        if intent {
+                            span {
+                                class: "intent-flag",
+                                title: "This rewrites what the node is meant to do. Review it like a change to .env: the code will be changed to match it.",
+                                "⚠ intent"
                             }
-                            if !removed {
-                                button {
-                                    class: "small",
-                                    onclick: move |_| st.show_change(show_scope.clone(), show_id.clone()),
-                                    "Show"
-                                }
-                            }
+                        }
+                        if !removed {
                             button {
                                 class: "small",
-                                disabled: locked,
-                                onclick: move |_| st.revert_change(rev_scope.clone(), subject, &id_rev),
-                                "Revert"
+                                onclick: move |_| st.show_change(show_scope.clone(), show_id.clone()),
+                                "Show"
                             }
+                        }
+                        button {
+                            class: "small",
+                            disabled: locked,
+                            onclick: move |_| st.revert_change(rev_scope.clone(), subject, &id_rev),
+                            "Revert"
+                        }
+                    };
+                    rsx! {
+                        div { key: "{key}", class: "change-diff",
+                            match verification {
+                                Some(None) => rsx! { div { class: "muted small-text", "Verifying that the code matches the description…" } },
+                                Some(Some(why)) => rsx! { div { class: "warn small-text", title: "The agent's work on this node stays pending until it passes", "⚠ Not verified: {why}" } },
+                                None => rsx! {},
+                            }
+                            FileDiffView { file, local: false, actions }
                         }
                     }
                 }
@@ -2745,6 +3032,23 @@ fn ChangesPane() -> Element {
     }
 }
 
+/// A graph change as a code diff: the node (or module) written out as text the way the node
+/// history does, before against after, under `title`.
+fn change_diff(st: AppState, c: &graph::Change, title: &str) -> git::FileDiff {
+    let (before, after) = match c.subject {
+        Subject::Module => {
+            let base = st.baseline.peek();
+            let before = base.as_ref().and_then(|g| g.module(&c.id)).map(node_history::render_module);
+            (before, st.graph.peek().module(&c.id).map(node_history::render_module))
+        }
+        Subject::Node => {
+            let render = |n: &Node| node_history::links_one_per_line(&node_history::render_node(n));
+            (c.before.as_ref().map(render), c.after.as_ref().map(render))
+        }
+    };
+    node_history::line_diff(title, &before.unwrap_or_default(), &after.unwrap_or_default())
+}
+
 /// Why a node may be stale, for its badge and the Changes pane.
 fn stale_text(s: &claims::Stale) -> String {
     match &s.flow {
@@ -2761,18 +3065,19 @@ fn ProposalsList() -> Element {
     let locked = st.graph_locked() || st.turn_start.read().is_some();
     let entries = st.ledger.read().clone();
     let g = st.graph.read().clone();
-    let items: Vec<(String, String, String, Vec<(Op, String)>)> = ledger::open_proposals(&entries)
+    let items: Vec<(String, String, String, (Vec<(Op, String)>, Vec<(Op, String)>))> = ledger::open_proposals(&entries)
         .into_iter()
         .filter_map(|e| {
             let (scope, subject, id) = ledger::merge_target(&e.op)?;
             let ledger::Op::NodeMerge { patch, .. } = &e.op else { return None };
-            let proposed = patch.get("description")?.as_str().unwrap_or_default();
             let (title, current) = match subject {
-                Subject::Module => g.module(id).map(|m| (format!("▣ {}", m.title), m.description.clone()))?,
-                Subject::Node => g.net(scope).and_then(|n| n.node(id)).map(|n| (n.title.clone(), n.description.clone()))?,
+                Subject::Module => g.module(id).map(|m| (format!("▣ {}", m.title), m.as_node()))?,
+                Subject::Node => g.net(scope).and_then(|n| n.node(id)).map(|n| (n.title.clone(), n.clone()))?,
             };
+            let proposed = ledger::with_patch(&current, patch);
+            let changes = node_history::intent_changes(&node_history::render_node(&current), &node_history::render_node(&proposed));
             let who = e.author.clone().map(|a| format!("an agent run by {a}")).unwrap_or_else(|| "an agent".into());
-            Some((e.id.clone(), title, who, node_history::prose_diff(&current, proposed)))
+            Some((e.id.clone(), title, who, changes))
         })
         .collect();
     if items.is_empty() {
@@ -2782,9 +3087,9 @@ fn ProposalsList() -> Element {
         div { class: "hint-box claim-warning",
             div { class: "claim-warning-head", b { "⚠ Proposed intent changes ({items.len()})" } }
             div { class: "small-text",
-                "Agents may not rewrite what a node is meant to do. Accept a proposal to make it the node's description, or reject it."
+                "Agents may not rewrite what a node is meant to do or what was decided for it. Accept a proposal to apply it to the node, or reject it."
             }
-            for (id, title, who, changes) in items {
+            for (id, title, who, (facts, prose)) in items {
                 {
                     let accept_id = id.clone();
                     let reject_id = id.clone();
@@ -2797,8 +3102,84 @@ fn ProposalsList() -> Element {
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&accept_id, true), "Accept" }
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&reject_id, false), "Reject" }
                             }
-                            {prose_view(changes)}
+                            {intent_list(facts, prose)}
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One row of the decisions timeline: where the decision was made and the decision.
+struct TimelineRow {
+    module: Option<String>,
+    /// The node it belongs to; None for a decision of a module itself.
+    node: Option<String>,
+    place: String,
+    decision: Decision,
+}
+
+/// Every decision in the graph, newest first. Undated decisions go last, in graph order.
+fn decision_timeline(root: &Graph) -> Vec<TimelineRow> {
+    let mut rows = Vec::new();
+    for m in &root.modules {
+        for d in &m.decisions {
+            rows.push(TimelineRow { module: Some(m.id.clone()), node: None, place: format!("▣ {}", m.title), decision: d.clone() });
+        }
+    }
+    for (scope, net) in root.nets() {
+        for n in &net.nodes {
+            let place = match scope {
+                Some(m) => format!("▣ {} › {}", root.module_title(m), n.title),
+                None => n.title.clone(),
+            };
+            for d in &n.decisions {
+                rows.push(TimelineRow { module: scope.map(String::from), node: Some(n.id.clone()), place: place.clone(), decision: d.clone() });
+            }
+        }
+    }
+    rows.sort_by(|a, b| b.decision.date.cmp(&a.decision.date));
+    rows
+}
+
+/// How the app was steered: every recorded decision, newest first. Clicking one shows its node.
+#[component]
+fn DecisionsPane() -> Element {
+    let mut st = use_context::<AppState>();
+    let mut filter = use_signal(String::new);
+    let needle = filter.read().to_lowercase();
+    let rows: Vec<TimelineRow> = decision_timeline(&st.graph.read())
+        .into_iter()
+        .filter(|r| needle.is_empty() || format!("{} {}", r.place, r.decision.line()).to_lowercase().contains(&needle))
+        .collect();
+    rsx! {
+        div { class: "history-pane",
+            input { class: "filter", placeholder: "Filter decisions…", value: "{filter}", oninput: move |e| filter.set(e.value()) }
+            if rows.is_empty() {
+                div { class: "muted small-text",
+                    "No decisions recorded yet. Agents record them as they change the app; Mine decisions in the toolbar reads them from commits, comments, tickets and past chats."
+                }
+            }
+            for (i, r) in rows.into_iter().enumerate() {
+                div {
+                    key: "{i}",
+                    class: if r.node.is_some() { "decision chip-click" } else { "decision" },
+                    onclick: move |_| if let Some(id) = r.node.clone() { st.focus_node(r.module.clone(), id) },
+                    div { class: "decision-meta",
+                        b { "{r.place}" }
+                        div { class: "spacer" }
+                        span { class: "muted", "{r.decision.date}" }
+                    }
+                    div { class: "decision-what", "{r.decision.decision}" }
+                    if !r.decision.why.trim().is_empty() {
+                        div { class: "decision-why", "{r.decision.why}" }
+                    }
+                    if !r.decision.instead_of.trim().is_empty() {
+                        div { class: "decision-instead", "Instead of {r.decision.instead_of}" }
+                    }
+                    if !r.decision.source.trim().is_empty() {
+                        div { class: "decision-meta", span { class: "chip decision-source", "{r.decision.source}" } }
                     }
                 }
             }
