@@ -278,6 +278,8 @@ pub enum ChatFocus {
 /// Where the folded rows of the projects sidebar are saved.
 const COLLAPSED_FILE: &str = "sidebar_collapsed.json";
 const HIDDEN_WORKTREES_FILE: &str = "sidebar_hidden_worktrees.json";
+const REPO_BUMP_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+const TYPING_PAUSE: std::time::Duration = std::time::Duration::from_millis(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -320,6 +322,16 @@ impl Layout {
 pub struct AppState {
     pub graph: Signal<Graph>,
     pub baseline: Signal<Option<Graph>>,
+    /// The network of the open scope, recomputed only when the graph or the scope changes.
+    pub current_net: Memo<Graph>,
+    /// The changes since the baseline, computed once per graph change for every view.
+    pub graph_changes: Memo<Vec<Change>>,
+    /// Counts typed graph edits, so only the last one of a burst saves (see `update_graph_typing`).
+    pub typing_edits: Signal<u64>,
+    /// The typed edit the last save included. Differs from `typing_edits` while typing is unsaved.
+    pub typing_saved: Signal<u64>,
+    /// True while `bump_repo_soon` waits to bump.
+    pub repo_bump_queued: Signal<bool>,
     pub turn_start: Signal<Option<Graph>>,
     /// The files already changed when the tracked chat turn started (see `unowned_changes`).
     pub turn_dirty_before: Signal<Option<Vec<String>>>,
@@ -397,9 +409,24 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(cwd: PathBuf) -> Self {
+        let graph = Signal::new(Graph::default());
+        let baseline: Signal<Option<Graph>> = Signal::new(None);
+        let scope: Signal<Vec<String>> = Signal::new(Vec::new());
         Self {
-            graph: Signal::new(Graph::default()),
-            baseline: Signal::new(None),
+            graph,
+            baseline,
+            current_net: Memo::new(move || {
+                let scope = scope.read().last().cloned();
+                graph.read().net(scope.as_deref()).cloned().unwrap_or_default()
+            }),
+            graph_changes: Memo::new(move || {
+                let empty = Graph::default();
+                let base = baseline.read();
+                graph::diff(base.as_ref().unwrap_or(&empty), &graph.read())
+            }),
+            typing_edits: Signal::new(0),
+            typing_saved: Signal::new(0),
+            repo_bump_queued: Signal::new(false),
             turn_start: Signal::new(None),
             turn_dirty_before: Signal::new(None),
             turn_user_edits: Signal::new(HashSet::new()),
@@ -409,7 +436,7 @@ impl AppState {
             ghost_branches: Signal::new(Vec::new()),
             ghosts: Signal::new(Vec::new()),
             ghost_picks: Signal::new(Vec::new()),
-            scope: Signal::new(Vec::new()),
+            scope,
             related_repos: Signal::new(Vec::new()),
             mcp_servers: Signal::new(Vec::new()),
             mcp_status: Signal::new(Vec::new()),
@@ -462,6 +489,21 @@ impl AppState {
 
     pub fn bump_repo(&mut self) {
         *self.repo_version.write() += 1;
+    }
+
+    /// For a stream of file edits: bumps the repo version at most once per `REPO_BUMP_PAUSE`,
+    /// so a run that edits many files doesn't reload git status, diffs and the graph per edit.
+    pub fn bump_repo_soon(&mut self) {
+        if *self.repo_bump_queued.peek() {
+            return;
+        }
+        self.repo_bump_queued.set(true);
+        let mut st = *self;
+        dioxus::dioxus_core::spawn_forever(async move {
+            tokio::time::sleep(REPO_BUMP_PAUSE).await;
+            st.repo_bump_queued.set(false);
+            st.bump_repo();
+        });
     }
 
     pub fn rel_path(&self, p: &Path) -> String {
@@ -652,6 +694,8 @@ impl AppState {
     }
 
     pub fn sync_workbench_from_disk(&mut self) {
+        // Typed edits that wait for a pause would otherwise be replaced by the file on disk.
+        self.save_typing();
         let cwd = self.cwd.peek().clone();
         if let Ok(entries) = node_history::load(&cwd)
             && self.node_history.peek().entries != entries
@@ -702,8 +746,58 @@ impl AppState {
     }
 
     pub fn update_graph(&mut self, f: impl FnOnce(&mut Graph)) {
-        if self.job.peek().is_some() {
+        if self.edit_graph(f) {
+            self.commit_graph();
+        }
+    }
+
+    /// For typing in a text field: changes the graph at once but saves it and records the
+    /// history only when typing pauses, so a burst of keystrokes is one save and one ledger entry.
+    pub fn update_graph_typing(&mut self, f: impl FnOnce(&mut Graph)) {
+        if !self.edit_graph(f) {
             return;
+        }
+        let edit = *self.typing_edits.peek() + 1;
+        self.typing_edits.set(edit);
+        let mut st = *self;
+        // On the root scope, so the save still happens when the pane closes meanwhile.
+        dioxus::dioxus_core::spawn_forever(async move {
+            tokio::time::sleep(TYPING_PAUSE).await;
+            if *st.typing_edits.peek() == edit {
+                st.save_typing();
+            }
+        });
+    }
+
+    pub fn update_net_typing(&mut self, f: impl FnOnce(&mut Graph)) {
+        let scope = self.scope.peek().last().cloned();
+        self.update_graph_typing(|g| {
+            if let Some(net) = g.net_mut(scope.as_deref()) {
+                f(net);
+            }
+        });
+    }
+
+    /// Saves typed edits that wait for a pause in typing.
+    pub fn save_typing(&mut self) {
+        if *self.typing_saved.peek() != *self.typing_edits.peek() {
+            self.commit_graph();
+        }
+    }
+
+    /// Saves the graph and records the change in the history and the ledger.
+    fn commit_graph(&mut self) {
+        let typed = *self.typing_edits.peek();
+        self.typing_saved.set(typed);
+        self.save_graph();
+        self.record_history(Source::Person);
+    }
+
+    /// Changes the graph in memory and notes what the person changed during a turn.
+    /// False when a job holds the graph, so nothing changed.
+    fn edit_graph(&mut self, f: impl FnOnce(&mut Graph)) -> bool {
+        if self.job.peek().is_some() {
+            return false;
         }
         let before = self.turn_start.peek().is_some().then(|| self.graph.peek().clone());
         f(&mut self.graph.write());
@@ -716,8 +810,7 @@ impl AppState {
         if valid < path.len() {
             self.set_scope(path[..valid].to_vec());
         }
-        self.save_graph();
-        self.record_history(Source::Person);
+        true
     }
 
     fn disk_source(&self) -> Source {
@@ -912,9 +1005,9 @@ impl AppState {
         self.scope.read().last().cloned()
     }
 
-    pub fn net(&self) -> Graph {
-        let scope = self.scope.read().last().cloned();
-        self.graph.read().net(scope.as_deref()).cloned().unwrap_or_default()
+    /// The open scope's network, borrowed. Drop it before writing the graph.
+    pub fn net(&self) -> ReadableRef<'_, Memo<Graph>> {
+        self.current_net.read()
     }
 
     pub fn net_peek(&self) -> Graph {
@@ -1115,10 +1208,9 @@ impl AppState {
         }
     }
 
-    pub fn changes(&self) -> Vec<Change> {
-        let empty = Graph::default();
-        let base = self.baseline.read();
-        graph::diff(base.as_ref().unwrap_or(&empty), &self.graph.read())
+    /// The changes since the baseline, borrowed. Drop it before writing the graph.
+    pub fn changes(&self) -> ReadableRef<'_, Memo<Vec<Change>>> {
+        self.graph_changes.read()
     }
 
     pub fn mark_in_sync(&mut self) {

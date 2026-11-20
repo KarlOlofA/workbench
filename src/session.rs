@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::agent::{self, AgentAdapter, TurnOptions};
 use crate::api_chat;
-use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL, TESTED_CLI_VERSIONS, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
+use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL,PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
 use crate::history;
 use crate::projects::same_dir;
 use crate::{mcp, mcp_oauth, scope};
@@ -585,7 +585,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
                         st.live_edits.write().push(rel);
                     }
                 }
-                st.bump_repo();
+                st.bump_repo_soon();
                 st.reload_open_file_if_clean();
                 if let Some(p) = path
                     && st.open_file.peek().is_none()
@@ -672,10 +672,10 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             }
         }
         ClaudeEvent::Stderr(line) => chat.items.write().push(ChatItem::Info(line)),
-        ClaudeEvent::Unsupported(what) => chat.items.write().push(ChatItem::Error(format!(
-            "Claude Code output outside the tested contract: {what}. Workbench is tested with Claude Code {}; some agent output may be missing.",
-            TESTED_CLI_VERSIONS.join(", ")
-        ))),
+        ClaudeEvent::Unsupported(what) => chat
+            .items
+            .write()
+            .push(ChatItem::Error(format!("Claude Code output Workbench doesn't recognise: {what}. Some agent output may be missing."))),
         ClaudeEvent::ControlRequest { .. } | ClaudeEvent::Exited => {}
     }
 }

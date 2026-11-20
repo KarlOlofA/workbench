@@ -184,7 +184,7 @@ fn Header() -> Element {
     let mut st = use_context::<AppState>();
     let cwd = st.cwd.read().display().to_string();
     let project = st.current_project();
-    let is_repo = git::is_repo(&st.cwd.read());
+    let is_repo = *use_memo(move || git::is_repo(&st.cwd.read())).read();
     let chat = *st.active_chat.read();
     let model = chat.map(|c| c.model.read().clone()).unwrap_or_default();
     let full_auto = chat.is_some_and(|c| *c.chat_mode.read() == ChatMode::FullAuto);
@@ -272,8 +272,12 @@ fn BranchMenu() -> Element {
     let mut cursor = use_signal(|| 0usize);
     let mut working = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
-    let _ = st.repo_version.read();
-    let current = git::current_branch(&st.cwd.read()).unwrap_or_else(|| "?".into());
+    let current = use_memo(move || {
+        let _ = st.repo_version.read();
+        git::current_branch(&st.cwd.read()).unwrap_or_else(|| "?".into())
+    })
+    .read()
+    .clone();
     let busy = st.chat_busy();
     let is_open = *open.read();
     let is_working = *working.read();

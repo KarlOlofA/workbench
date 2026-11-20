@@ -58,7 +58,9 @@ fn linkify_words(text: &str, cwd: &Path) -> String {
         }
         // Punctuation around a path in a sentence isn't part of it: "see src/a.rs."
         let core = word.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | '"' | '\'' | '“' | '”')).trim_end_matches(['.', ':']);
-        match (!core.is_empty()).then(|| file_ref(core, cwd, false)).flatten() {
+        // Only words with a dot or a slash can name a file; checking the disk for the rest is waste.
+        let maybe_file = core.contains(['.', '/']);
+        match maybe_file.then(|| file_ref(core, cwd, false)).flatten() {
             Some(link) => {
                 let start = word.find(core).unwrap_or(0);
                 out.push_str(&escape(&word[..start]));

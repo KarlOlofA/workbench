@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -575,8 +576,14 @@ struct EdgeView<'a> {
     hubs: Option<&'a HashMap<String, usize>>,
 }
 
-fn edges_svg(g: &Graph, positions: &HashMap<String, [f64; 2]>, view: EdgeView) -> String {
-    let on_path = |a: &str, b: &str| view.path.windows(2).any(|w| (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a));
+fn edges_svg(
+    edges: &[(String, String)],
+    nodes: &HashMap<&str, &Node>,
+    positions: &HashMap<String, [f64; 2]>,
+    view: EdgeView,
+) -> String {
+    let on_path: HashSet<(&str, &str)> =
+        view.path.windows(2).flat_map(|w| [(w[0].as_str(), w[1].as_str()), (w[1].as_str(), w[0].as_str())]).collect();
     let mut out = String::from(
         r##"<svg class="edges-svg" width="1" height="1"><defs>
 <marker id="wb-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5c6370"/></marker>
@@ -584,21 +591,21 @@ fn edges_svg(g: &Graph, positions: &HashMap<String, [f64; 2]>, view: EdgeView) -
 <marker id="wb-arrow-hl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#c8ced8"/></marker>
 </defs>"##,
     );
-    for (from, to) in g.edges() {
-        let (Some(a), Some(b)) = (positions.get(&from), positions.get(&to)) else { continue };
+    for (from, to) in edges {
+        let (Some(a), Some(b)) = (positions.get(from), positions.get(to)) else { continue };
         let (class, marker) = match view.emphasis {
-            _ if on_path(&from, &to) => ("edge on", "wb-arrow-on"),
+            _ if on_path.contains(&(from.as_str(), to.as_str())) => ("edge on", "wb-arrow-on"),
             Emphasis::Path { dim_rest: true } => ("edge dim", "wb-arrow"),
-            Emphasis::Focus { .. } if view.focus.contains(&from) || view.focus.contains(&to) => ("edge hl", "wb-arrow-hl"),
+            Emphasis::Focus { .. } if view.focus.contains(from) || view.focus.contains(to) => ("edge hl", "wb-arrow-hl"),
             Emphasis::Focus { hide_rest: true } => continue,
             Emphasis::Focus { hide_rest: false } => ("edge dim", "wb-arrow"),
             Emphasis::Faint => ("edge faint", "wb-arrow"),
             _ => ("edge", "wb-arrow"),
         };
         let (x1, y1) = (a[0] + NODE_W, a[1] + NODE_H / 2.0);
-        let stub = class != "edge on" && class != "edge hl" && view.hubs.is_some_and(|h| h.contains_key(&to));
+        let stub = class != "edge on" && class != "edge hl" && view.hubs.is_some_and(|h| h.contains_key(to));
         if stub {
-            let color = g.node(&to).map(|n| graph::kind_color(&n.kind)).unwrap_or("#8a909c");
+            let color = nodes.get(to.as_str()).map(|n| graph::kind_color(&n.kind)).unwrap_or("#8a909c");
             out.push_str(&format!(
                 r#"<path class="{class} stub" style="stroke: {color}" d="M{x1:.1},{y1:.1} L{:.1},{y1:.1}"/><circle class="{class} stub-end" style="fill: {color}" cx="{:.1}" cy="{y1:.1}" r="3"/>"#,
                 x1 + 22.0,
@@ -618,6 +625,74 @@ fn edges_svg(g: &Graph, positions: &HashMap<String, [f64; 2]>, view: EdgeView) -
     out
 }
 
+/// Where every node and ghost node sits. Recomputed only when the network or the ghosts change.
+#[derive(PartialEq)]
+struct Placed {
+    positions: HashMap<String, [f64; 2]>,
+    ghost: ghost::Layer,
+}
+
+/// What the canvas shows on nodes besides their title. Recomputed only when the graph, the
+/// baseline, the ghosts or the loaded references change, not on pan, hover or drag.
+#[derive(PartialEq)]
+struct NodeMarks {
+    status: HashMap<String, &'static str>,
+    stale: HashMap<String, String>,
+    invalid: HashMap<String, Vec<usize>>,
+    modules: HashMap<String, (String, usize, bool)>,
+    refs: HashMap<String, String>,
+}
+
+fn node_marks(st: AppState) -> NodeMarks {
+    let g = st.net();
+    let scope = st.current_scope();
+    let root = st.graph.read();
+    let changes = st.changes();
+    // Nodes I'm editing that a ghost branch also changes or depends on.
+    let invalid = {
+        let empty = Graph::default();
+        let base = st.baseline.read();
+        let mine = claims::claim(base.as_ref().unwrap_or(&empty), &root, &changes);
+        ghost::invalidated(&mine, &st.ghosts.read(), scope.as_deref())
+    };
+    let changed_modules: HashSet<&str> = changes.iter().filter_map(|c| c.scope.as_deref()).collect();
+    let stale = claims::stale(&root, &changes).into_iter().filter(|s| s.node.0 == scope).map(|s| (s.node.1.clone(), stale_text(&s))).collect();
+    let status = changes
+        .iter()
+        .filter(|c| c.subject == Subject::Node && c.scope == scope)
+        .filter_map(|c| match c.kind {
+            ChangeKind::Added => Some((c.id.clone(), "added")),
+            ChangeKind::Modified(_) => Some((c.id.clone(), "modified")),
+            ChangeKind::Removed => None,
+        })
+        .collect();
+    let modules = g
+        .nodes
+        .iter()
+        .filter_map(|n| n.module.as_ref())
+        .map(|m| {
+            let (title, count) = root.module(m).map(|x| (x.title.clone(), x.net.nodes.len())).unwrap_or_else(|| (format!("missing: {m}"), 0));
+            (m.clone(), (title, count, changed_modules.contains(m.as_str())))
+        })
+        .collect();
+    let refs = {
+        let cwd = st.cwd.read();
+        let loaded = st.refs.read();
+        g.nodes
+            .iter()
+            .filter(|n| n.is_reference())
+            .map(|n| {
+                let r = n.reference.clone().unwrap_or_default();
+                let label = reference::parse(&cwd, &r.source).map(|s| s.label()).unwrap_or_else(|| "no source".into());
+                let wb = matches!(loaded.get(&reference::key(&r.source)), Some(RefState::Ready(Some(_))));
+                let picked = if r.nodes.is_empty() { String::new() } else { format!(" · {}", r.nodes.len()) };
+                (n.id.clone(), format!("↗ {label}{}{picked}", if wb { " ◆" } else { "" }))
+            })
+            .collect()
+    };
+    NodeMarks { status, stale, invalid, modules, refs }
+}
+
 #[component]
 fn GraphCanvas() -> Element {
     let mut st = use_context::<AppState>();
@@ -635,6 +710,15 @@ fn GraphCanvas() -> Element {
     let mut panning = use_signal(|| false);
     // The node that glows after the chat focused it.
     let mut pulse = use_signal(|| None::<String>);
+    // Where the dragged nodes are now. Written to the graph once, when the drag ends.
+    let mut dragged = use_signal(HashMap::<String, [f64; 2]>::new);
+    let placed = use_memo(move || {
+        let g = st.net();
+        let scope = st.current_scope();
+        let mut positions = g.positions();
+        let ghost = ghost::layer(&g, scope.as_deref(), &st.ghosts.read(), &mut positions);
+        Placed { positions, ghost }
+    });
 
     let refresh_branches = move || {
         let cwd = st.cwd.peek().clone();
@@ -722,6 +806,16 @@ fn GraphCanvas() -> Element {
             }
             Some(Drag::Node { moved: true, .. }) => {
                 arrange_undo.set(None);
+                let moved = dragged.take();
+                let scope = st.scope.peek().last().cloned();
+                if let Some(g) = st.graph.write().net_mut(scope.as_deref()) {
+                    g.pin_all();
+                    for n in g.nodes.iter_mut() {
+                        if let Some(p) = moved.get(&n.id) {
+                            n.pos = Some(*p);
+                        }
+                    }
+                }
                 st.save_graph();
             }
             Some(Drag::Node { id, moved: false, shift, .. }) => node_clicked(st, id, shift),
@@ -731,8 +825,7 @@ fn GraphCanvas() -> Element {
                 let world = |x: f64, y: f64| ((x - ox - px) / z, (y - oy - py) / z);
                 let (x0, y0) = world(sx.min(cx), sy.min(cy));
                 let (x1, y1) = world(sx.max(cx), sy.max(cy));
-                let g = st.net_peek();
-                let hits = nodes_in_box(&g, &g.positions(), (x0, y0, x1, y1));
+                let hits = nodes_in_box(&st.net_peek(), &placed.peek().positions, (x0, y0, x1, y1));
                 if additive {
                     let mut sel = st.selected.write();
                     for id in hits {
@@ -773,23 +866,13 @@ fn GraphCanvas() -> Element {
                 if (!moved && dx.abs() + dy.abs() < 3.0 / z) || st.job.peek().is_some() {
                     return;
                 }
-                {
-                    let scope = st.scope.peek().last().cloned();
-                    let mut root = st.graph.write();
-                    let Some(g) = root.net_mut(scope.as_deref()) else { return };
-                    if !moved {
-                        g.pin_all();
-                        let auto = g.positions();
-                        let sel = st.selected.peek();
-                        let ids: Vec<String> = if sel.contains(&id) { sel.clone() } else { vec![id.clone()] };
-                        group = ids.into_iter().filter_map(|i| auto.get(&i).map(|p| (i, p[0], p[1]))).collect();
-                    }
-                    for (gid, ox, oy) in &group {
-                        if let Some(n) = g.node_mut(gid) {
-                            n.pos = Some([(ox + dx).round(), (oy + dy).round()]);
-                        }
-                    }
+                if !moved {
+                    let placed = placed.peek();
+                    let sel = st.selected.peek();
+                    let ids: Vec<String> = if sel.contains(&id) { sel.clone() } else { vec![id.clone()] };
+                    group = ids.into_iter().filter_map(|i| placed.positions.get(&i).map(|p| (i, p[0], p[1]))).collect();
                 }
+                dragged.set(group.iter().map(|(gid, ox, oy)| (gid.clone(), [(ox + dx).round(), (oy + dy).round()])).collect());
                 drag.set(Some(Drag::Node { id, sx, sy, group, moved: true, shift }));
             }
             Drag::Select { sx, sy, additive, .. } => {
@@ -816,39 +899,11 @@ fn GraphCanvas() -> Element {
         }
     };
 
-    let g = st.net();
-    let net_scope = st.current_scope();
     let scope = st.current_scope();
-    let mut positions = g.positions();
-    let ghosts = st.ghosts.read().clone();
-    let ghost_picks = st.ghost_picks.read().clone();
-    let ghost_layer = ghost::layer(&g, scope.as_deref(), &ghosts, &mut positions);
-    let ghost_svg = ghost_edges_svg(&ghost_layer.edges, &positions);
-    // Nodes I'm editing that a ghost branch also changes or depends on.
-    let invalid = {
-        let empty = Graph::default();
-        let base = st.baseline.read();
-        let base = base.as_ref().unwrap_or(&empty);
-        let root = st.graph.read();
-        let mine = claims::claim(base, &root, &graph::diff(base, &root));
-        ghost::invalidated(&mine, &ghosts, scope.as_deref())
-    };
     let picked_branches = st.ghost_branches.read().clone();
-    let branch_status: HashMap<String, (usize, Result<usize, String>)> = ghosts
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            let status = match &b.error {
-                Some(e) => Err(e.clone()),
-                None => Ok(ghost_layer.nodes.iter().filter(|n| n.branch == i).count()),
-            };
-            (b.branch.clone(), (i, status))
-        })
-        .collect();
     let menu_open = *ghost_menu.read();
     let (px, py, z) = *view.read();
-    let selected = st.selected.read().clone();
-    let draft = st.flow_draft.read().clone();
+    let draft_on = st.flow_draft.read().is_some();
     let select_box = match drag.read().as_ref() {
         Some(Drag::Select { sx, sy, cx, cy, .. }) => {
             let (ox, oy) = *origin.read();
@@ -856,93 +911,32 @@ fn GraphCanvas() -> Element {
         }
         _ => None,
     };
-    let active_flow = st.active_flow.read().clone();
-    let path: Vec<String> = draft
-        .clone()
-        .or_else(|| active_flow.and_then(|id| g.flows.iter().find(|f| f.id == id).map(|f| f.nodes.clone())))
-        .unwrap_or_default();
-    let changes = st.changes();
-    let changed_modules: Vec<String> = changes.iter().filter_map(|c| c.scope.clone()).collect();
-    let stale: HashMap<String, String> =
-        claims::stale(&st.graph.read(), &changes).into_iter().filter(|s| s.node.0 == scope).map(|s| (s.node.1.clone(), stale_text(&s))).collect();
-    let status: HashMap<String, &'static str> = changes
-        .into_iter()
-        .filter(|c| c.subject == Subject::Node && c.scope == scope)
-        .filter_map(|c| match c.kind {
-            ChangeKind::Added => Some((c.id, "added")),
-            ChangeKind::Modified(_) => Some((c.id, "modified")),
-            ChangeKind::Removed => None,
-        })
-        .collect();
-    let module_info: HashMap<String, (String, usize, bool)> = {
-        let root = st.graph.read();
-        g.nodes
+    // Per ghost branch: its colour index and how many ghost nodes it adds here (or its error).
+    let (branch_status, branch_nodes) = {
+        let placed = placed.read();
+        let ghosts = st.ghosts.read();
+        let status: HashMap<String, (usize, Result<usize, String>)> = ghosts
             .iter()
-            .filter_map(|n| n.module.as_ref())
-            .map(|m| {
-                let (title, count) = root.module(m).map(|x| (x.title.clone(), x.net.nodes.len())).unwrap_or_else(|| (format!("missing: {m}"), 0));
-                (m.clone(), (title, count, changed_modules.contains(m)))
+            .enumerate()
+            .map(|(i, b)| {
+                let status = match &b.error {
+                    Some(e) => Err(e.clone()),
+                    None => Ok(placed.ghost.nodes.iter().filter(|n| n.branch == i).count()),
+                };
+                (b.branch.clone(), (i, status))
             })
-            .collect()
+            .collect();
+        let nodes: Vec<(usize, String)> = placed.ghost.nodes.iter().map(|n| (n.branch, n.node.id.clone())).collect();
+        (status, nodes)
     };
-    let ref_info: HashMap<String, String> = {
-        let cwd = st.cwd.read().clone();
-        let loaded = st.refs.read();
-        g.nodes
-            .iter()
-            .filter(|n| n.is_reference())
-            .map(|n| {
-                let r = n.reference.clone().unwrap_or_default();
-                let label = reference::parse(&cwd, &r.source).map(|s| s.label()).unwrap_or_else(|| "no source".into());
-                let wb = matches!(loaded.get(&reference::key(&r.source)), Some(RefState::Ready(Some(_))));
-                let picked = if r.nodes.is_empty() { String::new() } else { format!(" · {}", r.nodes.len()) };
-                (n.id.clone(), format!("↗ {label}{}{picked}", if wb { " ◆" } else { "" }))
-            })
-            .collect()
-    };
-    let focus: HashSet<String> = match hovered.read().clone() {
-        Some(h) if g.node(&h).is_some() => HashSet::from([h]),
-        _ => selected.iter().cloned().collect(),
-    };
-    let hide_rest = *focus_only.read();
-    let emphasis = if !path.is_empty() {
-        Emphasis::Path { dim_rest: draft.is_none() }
-    } else if !focus.is_empty() {
-        Emphasis::Focus { hide_rest }
-    } else if hide_rest {
-        Emphasis::Faint
-    } else {
-        Emphasis::None
-    };
-    let lit: Option<HashSet<String>> = match emphasis {
-        Emphasis::Path { dim_rest: true } => Some(path.iter().cloned().collect()),
-        Emphasis::Focus { .. } => Some(
-            g.edges()
-                .into_iter()
-                .filter(|(a, b)| focus.contains(a) || focus.contains(b))
-                .flat_map(|(a, b)| [a, b])
-                .chain(focus.iter().cloned())
-                .collect(),
-        ),
-        _ => None,
-    };
-    let hub_count = if *collapse_hubs.read() { hubs(&g) } else { HashMap::new() };
-    let svg = edges_svg(
-        &g,
-        &positions,
-        EdgeView { path: &path, focus: &focus, emphasis, hubs: (!hub_count.is_empty()).then_some(&hub_count) },
-    );
-    let has_pins = g.nodes.iter().any(|n| n.pos.is_some());
+    let has_pins = st.net().nodes.iter().any(|n| n.pos.is_some());
     let can_undo_arrange = arrange_undo.read().as_ref().is_some_and(|(s, _)| *s == scope);
     let busy_job = st.job.read().is_some();
     let grid = 24.0 * z;
-    let nodes: Vec<Node> = g.nodes.clone();
-    drop(g);
     let current_drag = drag.read().clone();
     let linking = matches!(current_drag, Some(Drag::Link { .. }));
     let pending_svg = current_drag.as_ref().map(pending_link_svg).unwrap_or_default();
-    let can_link = draft.is_none() && st.job.read().is_none();
-    let canvas_class = if draft.is_some() {
+    let canvas_class = if draft_on {
         "graph-canvas picking"
     } else if linking {
         "graph-canvas linking"
@@ -986,220 +980,10 @@ fn GraphCanvas() -> Element {
             div {
                 class: if *panning.read() { "graph-world panning" } else { "graph-world" },
                 style: "transform: translate({px}px, {py}px) scale({z});",
-                div { class: "edges", dangerous_inner_html: "{svg}" }
-                if !ghost_layer.edges.is_empty() {
-                    div { class: "edges", dangerous_inner_html: "{ghost_svg}" }
-                }
                 if linking {
                     div { class: "edges", dangerous_inner_html: "{pending_svg}" }
                 }
-                for n in nodes {
-                    {
-                        let [x, y] = positions.get(&n.id).copied().unwrap_or([0.0, 0.0]);
-                        let module = n.module.as_ref().and_then(|m| module_info.get(m).cloned().map(|i| (m.clone(), i)));
-                        let inner_changed = module.as_ref().is_some_and(|(_, (_, _, changed))| *changed);
-                        let st_class = status.get(&n.id).copied().unwrap_or(if inner_changed { "modified" } else { "" });
-                        let ext = ref_info.get(&n.id).cloned();
-                        let mod_class = if module.is_some() {
-                            "module-ref"
-                        } else if ext.is_some() {
-                            "ext-ref"
-                        } else {
-                            ""
-                        };
-                        let enter_id = n.module.clone();
-                        let tip = if module.is_some() {
-                            format!("{}\n\nDouble-click to open the module", n.description)
-                        } else {
-                            n.description.clone()
-                        };
-                        let sel = if selected.contains(&n.id) { "selected" } else { "" };
-                        let pulsing = if pulse.read().as_deref() == Some(n.id.as_str()) { "pulse" } else { "" };
-                        let editing = st.live_edits_of(net_scope.as_deref(), &n);
-                        let editing_tip = format!("Being edited now:\n{}", editing.join("\n"));
-                        let dim = if lit.as_ref().is_some_and(|l| !l.contains(&n.id)) { "dim" } else { "" };
-                        let hub = hub_count.get(&n.id).copied();
-                        let marks = ghost_layer.marks.get(&n.id).cloned().unwrap_or_default();
-                        let invalid_by = invalid.get(&n.id).cloned().unwrap_or_default();
-                        let ghost_class = if !invalid_by.is_empty() {
-                            "ghost-conflict"
-                        } else if marks.iter().any(|m| m.kind == ChangeKind::Removed) {
-                            "ghost-removed"
-                        } else if !marks.is_empty() {
-                            "ghost-touched"
-                        } else {
-                            ""
-                        };
-                        let mark_color = marks.first().map(|m| ghost::color(m.branch)).unwrap_or("");
-                        let mark_tip = marks
-                            .iter()
-                            .map(|m| format!("{}: {}", ghosts[m.branch].who(), mark_text(&m.kind)))
-                            .chain(invalid_by.iter().map(|bi| format!("{}: invalidates your edit to this node", ghosts[*bi].who())))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let n_marks = marks.len();
-                        let enter_hover = n.id.clone();
-                        let leave_hover = n.id.clone();
-                        let steps = path
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, p)| **p == n.id)
-                            .map(|(i, _)| (i + 1).to_string())
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let on = if steps.is_empty() { "" } else { "on-path" };
-                        let color = graph::kind_color(&n.kind);
-                        let id = n.id.clone();
-                        let drop_id = n.id.clone();
-                        let in_id = n.id.clone();
-                        let out_id = n.id.clone();
-                        let mut start_link = move |e: MouseEvent, anchor: String, outgoing: bool| {
-                            if e.trigger_button() != Some(MouseButton::Primary) {
-                                return;
-                            }
-                            e.stop_propagation();
-                            let p = e.client_coordinates();
-                            let (wx, wy) = (if outgoing { x + NODE_W } else { x }, y + NODE_H / 2.0);
-                            drag.set(Some(Drag::Link { anchor, outgoing, sx: p.x, sy: p.y, wx, wy, cx: wx, cy: wy }));
-                        };
-                        rsx! {
-                            div {
-                                key: "{n.id}",
-                                class: "gnode {st_class} {sel} {on} {mod_class} {dim} {ghost_class} {pulsing}",
-                                style: "left: {x}px; top: {y}px; width: {NODE_W}px; height: {NODE_H}px; --kind: {color}; --ghost: {mark_color};",
-                                title: "{tip}",
-                                onmouseenter: move |e: MouseEvent| {
-                                    e.stop_propagation();
-                                    if matches!(*drag.peek(), Some(Drag::Select { .. })) {
-                                        return;
-                                    }
-                                    hovered.set(Some(enter_hover.clone()));
-                                },
-                                onmouseleave: move |e: MouseEvent| {
-                                    e.stop_propagation();
-                                    if hovered.peek().as_deref() == Some(leave_hover.as_str()) {
-                                        hovered.set(None);
-                                    }
-                                },
-                                ondoubleclick: move |e: MouseEvent| {
-                                    e.stop_propagation();
-                                    if let Some(m) = enter_id.as_deref()
-                                        && st.flow_draft.peek().is_none()
-                                    {
-                                        st.enter_module(m);
-                                    }
-                                },
-                                onmousedown: move |e: MouseEvent| {
-                                    let m = e.modifiers();
-                                    if e.trigger_button() != Some(MouseButton::Primary) || m.ctrl() || m.meta() {
-                                        return;
-                                    }
-                                    e.stop_propagation();
-                                    st.fade_chat();
-                                    let p = e.client_coordinates();
-                                    drag.set(Some(Drag::Node { id: id.clone(), sx: p.x, sy: p.y, group: Vec::new(), moved: false, shift: m.shift() }));
-                                },
-                                onmouseup: move |_| {
-                                    let Some(Drag::Link { anchor, outgoing, .. }) = drag.peek().clone() else { return };
-                                    drag.set(None);
-                                    if outgoing {
-                                        toggle_link(st, anchor, drop_id.clone());
-                                    } else {
-                                        toggle_link(st, drop_id.clone(), anchor);
-                                    }
-                                },
-                                if can_link {
-                                    div {
-                                        class: "gnode-port in",
-                                        title: "Drag to a node to make it call this one (drop on an existing caller to remove the link)",
-                                        onmousedown: move |e| start_link(e, in_id.clone(), false),
-                                    }
-                                    div {
-                                        class: "gnode-port out",
-                                        title: "Drag to a node to make this one call it (drop on an existing callee to remove the link)",
-                                        onmousedown: move |e| start_link(e, out_id.clone(), true),
-                                    }
-                                }
-                                div { class: "gnode-title", "{n.title}" }
-                                div { class: "gnode-meta",
-                                    match (&module, &ext) {
-                                        (Some((_, (title, count, _))), _) => rsx! {
-                                            span { class: "gnode-kind", "▣ {title} · {count}" }
-                                        },
-                                        (None, Some(label)) => rsx! { span { class: "gnode-kind", "{label}" } },
-                                        (None, None) => rsx! { span { class: "gnode-kind", "{n.kind}" } },
-                                    }
-                                    match st_class {
-                                        "added" => rsx! { span { class: "gnode-status", "new" } },
-                                        "modified" => rsx! { span { class: "gnode-status", "edited" } },
-                                        _ => rsx! {},
-                                    }
-                                    if let Some(tip) = stale.get(&n.id) {
-                                        span { class: "gnode-stale", title: "{tip}", "stale?" }
-                                    }
-                                    if !editing.is_empty() {
-                                        span { class: "gnode-editing", title: "{editing_tip}", "● editing" }
-                                    }
-                                    if n_marks > 0 {
-                                        span { class: "gnode-ghost-tag", title: "{mark_tip}", "⧉ {n_marks}" }
-                                    }
-                                }
-                                if !steps.is_empty() {
-                                    span { class: "gnode-step", "{steps}" }
-                                }
-                                if let Some(callers) = hub {
-                                    span {
-                                        class: "gnode-hub",
-                                        title: "Called by {callers} nodes. Their links are shortened to coloured stubs; hover or select a node to see them in full.",
-                                        "⇠ {callers}"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                for gn in ghost_layer.nodes.clone() {
-                    {
-                        let [x, y] = positions.get(&gn.key).copied().unwrap_or([0.0, 0.0]);
-                        let branch = ghosts[gn.branch].branch.clone();
-                        let who = ghosts[gn.branch].who();
-                        let bcolor = ghost::color(gn.branch);
-                        let color = graph::kind_color(&gn.node.kind);
-                        let pick = GhostPick { branch: branch.clone(), scope: scope.clone(), id: gn.node.id.clone() };
-                        let sel = if ghost_picks.contains(&pick) { "selected" } else { "" };
-                        let tip = format!(
-                            "{}\n\nWork in progress on {who}. Click to send it to Workbench as context, Shift+click to add it to the context.",
-                            gn.node.description
-                        );
-                        rsx! {
-                            div {
-                                key: "{gn.key}",
-                                class: "gnode ghost {sel}",
-                                style: "left: {x}px; top: {y}px; width: {NODE_W}px; height: {NODE_H}px; --kind: {color}; --ghost: {bcolor};",
-                                title: "{tip}",
-                                onmousedown: move |e: MouseEvent| {
-                                    let m = e.modifiers();
-                                    if e.trigger_button() == Some(MouseButton::Primary) && !m.ctrl() && !m.meta() {
-                                        e.stop_propagation();
-                                    }
-                                },
-                                onclick: move |e: MouseEvent| {
-                                    let m = e.modifiers();
-                                    if m.ctrl() || m.meta() {
-                                        return;
-                                    }
-                                    e.stop_propagation();
-                                    ghost_clicked(st, pick.clone(), m.shift());
-                                },
-                                div { class: "gnode-title", "{gn.node.title}" }
-                                div { class: "gnode-meta",
-                                    span { class: "gnode-kind", "{gn.node.kind}" }
-                                    span { class: "gnode-branch", title: "{who}", "⧉ {who}" }
-                                }
-                            }
-                        }
-                    }
-                }
+                GraphWorld { placed, dragged, drag, hovered, pulse, focus_only, collapse_hubs }
             }
             if let Some((bx, by, bw, bh)) = select_box {
                 div { class: "select-box", style: "left: {bx}px; top: {by}px; width: {bw}px; height: {bh}px;" }
@@ -1210,7 +994,7 @@ fn GraphCanvas() -> Element {
                 button { onclick: move |_| *st.fit_request.write() += 1, "Fit" }
                 span { class: "zoom-sep" }
                 button {
-                    class: if hide_rest { "toggle on" } else { "toggle" },
+                    class: if *focus_only.read() { "toggle on" } else { "toggle" },
                     title: "Show only the links of the hovered or selected nodes",
                     onclick: move |_| {
                         let v = *focus_only.peek();
@@ -1291,7 +1075,7 @@ fn GraphCanvas() -> Element {
                                         let dot = status.as_ref().map(|(i, _)| ghost::color(*i)).unwrap_or("transparent");
                                         let ids: Vec<String> = status
                                             .as_ref()
-                                            .map(|(i, _)| ghost_layer.nodes.iter().filter(|n| n.branch == *i).map(|n| n.node.id.clone()).collect())
+                                            .map(|(i, _)| branch_nodes.iter().filter(|(b, _)| b == i).map(|(_, id)| id.clone()).collect())
                                             .unwrap_or_default();
                                         let toggle_name = name.clone();
                                         let pick_name = name.clone();
@@ -1349,11 +1133,377 @@ fn GraphCanvas() -> Element {
                     }
                 }
             }
-            if draft.is_some() {
+            if draft_on {
                 div { class: "picking-hint", "Click nodes in order to build the flow" }
             }
             if linking {
                 div { class: "picking-hint", "Drop on a node to link it, or on an already linked node to unlink" }
+            }
+        }
+    }
+}
+
+/// The nodes and links inside the panned and zoomed world. It does not read the view, so
+/// panning and zooming never re-render it.
+#[component]
+fn GraphWorld(
+    placed: Memo<Placed>,
+    dragged: Signal<HashMap<String, [f64; 2]>>,
+    drag: Signal<Option<Drag>>,
+    hovered: Signal<Option<String>>,
+    pulse: Signal<Option<String>>,
+    focus_only: Signal<bool>,
+    collapse_hubs: Signal<bool>,
+) -> Element {
+    let st = use_context::<AppState>();
+    let marks = use_memo(move || node_marks(st));
+    let hub_count = use_memo(move || if *collapse_hubs.read() { hubs(&st.net()) } else { HashMap::new() });
+
+    let g = st.net();
+    let scope = st.current_scope();
+    let placed = placed.read();
+    let dragged = dragged.read();
+    let positions: Cow<HashMap<String, [f64; 2]>> = if dragged.is_empty() {
+        Cow::Borrowed(&placed.positions)
+    } else {
+        let mut p = placed.positions.clone();
+        p.extend(dragged.iter().map(|(id, pos)| (id.clone(), *pos)));
+        Cow::Owned(p)
+    };
+    let ghost_layer = &placed.ghost;
+    let ghost_svg = ghost_edges_svg(&ghost_layer.edges, &positions);
+    let selected: HashSet<String> = st.selected.read().iter().cloned().collect();
+    let draft = st.flow_draft.read().clone();
+    let active_flow = st.active_flow.read().clone();
+    let path: Vec<String> = draft
+        .clone()
+        .or_else(|| active_flow.and_then(|id| g.flows.iter().find(|f| f.id == id).map(|f| f.nodes.clone())))
+        .unwrap_or_default();
+    // The step numbers of each node on the shown flow, like "2,5".
+    let mut steps: HashMap<&str, Vec<String>> = HashMap::new();
+    for (i, id) in path.iter().enumerate() {
+        steps.entry(id.as_str()).or_default().push((i + 1).to_string());
+    }
+    let edges = g.edges();
+    let by_id = g.by_id();
+    let focus: HashSet<String> = match hovered.read().clone() {
+        Some(h) if by_id.contains_key(h.as_str()) => HashSet::from([h]),
+        _ => selected.clone(),
+    };
+    let hide_rest = *focus_only.read();
+    let emphasis = if !path.is_empty() {
+        Emphasis::Path { dim_rest: draft.is_none() }
+    } else if !focus.is_empty() {
+        Emphasis::Focus { hide_rest }
+    } else if hide_rest {
+        Emphasis::Faint
+    } else {
+        Emphasis::None
+    };
+    let lit: Option<HashSet<&str>> = match emphasis {
+        Emphasis::Path { dim_rest: true } => Some(path.iter().map(String::as_str).collect()),
+        Emphasis::Focus { .. } => Some(
+            edges
+                .iter()
+                .filter(|(a, b)| focus.contains(a) || focus.contains(b))
+                .flat_map(|(a, b)| [a.as_str(), b.as_str()])
+                .chain(focus.iter().map(String::as_str))
+                .collect(),
+        ),
+        _ => None,
+    };
+    let hub_count = hub_count.read();
+    let svg = edges_svg(
+        &edges,
+        &by_id,
+        &positions,
+        EdgeView { path: &path, focus: &focus, emphasis, hubs: (!hub_count.is_empty()).then_some(&hub_count) },
+    );
+    let marks = marks.read();
+    let ghosts = st.ghosts.read();
+    let pulse_id = pulse.read().clone();
+    let can_link = draft.is_none() && st.job.read().is_none();
+
+    let views: Vec<NodeView> = g
+        .nodes
+        .iter()
+        .map(|n| {
+            let [x, y] = positions.get(&n.id).copied().unwrap_or([0.0, 0.0]);
+            let module = n.module.as_ref().and_then(|m| marks.modules.get(m));
+            let ext = marks.refs.get(&n.id);
+            let inner_changed = module.is_some_and(|(_, _, changed)| *changed);
+            let status = marks.status.get(&n.id).copied().unwrap_or(if inner_changed { "modified" } else { "" });
+            let mod_class = if module.is_some() {
+                "module-ref"
+            } else if ext.is_some() {
+                "ext-ref"
+            } else {
+                ""
+            };
+            let label = match (module, ext) {
+                (Some((title, count, _)), _) => format!("▣ {title} · {count}"),
+                (None, Some(label)) => label.clone(),
+                (None, None) => n.kind.clone(),
+            };
+            let tip = if module.is_some() { format!("{}\n\nDouble-click to open the module", n.description) } else { n.description.clone() };
+            let sel = if selected.contains(&n.id) { "selected" } else { "" };
+            let pulsing = if pulse_id.as_deref() == Some(n.id.as_str()) { "pulse" } else { "" };
+            let editing = st.live_edits_of(scope.as_deref(), n);
+            let dim = if lit.as_ref().is_some_and(|l| !l.contains(n.id.as_str())) { "dim" } else { "" };
+            let ghost_marks = ghost_layer.marks.get(&n.id).map(Vec::as_slice).unwrap_or_default();
+            let invalid_by = marks.invalid.get(&n.id).map(Vec::as_slice).unwrap_or_default();
+            let ghost_class = if !invalid_by.is_empty() {
+                "ghost-conflict"
+            } else if ghost_marks.iter().any(|m| m.kind == ChangeKind::Removed) {
+                "ghost-removed"
+            } else if !ghost_marks.is_empty() {
+                "ghost-touched"
+            } else {
+                ""
+            };
+            let ghost_tag = (!ghost_marks.is_empty()).then(|| {
+                let tip = ghost_marks
+                    .iter()
+                    .map(|m| format!("{}: {}", ghosts[m.branch].who(), mark_text(&m.kind)))
+                    .chain(invalid_by.iter().map(|bi| format!("{}: invalidates your edit to this node", ghosts[*bi].who())))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (ghost_marks.len(), tip)
+            });
+            let steps = steps.get(n.id.as_str()).map(|s| s.join(",")).unwrap_or_default();
+            let on = if steps.is_empty() { "" } else { "on-path" };
+            NodeView {
+                id: n.id.clone(),
+                x,
+                y,
+                title: n.title.clone(),
+                class: format!("gnode {status} {sel} {on} {mod_class} {dim} {ghost_class} {pulsing}"),
+                color: graph::kind_color(&n.kind),
+                mark_color: ghost_marks.first().map(|m| ghost::color(m.branch)).unwrap_or(""),
+                tip,
+                label,
+                status,
+                stale: marks.stale.get(&n.id).cloned(),
+                editing_tip: (!editing.is_empty()).then(|| format!("Being edited now:\n{}", editing.join("\n"))),
+                ghost_tag,
+                steps,
+                hub: hub_count.get(&n.id).copied(),
+                module: n.module.clone(),
+                can_link,
+            }
+        })
+        .collect();
+    let ghost_picks = st.ghost_picks.read();
+    let ghost_views: Vec<GhostView> = ghost_layer
+        .nodes
+        .iter()
+        .map(|gn| {
+            let [x, y] = positions.get(&gn.key).copied().unwrap_or([0.0, 0.0]);
+            let who = ghosts[gn.branch].who();
+            let pick = GhostPick { branch: ghosts[gn.branch].branch.clone(), scope: scope.clone(), id: gn.node.id.clone() };
+            GhostView {
+                key: gn.key.clone(),
+                x,
+                y,
+                color: graph::kind_color(&gn.node.kind),
+                branch_color: ghost::color(gn.branch),
+                tip: format!(
+                    "{}\n\nWork in progress on {who}. Click to send it to Workbench as context, Shift+click to add it to the context.",
+                    gn.node.description
+                ),
+                who,
+                selected: ghost_picks.contains(&pick),
+                pick,
+                title: gn.node.title.clone(),
+                kind: gn.node.kind.clone(),
+            }
+        })
+        .collect();
+    let has_ghost_edges = !ghost_layer.edges.is_empty();
+
+    rsx! {
+        div { class: "edges", dangerous_inner_html: "{svg}" }
+        if has_ghost_edges {
+            div { class: "edges", dangerous_inner_html: "{ghost_svg}" }
+        }
+        for view in views {
+            GNode { key: "{view.id}", view, drag, hovered }
+        }
+        for GhostView { key, x, y, color, branch_color, tip, who, selected, pick, title, kind } in ghost_views {
+            div {
+                key: "{key}",
+                class: if selected { "gnode ghost selected" } else { "gnode ghost" },
+                style: "left: {x}px; top: {y}px; width: {NODE_W}px; height: {NODE_H}px; --kind: {color}; --ghost: {branch_color};",
+                title: "{tip}",
+                onmousedown: move |e: MouseEvent| {
+                    let m = e.modifiers();
+                    if e.trigger_button() == Some(MouseButton::Primary) && !m.ctrl() && !m.meta() {
+                        e.stop_propagation();
+                    }
+                },
+                onclick: move |e: MouseEvent| {
+                    let m = e.modifiers();
+                    if m.ctrl() || m.meta() {
+                        return;
+                    }
+                    e.stop_propagation();
+                    ghost_clicked(st, pick.clone(), m.shift());
+                },
+                div { class: "gnode-title", "{title}" }
+                div { class: "gnode-meta",
+                    span { class: "gnode-kind", "{kind}" }
+                    span { class: "gnode-branch", title: "{who}", "⧉ {who}" }
+                }
+            }
+        }
+    }
+}
+
+/// A node another branch adds, as `GraphWorld` draws it.
+struct GhostView {
+    key: String,
+    x: f64,
+    y: f64,
+    color: &'static str,
+    branch_color: &'static str,
+    tip: String,
+    who: String,
+    selected: bool,
+    pick: GhostPick,
+    title: String,
+    kind: String,
+}
+
+/// Everything one node card shows, worked out by `GraphWorld`. A card re-renders only when
+/// this changes.
+#[derive(Clone, PartialEq)]
+struct NodeView {
+    id: String,
+    x: f64,
+    y: f64,
+    title: String,
+    class: String,
+    color: &'static str,
+    mark_color: &'static str,
+    tip: String,
+    /// The kind, or the attached module, or the reference source.
+    label: String,
+    /// "added", "modified" or "".
+    status: &'static str,
+    stale: Option<String>,
+    editing_tip: Option<String>,
+    /// How many ghost branches touch the node, and what they do.
+    ghost_tag: Option<(usize, String)>,
+    /// The node's step numbers on the shown flow, like "2,5".
+    steps: String,
+    /// How many nodes call this hub.
+    hub: Option<usize>,
+    module: Option<String>,
+    can_link: bool,
+}
+
+#[component]
+fn GNode(view: NodeView, drag: Signal<Option<Drag>>, hovered: Signal<Option<String>>) -> Element {
+    let mut st = use_context::<AppState>();
+    let mut drag = drag;
+    let mut hovered = hovered;
+    let NodeView { id, x, y, title, class, color, mark_color, tip, label, status, stale, editing_tip, ghost_tag, steps, hub, module, can_link } =
+        view;
+    let mut start_link = move |e: MouseEvent, anchor: String, outgoing: bool| {
+        if e.trigger_button() != Some(MouseButton::Primary) {
+            return;
+        }
+        e.stop_propagation();
+        let p = e.client_coordinates();
+        let (wx, wy) = (if outgoing { x + NODE_W } else { x }, y + NODE_H / 2.0);
+        drag.set(Some(Drag::Link { anchor, outgoing, sx: p.x, sy: p.y, wx, wy, cx: wx, cy: wy }));
+    };
+    let (enter_id, leave_id, down_id, drop_id, in_id, out_id) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+
+    rsx! {
+        div {
+            class: "{class}",
+            style: "left: {x}px; top: {y}px; width: {NODE_W}px; height: {NODE_H}px; --kind: {color}; --ghost: {mark_color};",
+            title: "{tip}",
+            onmouseenter: move |e: MouseEvent| {
+                e.stop_propagation();
+                if matches!(*drag.peek(), Some(Drag::Select { .. })) {
+                    return;
+                }
+                hovered.set(Some(enter_id.clone()));
+            },
+            onmouseleave: move |e: MouseEvent| {
+                e.stop_propagation();
+                if hovered.peek().as_deref() == Some(leave_id.as_str()) {
+                    hovered.set(None);
+                }
+            },
+            ondoubleclick: move |e: MouseEvent| {
+                e.stop_propagation();
+                if let Some(m) = module.as_deref()
+                    && st.flow_draft.peek().is_none()
+                {
+                    st.enter_module(m);
+                }
+            },
+            onmousedown: move |e: MouseEvent| {
+                let m = e.modifiers();
+                if e.trigger_button() != Some(MouseButton::Primary) || m.ctrl() || m.meta() {
+                    return;
+                }
+                e.stop_propagation();
+                st.fade_chat();
+                let p = e.client_coordinates();
+                drag.set(Some(Drag::Node { id: down_id.clone(), sx: p.x, sy: p.y, group: Vec::new(), moved: false, shift: m.shift() }));
+            },
+            onmouseup: move |_| {
+                let Some(Drag::Link { anchor, outgoing, .. }) = drag.peek().clone() else { return };
+                drag.set(None);
+                if outgoing {
+                    toggle_link(st, anchor, drop_id.clone());
+                } else {
+                    toggle_link(st, drop_id.clone(), anchor);
+                }
+            },
+            if can_link {
+                div {
+                    class: "gnode-port in",
+                    title: "Drag to a node to make it call this one (drop on an existing caller to remove the link)",
+                    onmousedown: move |e| start_link(e, in_id.clone(), false),
+                }
+                div {
+                    class: "gnode-port out",
+                    title: "Drag to a node to make this one call it (drop on an existing callee to remove the link)",
+                    onmousedown: move |e| start_link(e, out_id.clone(), true),
+                }
+            }
+            div { class: "gnode-title", "{title}" }
+            div { class: "gnode-meta",
+                span { class: "gnode-kind", "{label}" }
+                match status {
+                    "added" => rsx! { span { class: "gnode-status", "new" } },
+                    "modified" => rsx! { span { class: "gnode-status", "edited" } },
+                    _ => rsx! {},
+                }
+                if let Some(tip) = stale {
+                    span { class: "gnode-stale", title: "{tip}", "stale?" }
+                }
+                if let Some(tip) = editing_tip {
+                    span { class: "gnode-editing", title: "{tip}", "● editing" }
+                }
+                if let Some((n, tip)) = ghost_tag {
+                    span { class: "gnode-ghost-tag", title: "{tip}", "⧉ {n}" }
+                }
+            }
+            if !steps.is_empty() {
+                span { class: "gnode-step", "{steps}" }
+            }
+            if let Some(callers) = hub {
+                span {
+                    class: "gnode-hub",
+                    title: "Called by {callers} nodes. Their links are shortened to coloured stubs; hover or select a node to see them in full.",
+                    "⇠ {callers}"
+                }
             }
         }
     }
@@ -1497,9 +1647,9 @@ fn NodePane() -> Element {
     let reference = node.reference.clone().unwrap_or_default();
     let change = st
         .changes()
-        .into_iter()
+        .iter()
         .find(|c| c.id == id && c.subject == Subject::Node && c.scope == scope)
-        .map(|c| c.kind);
+        .map(|c| c.kind.clone());
     let n_history = st.node_history.read().count_for(scope.as_deref(), &id);
     let rev_scope = scope.clone();
     let id_mod = id.clone();
@@ -1566,7 +1716,7 @@ fn NodePane() -> Element {
                 oninput: move |e| {
                     let v = e.value();
                     let id = id_title.clone();
-                    st.update_net(|g| if let Some(n) = g.node_mut(&id) { n.title = v });
+                    st.update_net_typing(|g| if let Some(n) = g.node_mut(&id) { n.title = v });
                 },
             }
             label { "Kind" }
@@ -1608,7 +1758,7 @@ fn NodePane() -> Element {
                 oninput: move |e| {
                     let v = e.value();
                     let id = id_desc.clone();
-                    st.update_net(|g| if let Some(n) = g.node_mut(&id) { n.description = v });
+                    st.update_net_typing(|g| if let Some(n) = g.node_mut(&id) { n.description = v });
                 },
             }
             label { "Inputs — called by" }
@@ -2039,9 +2189,9 @@ fn ModulePane(id: String) -> Element {
         .collect();
     let change = st
         .changes()
-        .into_iter()
+        .iter()
         .find(|c| c.subject == Subject::Module && c.id == id)
-        .map(|c| c.kind);
+        .map(|c| c.kind.clone());
     let id_title = id.clone();
     let id_desc = id.clone();
     let id_rev = id.clone();
@@ -2085,7 +2235,7 @@ fn ModulePane(id: String) -> Element {
                 oninput: move |e| {
                     let v = e.value();
                     let id = id_title.clone();
-                    st.update_graph(|g| if let Some(m) = g.module_mut(&id) { m.title = v });
+                    st.update_graph_typing(|g| if let Some(m) = g.module_mut(&id) { m.title = v });
                 },
             }
             label { "What it does" }
@@ -2097,7 +2247,7 @@ fn ModulePane(id: String) -> Element {
                 oninput: move |e| {
                     let v = e.value();
                     let id = id_desc.clone();
-                    st.update_graph(|g| if let Some(m) = g.module_mut(&id) { m.description = v });
+                    st.update_graph_typing(|g| if let Some(m) = g.module_mut(&id) { m.description = v });
                 },
             }
             label { "Used in ({n_uses})" }
@@ -2404,7 +2554,7 @@ fn ChangesPane() -> Element {
     let mut note = use_signal(String::new);
     let busy = st.chat_busy();
     let locked = st.graph_locked();
-    let changes = st.changes();
+    let changes = st.changes().clone();
     let has_baseline = st.baseline.read().is_some();
     let has_nodes = !st.graph.read().nodes.is_empty();
     // Claims of the other branches, read from git so overlaps show before anything runs.
@@ -2418,7 +2568,7 @@ fn ChangesPane() -> Element {
 
     // `only_free` leaves out the changes that overlap another branch's claim.
     let mut process = move |only_free: bool| {
-        let mut changes = st.changes();
+        let mut changes = st.graph_changes.peek().clone();
         let open = open_claims.peek().clone().unwrap_or_default();
         if only_free {
             let taken = claim_overlaps(st, &changes, &open);

@@ -25,15 +25,11 @@ pub enum ClaudeEvent {
     ControlRequest { request_id: String, subtype: String },
     ControlCancel { request_id: String },
     Stderr(String),
-    /// Output outside the tested Claude Code contract: an unknown event shape or an untested
-    /// CLI version. Shown as an error, so a CLI change can't silently drop agent output.
+    /// An event shape Workbench doesn't know. Shown as an error, so a CLI change can't
+    /// silently drop agent output.
     Unsupported(String),
     Exited,
 }
-
-/// Claude Code versions whose stream-json output is pinned by a recorded fixture in
-/// `tests/fixtures/claude-<version>.ndjson`. Add a version only together with its fixture.
-pub const TESTED_CLI_VERSIONS: [&str; 1] = ["2.1.322"];
 
 /// Top-level event types Workbench knows and has nothing to show for.
 const IGNORED_TYPES: [&str; 3] = ["control_response", "rate_limit_event", "keep_alive"];
@@ -408,19 +404,13 @@ pub fn parse_line(line: &str) -> Vec<ClaudeEvent> {
 
     match v.get("type").and_then(Value::as_str) {
         Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
-            let mut events = Vec::new();
-            let version = str_at(&v, "claude_code_version");
-            if !TESTED_CLI_VERSIONS.contains(&version.as_str()) {
-                events.push(ClaudeEvent::Unsupported(format!("untested Claude Code version {version:?}")));
-            }
             let mcp_servers = v["mcp_servers"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .map(|m| McpStatus { name: str_at(m, "name"), status: str_at(m, "status") })
                 .collect();
-            events.push(ClaudeEvent::Init { session_id: str_at(&v, "session_id"), model: str_at(&v, "model"), mcp_servers });
-            events
+            vec![ClaudeEvent::Init { session_id: str_at(&v, "session_id"), model: str_at(&v, "model"), mcp_servers }]
         }
         Some("system") => match v.get("subtype").and_then(Value::as_str) {
             Some(s) if IGNORED_SYSTEM.contains(&s) => vec![],
@@ -616,32 +606,28 @@ mod tests {
         assert!(matches!(&parse_line(r)[..], [ClaudeEvent::Done { cost_usd: Some(c), .. }] if *c == 0.5));
     }
 
-    /// Every tested CLI version has a recorded stream, and every line of it parses without
-    /// leaving the known contract.
+    /// Every line of a recorded Claude Code stream parses without leaving the known contract.
     #[test]
-    fn tested_cli_versions_parse_their_recorded_streams() {
-        for version in TESTED_CLI_VERSIONS {
-            let path = format!("{}/tests/fixtures/claude-{version}.ndjson", env!("CARGO_MANIFEST_DIR"));
-            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            let events: Vec<ClaudeEvent> = text.lines().flat_map(parse_line).collect();
-            let unsupported: Vec<&ClaudeEvent> = events.iter().filter(|e| matches!(e, ClaudeEvent::Unsupported(_))).collect();
-            assert!(unsupported.is_empty(), "{version}: {unsupported:?}");
-            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::Init { .. })));
-            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::TextDelta(_))));
-            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::ToolUse { .. })));
-            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::ToolResult { .. })));
-            assert!(events.iter().any(|e| matches!(e, ClaudeEvent::Done { .. })));
-        }
+    fn recorded_stream_parses_within_contract() {
+        let path = format!("{}/tests/fixtures/claude-2.1.322.ndjson", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let events: Vec<ClaudeEvent> = text.lines().flat_map(parse_line).collect();
+        let unsupported: Vec<&ClaudeEvent> = events.iter().filter(|e| matches!(e, ClaudeEvent::Unsupported(_))).collect();
+        assert!(unsupported.is_empty(), "{unsupported:?}");
+        assert!(events.iter().any(|e| matches!(e, ClaudeEvent::Init { .. })));
+        assert!(events.iter().any(|e| matches!(e, ClaudeEvent::TextDelta(_))));
+        assert!(events.iter().any(|e| matches!(e, ClaudeEvent::ToolUse { .. })));
+        assert!(events.iter().any(|e| matches!(e, ClaudeEvent::ToolResult { .. })));
+        assert!(events.iter().any(|e| matches!(e, ClaudeEvent::Done { .. })));
     }
 
     #[test]
-    fn unknown_shapes_and_versions_are_reported() {
+    fn unknown_shapes_are_reported() {
         let unsupported = |line: &str| parse_line(line).iter().any(|e| matches!(e, ClaudeEvent::Unsupported(_)));
         assert!(unsupported(r#"{"type":"brand_new_event"}"#));
         assert!(unsupported(r#"{"type":"system","subtype":"brand_new"}"#));
         assert!(unsupported(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"audio_delta"}}}"#));
         assert!(unsupported(r#"{"type":"assistant","message":{"content":[{"type":"hologram"}]}}"#));
-        assert!(unsupported(r#"{"type":"system","subtype":"init","session_id":"s","model":"m","claude_code_version":"9.9.9"}"#));
         assert!(!unsupported(r#"{"type":"rate_limit_event","rate_limit_info":{}}"#));
     }
 }

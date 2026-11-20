@@ -63,18 +63,22 @@ fn FilesView() -> Element {
         .ok()
     });
 
-    let Some(Some((status, files))) = data.read().clone() else {
+    // The folder tree of the files that match the filter, built once per listing or filter
+    // change instead of on every folder toggle. A filter shows at most `MAX_MATCHES` files.
+    let listing = use_memo(move || {
+        let needle = filter.read().to_lowercase();
+        let data = data.read();
+        let files = data.as_ref().and_then(|d| d.as_ref()).and_then(|(_, files)| files.as_ref().ok());
+        let matching: Vec<String> = files.into_iter().flatten().filter(|f| needle.is_empty() || f.to_lowercase().contains(&needle)).cloned().collect();
+        let hidden = if needle.is_empty() { 0 } else { matching.len().saturating_sub(MAX_MATCHES) };
+        (build_tree(&matching[..matching.len() - hidden]), hidden)
+    });
+    let Some(Some((status, _))) = data.read().clone() else {
         return rsx! { div { class: "muted pad", "Loading…" } };
     };
-
-    let needle = filter.read().to_lowercase();
-    let matching: Vec<String> = files
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|f| needle.is_empty() || f.to_lowercase().contains(&needle))
-        .collect();
-    let tree = build_tree(&matching);
-    let filtering = !needle.is_empty();
+    let filtering = !filter.read().is_empty();
+    let listing = listing.read();
+    let (tree, hidden) = (&listing.0, listing.1);
 
     rsx! {
         div { class: "files",
@@ -105,13 +109,19 @@ fn FilesView() -> Element {
                 value: "{filter}",
                 oninput: move |e| filter.set(e.value()),
             }
-            ul { class: "file-list", {folder_rows(st, &tree, "", 0, filtering)} }
+            ul { class: "file-list", {folder_rows(st, tree, "", 0, filtering)} }
+            if hidden > 0 {
+                div { class: "muted pad", "{hidden} more files match. Type more of the name to narrow the list." }
+            }
         }
     }
 }
 
+/// The most files a filter lists, so a short filter in a big repo stays quick to show.
+const MAX_MATCHES: usize = 500;
+
 /// A folder in the Files tree: its sub-folders by name and the full paths of the files directly in it.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 struct Folder {
     folders: BTreeMap<String, Folder>,
     files: Vec<String>,

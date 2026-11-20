@@ -189,6 +189,29 @@ impl Graph {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    /// Every node by id, for lookups inside loops. Keeps the first node when ids repeat, like `node`.
+    pub fn by_id(&self) -> HashMap<&str, &Node> {
+        let mut out = HashMap::with_capacity(self.nodes.len());
+        for n in &self.nodes {
+            out.entry(n.id.as_str()).or_insert(n);
+        }
+        out
+    }
+
+    /// The ids of the nodes that link to each node.
+    pub fn callers(&self) -> HashMap<&str, Vec<&str>> {
+        let mut out: HashMap<&str, Vec<&str>> = HashMap::new();
+        for n in &self.nodes {
+            for l in &n.links {
+                let ids = out.entry(l.as_str()).or_default();
+                if ids.last() != Some(&n.id.as_str()) {
+                    ids.push(n.id.as_str());
+                }
+            }
+        }
+        out
+    }
+
     pub fn node_mut(&mut self, id: &str) -> Option<&mut Node> {
         self.nodes.iter_mut().find(|n| n.id == id)
     }
@@ -227,15 +250,16 @@ impl Graph {
     }
 
     pub fn positions(&self) -> HashMap<String, [f64; 2]> {
-        let auto = auto_layout(self);
         let mut placed: HashMap<String, [f64; 2]> = self.nodes.iter().filter_map(|n| n.pos.map(|p| (n.id.clone(), p))).collect();
-        if placed.is_empty() {
-            return auto;
-        }
         let mut free: Vec<&Node> = self.nodes.iter().filter(|n| n.pos.is_none()).collect();
         if free.is_empty() {
             return placed;
         }
+        let auto = auto_layout(self);
+        if placed.is_empty() {
+            return auto;
+        }
+        let incoming = self.callers();
         free.sort_by(|a, b| {
             let (pa, pb) = (auto[&a.id], auto[&b.id]);
             pa[0].total_cmp(&pb[0]).then(pa[1].total_cmp(&pb[1]))
@@ -243,7 +267,8 @@ impl Graph {
         let x0 = placed.values().map(|p| p[0]).fold(f64::MAX, f64::min);
         let below = placed.values().map(|p| p[1]).fold(f64::MIN, f64::max) + ROW_H * 2.0;
         for n in free {
-            let callers: Vec<[f64; 2]> = self.incoming(&n.id).iter().filter_map(|c| placed.get(&c.id).copied()).collect();
+            let callers: Vec<[f64; 2]> =
+                incoming.get(n.id.as_str()).into_iter().flatten().filter_map(|c| placed.get(*c).copied()).collect();
             let callees: Vec<[f64; 2]> = n.links.iter().filter_map(|l| placed.get(l).copied()).collect();
             let mean_y = |ps: &[[f64; 2]]| ps.iter().map(|p| p[1]).sum::<f64>() / ps.len() as f64;
             let want = if !callers.is_empty() {
@@ -383,16 +408,14 @@ impl Graph {
 }
 
 pub fn free_spot(want: [f64; 2], placed: &HashMap<String, [f64; 2]>) -> [f64; 2] {
-    let taken = |x: f64, y: f64| {
-        placed
-            .values()
-            .any(|p| (p[0] - x).abs() < NODE_W + 24.0 && (p[1] - y).abs() < NODE_H + 18.0)
-    };
     let [x, y] = [want[0].round(), want[1].round()];
+    // Only nodes in this column can overlap, so the search below skips all the others.
+    let column: Vec<f64> = placed.values().filter(|p| (p[0] - x).abs() < NODE_W + 24.0).map(|p| p[1]).collect();
+    let taken = |y: f64| column.iter().any(|py| (py - y).abs() < NODE_H + 18.0);
     std::iter::once(0.0)
         .chain((1..400).flat_map(|i| [i as f64, -(i as f64)]))
         .map(|k| y + k * ROW_H / 2.0)
-        .find(|&cy| !taken(x, cy))
+        .find(|&cy| !taken(cy))
         .map(|cy| [x, cy])
         .unwrap_or([x, y])
 }
@@ -641,9 +664,10 @@ pub fn diff(base: &Graph, cur: &Graph) -> Vec<Change> {
 
 fn diff_net(base: &Graph, cur: &Graph, scope: Option<&str>) -> Vec<Change> {
     let scope = scope.map(String::from);
+    let (base_nodes, cur_nodes) = (base.by_id(), cur.by_id());
     let mut out = Vec::new();
     for after in &cur.nodes {
-        match base.node(&after.id) {
+        match base_nodes.get(after.id.as_str()).copied() {
             None => out.push(Change {
                 scope: scope.clone(),
                 subject: Subject::Node,
@@ -689,7 +713,7 @@ fn diff_net(base: &Graph, cur: &Graph, scope: Option<&str>) -> Vec<Change> {
         }
     }
     for before in &base.nodes {
-        if cur.node(&before.id).is_none() {
+        if !cur_nodes.contains_key(before.id.as_str()) {
             out.push(Change {
                 scope: scope.clone(),
                 subject: Subject::Node,
