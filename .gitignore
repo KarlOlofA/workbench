@@ -1,2 +1,5 @@
 /target
 /editor-js/node_modules
+__pycache__/
+# The Figma files this repository is bound to; kept local so file keys are not published.
+.workbench/figma.json

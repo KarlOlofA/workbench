@@ -137,6 +137,19 @@
           "why": "Existing projects have their reasons scattered over places the graph never showed",
           "source": "chat 2026-11-20",
           "date": "2026-11-20"
+        },
+        {
+          "decision": "query_instructions tells agents the lookup order: selected nodes and their connections, then node names via overview/search, then grep as a flagged fallback.",
+          "why": "The user set this traversal order for PRO-232.",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        },
+        {
+          "decision": "A selected node is checked against the message (description and files) before the agent acts; if it doesn't fit, the agent steps out one linked node at a time instead of opening all neighbours.",
+          "why": "The user asked for it after the first evaluation showed that working through every connection of a selected node cost more than grepping.",
+          "instead_of": "Working through all connections of the selected nodes",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
         }
       ],
       "files": [
@@ -150,7 +163,8 @@
         "project-view",
         "claims",
         "work-orders",
-        "intent-query"
+        "intent-query",
+        "figma"
       ]
     },
     {
@@ -165,6 +179,12 @@
           "instead_of": "only a free-text description that mixes what and why",
           "source": "chat 2026-11-20",
           "date": "2026-11-20"
+        },
+        {
+          "decision": "Added figma to the known node kinds, with Figma's orange as its colour",
+          "why": "The user wants a Figma node as its own kind of node on the graph",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
         }
       ],
       "files": [
@@ -333,7 +353,8 @@
         "external-references",
         "history-pane",
         "theme",
-        "blast-radius"
+        "blast-radius",
+        "figma"
       ]
     },
     {
@@ -399,6 +420,15 @@
       "title": "Chat pane",
       "kind": "screen",
       "description": "Conversation view of the agent the chat shows: user messages, labelled prompts, streaming assistant markdown, tool calls with results, info lines and errors. The input box sends Cmd::Send and has a Stop button for Cmd::Interrupt while busy. ChatTabs, in the chat's top bar next to “Chat”, shows the session's title and one tab per agent with its provider's logo (and a dot while it works and ! while it waits for an answer); clicking a tab switches the chat to that agent, hovering it shows an ✕ on its left that closes the agent (closing the last one closes the session), and + adds an agent. In a project view the session title in the top bar is a session picker: the project's own sessions, every session in its repositories and their worktrees, and + New project session. Picking a repository's session shows it without leaving the project view. A reply that names responsible nodes shows them as buttons with the agent's confidence; clicking one focuses it on the graph. File references in messages (a path, path:line or path:line:col) are links: clicking one opens the file in the editor at that line, hovering shows its size, and a path in backticks that doesn't exist is shown struck through.",
+      "decisions": [
+        {
+          "decision": "The node buttons under a reply are labelled 'Node in this reply:' / 'Nodes in this reply:'",
+          "why": "Replies name nodes both as candidates to pick from and as the nodes a code change touched, so 'pick one' was wrong after changes and 'Nodes affected' would be wrong for 'where is X?' answers; the user asked for a neutral label",
+          "instead_of": "'Responsible node:' / 'Possible nodes, pick one:'",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
+      ],
       "files": [
         "src/chat.rs",
         "src/markdown.rs"
@@ -411,15 +441,6 @@
         "agent-activity",
         "project-view",
         "code-editor"
-      ],
-      "decisions": [
-        {
-          "decision": "The node buttons under a reply are labelled 'Node in this reply:' / 'Nodes in this reply:'",
-          "why": "Replies name nodes both as candidates to pick from and as the nodes a code change touched, so 'pick one' was wrong after changes and 'Nodes affected' would be wrong for 'where is X?' answers; the user asked for a neutral label",
-          "instead_of": "'Responsible node:' / 'Possible nodes, pick one:'",
-          "source": "chat 2026-11-21",
-          "date": "2026-11-21"
-        }
       ]
     },
     {
@@ -481,15 +502,6 @@
       "title": "Build & install tooling",
       "kind": "job",
       "description": "Makefile targets for run, test, install, open, uninstall and the editor bundle build. install.sh builds a release binary, packages it as ~/Applications/Workbench.app and installs a `wbrs` launcher in ~/.local/bin. `make editor` uses esbuild to bundle editor-js into src/editor.bundle.js. Before building it checks for git, curl, cargo and, on Linux, make, a C compiler, pkg-config and the GUI libraries. It lists what's missing with the exact install commands (pacman, apt, dnf, zypper, apk or xbps; rustup for Rust; Xcode Command Line Tools on macOS) and runs them only after the user confirms on the terminal. It stops with an explanation on Debian/Ubuntu releases too old to have WebKitGTK 4.1. If the folder isn't a git checkout (a ZIP download), it offers to link it to the GitHub repo so the update check works, stashing any files that differ from main.",
-      "files": [
-        "Makefile",
-        "scripts/install.sh",
-        "README.md"
-      ],
-      "links": [
-        "desktop-entry",
-        "code-editor"
-      ],
       "decisions": [
         {
           "decision": "The Cargo package and binary are named workbench instead of rust-ui-test; the install script kills and deletes a leftover rust-ui-test binary from earlier installs.",
@@ -498,6 +510,15 @@
           "source": "chat 2026-11-21",
           "date": "2026-11-21"
         }
+      ],
+      "files": [
+        "Makefile",
+        "scripts/install.sh",
+        "README.md"
+      ],
+      "links": [
+        "desktop-entry",
+        "code-editor"
       ]
     },
     {
@@ -700,7 +721,8 @@
       ],
       "links": [
         "app-state",
-        "theme"
+        "theme",
+        "figma"
       ],
       "module": "mcp"
     },
@@ -963,6 +985,24 @@
       "title": "Intent query CLI",
       "kind": "api",
       "description": "Answers questions about the intent graph as JSON when the app binary runs with `query <dir> ...` instead of opening a window. `node` prints a node with the nodes it links to and from, `file` lists the nodes whose files cover a path, `history` prints a node's recorded changes, and `modules` lists every module and where it is attached. Agents are told to find code with it before searching the file system.",
+      "decisions": [
+        {
+          "decision": "Added `overview` (one line per node, no descriptions) and `search <words>` (title 3, id 2, description 1 points per word; short and question words ignored; a plural s dropped) as entry points when the agent doesn't know a node id or file yet.",
+          "why": "Without them an agent had to read the whole graph.json or grep to answer 'where is X?', which is the cost PRO-232 wants to lower.",
+          "instead_of": "Letting agents read graph.json whole",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        },
+        {
+          "decision": "Keyword search stays simple (no synonyms or embeddings); matching by meaning is left to the traversal model reading `overview`.",
+          "why": "Offline evaluation: search finds the expected node in its top 3 for 7 of 10 questions; the misses are synonyms ('newer release' vs 'Self-updater') a model handles from node names.",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
+      ],
+      "invariants": [
+        "Agents find code in this order: check a selected node first and, if it is wrong, step out one linked node at a time; without a selection read node names (overview/search); only then grep, which they must say they did."
+      ],
       "files": [
         "src/query.rs"
       ],
@@ -1013,6 +1053,107 @@
       "links": [
         "graph-model"
       ]
+    },
+    {
+      "id": "traversal-eval",
+      "title": "Traversal cost evaluation",
+      "kind": "job",
+      "description": "Measures whether finding files through the intent graph is cheaper than grepping. scripts/eval_traversal.py asks the questions in scripts/traversal_questions.json three ways with `claude -p` on the traversal model: with selected nodes, from node names, and with grep only, and prints cost, tokens, turns and hit rate. It spends real money, so it only runs by hand; the offline half is a test in the query CLI that checks keyword search against the same questions.",
+      "decisions": [
+        {
+          "decision": "Haiku graph traversal is only adopted if it costs less than grepping at the same hit rate; otherwise the work is replanned.",
+          "why": "The user's gate for PRO-232.",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        },
+        {
+          "decision": "Three of the ten questions select a node one link away from the answer, so stepping out from a wrong selection is measured too.",
+          "why": "The user's selection flow has to handle a wrong selection by stepping out one node at a time.",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        },
+        {
+          "decision": "The comparison runs on the execution model (sonnet), with haiku only as the traversal step.",
+          "why": "On haiku alone graph traversal cost the same as grep ($0.0253 vs $0.0254 for 10 questions); the saving PRO-232 is after is the expensive model's search turns.",
+          "source": "chat 2026-11-21",
+          "date": "2026-11-21"
+        }
+      ],
+      "files": [
+        "scripts/eval_traversal.py",
+        "scripts/traversal_questions.json"
+      ],
+      "links": [
+        "intent-query"
+      ]
+    },
+    {
+      "id": "figma",
+      "title": "Figma files binding",
+      "kind": "service",
+      "description": "Binds the repository to one Figma project and, optionally, the file that holds its design system. The project is picked in the MCP tab from the Figma REST API with the user's personal access token, which is stored in figma-token.json in the user's config folder, never in the project. The binding, with the project's files as they were when it was picked, is saved in .workbench/figma.json and committed. Every agent is told which Figma project and theme file are this repository's, and the graph gets a node of kind figma whose Sync theme button asks the agent to bring the linked theme files in line with Figma.",
+      "decisions": [
+        {
+          "decision": "The project picker uses the Figma REST API with a personal access token",
+          "why": "No Figma MCP tool lists a team's projects, and the REST API has no endpoint that lists a user's teams, so the user pastes a team URL once",
+          "instead_of": "Picking the project through the Figma MCP connection",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "Theme tokens are read and compared by the agent through the Figma MCP tools (get_figma_data), not by Workbench code",
+          "why": "The REST variables endpoint only works on Figma Enterprise plans, and the project rule asks for as little code as possible",
+          "instead_of": "Diffing Figma variables against theme files in Rust",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "The binding stores the project's file list as it was when picked",
+          "why": "The prompt can name the files without a REST call on every turn",
+          "instead_of": "Fetching and caching the file list in AppState",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "The token is added to the Figma MCP server's environment on each message (with_token), never saved in .workbench/mcp.json",
+          "why": "mcp.json is committed with the project, and the token is a personal secret",
+          "instead_of": "A ${FIGMA_API_KEY} reference the user has to export themselves",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "The repository is bound to Figma files pasted by URL, not to a project picked from a list",
+          "why": "Figma no longer gives personal access tokens the projects:read scope, so the projects endpoints returned 403 for the user's token even with every scope selected",
+          "instead_of": "Listing a team's projects and their files through the REST API (supersedes the earlier project-picker decision)",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": ".workbench/figma.json is git-ignored instead of committed",
+          "why": "The repository is public, and the user doesn't want the Figma file keys shared",
+          "instead_of": "Committing the binding with the project like mcp.json",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        }
+      ],
+      "files": [
+        "src/figma.rs",
+        ".workbench/figma.json"
+      ],
+      "links": [
+        "app-state",
+        "workbench-files",
+        "graph-model"
+      ],
+      "invariants": [
+        "Figma file keys are never committed: .workbench/figma.json stays in .gitignore."
+      ]
+    },
+    {
+      "id": "figma-2",
+      "title": "Figma",
+      "kind": "figma",
+      "description": "The repository's Figma files, the source of its designs and theme. Link it to the nodes that own the theme so Sync theme knows which files to update."
     }
   ],
   "flows": [
@@ -1248,6 +1389,15 @@
           "title": "MCP server model",
           "kind": "model",
           "description": "The Server type with its transport and scope (user or project), loading the user and project files into one list and saving each server back to its own file, and active(), the usable servers where a project server replaces a user server of the same name. claude_config turns the active servers into the mcpServers JSON for --mcp-config. KEY=value and Name: value lines become env and header objects, which the Codex and Vibe runners reuse for their own config formats. expand_env fills in ${VAR} references for the MCP manager. PRESETS lists the remote servers Workbench knows (name, URL and logo); a project server with a preset's name is shown as that preset's toggle.",
+          "decisions": [
+            {
+              "decision": "Figma is the open-source figma-developer-mcp server (Framelink) run locally with npx on the user's personal access token, and only reads from Figma",
+              "why": "Figma's remote MCP server returns 403 to Workbench's own OAuth sign-in because it only accepts clients Figma has approved; the user needs Figma's sign-in to go through Workbench's own auth, not through Claude Code, and only needs Figma → code for now",
+              "instead_of": "Figma's remote server (mcp.figma.com) and desktop-app server as presets",
+              "source": "chat 2026-11-22",
+              "date": "2026-11-22"
+            }
+          ],
           "files": [
             "src/mcp.rs"
           ],

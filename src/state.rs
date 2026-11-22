@@ -350,6 +350,8 @@ pub struct AppState {
     pub related_repos: Signal<Vec<String>>,
     pub mcp_servers: Signal<Vec<mcp::Server>>,
     pub mcp_status: Signal<Vec<McpStatus>>,
+    /// The Figma project this repository is bound to, from `.workbench/figma.json`.
+    pub figma: Signal<Option<crate::figma::Binding>>,
     pub provider_settings: Signal<providers::Settings>,
     pub projects: Signal<Vec<Project>>,
     /// The worktrees of every project repository, by the repository's path in the project.
@@ -444,6 +446,7 @@ impl AppState {
             related_repos: Signal::new(Vec::new()),
             mcp_servers: Signal::new(Vec::new()),
             mcp_status: Signal::new(Vec::new()),
+            figma: Signal::new(None),
             provider_settings: Signal::new(providers::Settings::load()),
             projects: Signal::new(projects::load()),
             worktrees: Signal::new(HashMap::new()),
@@ -614,6 +617,10 @@ impl AppState {
             errors.push(e);
             Vec::new()
         });
+        let figma = crate::figma::load(&cwd).unwrap_or_else(|e| {
+            errors.push(e);
+            None
+        });
         let entries = node_history::load(&cwd).unwrap_or_else(|e| {
             errors.push(e);
             Vec::new()
@@ -635,6 +642,7 @@ impl AppState {
         self.related_repos.set(related);
         self.mcp_servers.set(mcp_servers);
         self.mcp_status.set(Vec::new());
+        self.figma.set(figma);
         *self.rules_version.write() += 1;
         self.selected.set(Vec::new());
         self.ghost_branches.set(Vec::new());
@@ -1283,6 +1291,32 @@ impl AppState {
         if let Err(e) = mcp::save(&cwd, &self.mcp_servers.peek()) {
             self.workbench_error.set(Some(e));
         }
+    }
+
+    /// Binds this repository to Figma files (or unbinds it), and adds the graph's Figma node
+    /// the first time files are bound. Agents learn of the change from the next message.
+    pub fn set_figma(&mut self, binding: Option<crate::figma::Binding>) {
+        let cwd = self.cwd.peek().clone();
+        if let Err(e) = crate::figma::save(&cwd, binding.as_ref()) {
+            self.workbench_error.set(Some(e));
+        }
+        if binding.is_some() {
+            let has_node = self.graph.peek().nodes.iter().any(|n| n.kind.trim() == crate::figma::FIGMA_KIND);
+            if !has_node {
+                self.update_graph(|g| {
+                    let id = g.unique_id("figma");
+                    g.nodes.push(graph::Node {
+                        id,
+                        title: "Figma".into(),
+                        kind: crate::figma::FIGMA_KIND.into(),
+                        description: "The repository's Figma files, the source of its designs and theme. Link it to the nodes that own the theme so Sync theme knows which files to update.".into(),
+                        ..Default::default()
+                    });
+                });
+            }
+        }
+        self.figma.set(binding);
+        *self.rules_version.write() += 1;
     }
 
     /// Saves the user's provider settings (chosen provider, models, API keys).

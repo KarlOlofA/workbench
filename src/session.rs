@@ -240,6 +240,7 @@ async fn deliver(
     }
     let mode = *chat.chat_mode.peek();
     let servers = st.mcp_servers.peek().clone();
+    let servers = crate::figma::with_token(servers, &crate::figma::saved_token());
     let mcp_config = mcp::claude_config(&mcp_oauth::with_tokens(&servers).await);
     if live.as_ref().is_some_and(|l| l.rules_version != rules_version || l.mode != mode || l.mcp_config != mcp_config || l.model != model)
         && let Some(l) = live.take()
@@ -281,7 +282,7 @@ async fn deliver(
     }
 }
 
-/// The Workbench context every provider gets: graph upkeep, rules, related repos and the project.
+/// The Workbench context every provider gets: graph upkeep, rules, related repos, the bound Figma project and the project.
 /// Agents can also start other agents in their chat session (see `prompts::spawn_requests`).
 /// A project-level agent gets the project's repositories instead, since it works above them.
 fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
@@ -292,7 +293,8 @@ fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
         _ => {
             let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
             let base = prompts::with_project(base, project.as_ref(), &dir).unwrap_or_default();
-            format!("{base}{}{}", prompts::focus_instructions(), prompts::query_instructions(&crate::query::command_line(&dir)))
+            let figma = st.figma.peek().as_ref().map(crate::figma::prompt_section).unwrap_or_default();
+            format!("{base}{figma}{}{}", prompts::focus_instructions(), prompts::query_instructions(&crate::query::command_line(&dir)))
         }
     };
     Some(format!("{context}{}", prompts::spawn_agent_instructions(project.as_ref(), &st.provider_settings.peek())))
@@ -461,6 +463,7 @@ async fn start_turn(
     let settings = st.provider_settings.peek().clone();
     let mode = *chat.chat_mode.peek();
     let servers = st.mcp_servers.peek().clone();
+    let servers = crate::figma::with_token(servers, &crate::figma::saved_token());
     let mcp_servers = mcp_oauth::with_tokens(&servers).await;
     let mut instructions = system_prompt(st, chat).unwrap_or_default();
     if mode == ChatMode::Plan {

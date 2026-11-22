@@ -11,9 +11,9 @@ pub const NODE_H: f64 = 58.0;
 const COL_W: f64 = 260.0;
 const ROW_H: f64 = 84.0;
 
-pub const KNOWN_KINDS: [&str; 15] = [
+pub const KNOWN_KINDS: [&str; 16] = [
     "app", "api", "route", "handler", "service", "model", "store", "db", "external", "ui", "screen",
-    "component", "job", "module", "reference",
+    "component", "job", "module", "reference", "figma",
 ];
 
 pub const REFERENCE_KIND: &str = "reference";
@@ -878,6 +878,7 @@ pub fn kind_color(kind: &str) -> &'static str {
         "job" | "worker" | "queue" | "event" => "#79c0ff",
         "module" | "package" | "feature" => "#93a1e8",
         "reference" | "ref" | "docs" => "#e5c07b",
+        "figma" | "design" => "#f24e1e",
         _ => "#8a909c",
     }
 }

@@ -136,9 +136,11 @@ pub fn focus_instructions() -> String {
 /// `query` (see `crate::query`) on the agent's folder.
 pub fn query_instructions(command: &str) -> String {
     format!(
-        "\n\nFind code through the graph before searching the file system. `{command} file <path>` lists the nodes that own a file, \
-         `{command} node <id> [--module <m>]` prints a node with the nodes it links to and from, `{command} history <id>` its recorded changes, \
-         and `{command} modules` every module. All print JSON. Search the file system (grep, glob) only for what the graph doesn't cover; \
+        "\n\nFind code through the graph before searching the file system, in this order: \
+         1. If the user selected nodes, check first that one fits the request from its description and files. If it does, work there. If not, step out one node at a time: open a single linked node with `{command} node <id> [--module <m>]` (it prints the node with its files and the nodes it links to and from), check it, and only then try the next. \
+         2. Otherwise read the node names with `{command} overview` (one line per node, `module/id: title (kind)`) or `{command} search <words>`, pick the nodes that look right and open them with `node`. \
+         3. Only if no node fits, search the file system (grep, glob) and say so in your reply, naming the files the graph is missing. \
+         `{command} file <path>` lists the nodes that own a file, `{command} history <id>` a node's recorded changes and `{command} modules` every module. All print JSON. \
          Workbench flags files you change that no node owns, so say which node they belong to.\n"
     )
 }
@@ -1008,7 +1010,7 @@ pub fn with_selection(nodes: Option<&str>, ghosts: Option<&str>, text: &str) -> 
     let mut p = String::new();
     if let Some(nodes) = nodes {
         p.push_str(&format!(
-            "The user has selected these nodes in the Workbench architecture graph (`{GRAPH_FILE}`). Their message is about them; use the nodes and their `files` as the starting point.\n\n{nodes}"
+            "The user has selected these nodes in the Workbench architecture graph (`{GRAPH_FILE}`). Their message is probably about them. Before you act, check that a selected node fits the message from its description and `files`. If none fits, step out one linked node at a time and check each, before searching anywhere else.\n\n{nodes}"
         ));
     }
     if let Some(ghosts) = ghosts {

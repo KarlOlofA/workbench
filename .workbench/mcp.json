@@ -5,6 +5,17 @@
       "enabled": true,
       "transport": "http",
       "url": "https://mcp.linear.app/mcp"
+    },
+    {
+      "name": "figma",
+      "enabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "figma-developer-mcp",
+        "--stdio"
+      ]
     }
   ]
 }

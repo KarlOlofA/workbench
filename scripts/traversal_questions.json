@@ -1,0 +1,12 @@
+[
+  {"question": "Where do we decide that a provider ran out of tokens and switch to the fallback provider?", "select": ["llm-providers"], "expect": ["src/providers.rs"]},
+  {"question": "Which file draws the links between graph nodes with right-angle turns?", "select": ["graph-canvas"], "expect": ["src/routing.rs"], "note": "selected node is one link away from the answer"},
+  {"question": "Where is the code that undoes an agent's edits to files outside its nodes?", "select": ["session-loop"], "expect": ["src/scope.rs"], "note": "selected node is one link away from the answer"},
+  {"question": "Where are OpenAI-style chat completion requests sent and their tool calls handled?", "select": ["providers/api-chat"], "expect": ["src/api_chat.rs"]},
+  {"question": "Where does the app check for a newer release and replace its own binary?", "select": ["app-root"], "expect": ["src/update.rs"], "note": "selected node is one link away from the answer"},
+  {"question": "Where is the sign-in flow for remote MCP servers that need OAuth?", "select": ["mcp/mcp-oauth"], "expect": ["src/mcp_oauth.rs"]},
+  {"question": "Which file finds which branches touch the same nodes as the current work?", "select": ["claims"], "expect": ["src/claims.rs"]},
+  {"question": "Where is the system prompt for agents put together, including the graph rules?", "select": ["prompt-builder"], "expect": ["src/prompts.rs"]},
+  {"question": "Where are the command-line flags for starting the Codex CLI set?", "select": ["providers/codex-runner"], "expect": ["src/codex.rs"]},
+  {"question": "Where are pull requests listed and merged through the gh command?", "select": ["github/gh-service"], "expect": ["src/github.rs", "src/github_view.rs"]}
+]

@@ -2,6 +2,8 @@ use dioxus::prelude::*;
 
 use crate::dropdown::{Choice, Dropdown};
 
+use crate::config;
+use crate::figma::{self, Token};
 use crate::mcp::{self, Scope, Server, Transport};
 use crate::logos::LogoIcon;
 use crate::mcp_oauth;
@@ -11,6 +13,7 @@ use crate::state::AppState;
 pub fn McpView() -> Element {
     let st = use_context::<AppState>();
     let servers = st.mcp_servers.read().clone();
+    let figma_on = servers.iter().any(|s| s.enabled && mcp::preset(s).is_some_and(|p| p.logo == crate::logos::Logo::Figma));
     // Cards edit the list by index, so each section keeps the servers' places in the whole list.
     // Servers added from a preset show as their toggle instead of as a card.
     let of = |scope: Scope| {
@@ -30,6 +33,9 @@ pub fn McpView() -> Element {
             div { class: "mcp-presets",
                 for (index, preset) in mcp::PRESETS.iter().enumerate() {
                     PresetToggle { key: "{preset.name}", index }
+                }
+                if figma_on {
+                    FigmaBinding {}
                 }
             }
             ServerSection {
@@ -104,8 +110,7 @@ fn PresetToggle(index: usize) -> Element {
         st.update_mcp(move |list| {
             list.retain(|s| mcp::preset(s).is_none_or(|p| p.name != preset.name));
             if !on {
-                let url = preset.url.to_string();
-                list.push(Server { name: preset.name.into(), enabled: true, transport: Transport::Http, url, ..Default::default() });
+                list.push(preset.server());
             }
         });
     };
@@ -119,11 +124,13 @@ fn PresetToggle(index: usize) -> Element {
                 title: if on { "Turn off" } else { "Turn on for this project" },
                 onclick: toggle,
                 LogoIcon { logo: preset.logo }
-                span { "{preset.logo.name()}" }
+                span { "{preset.label}" }
                 span { class: "switch" }
             }
             if let Some(server) = server.filter(|s| s.enabled) {
-                SignIn { server: server.clone() }
+                if server.transport != Transport::Stdio {
+                    SignIn { server: server.clone() }
+                }
                 span { class: "muted small-text", "{status_text(&st, &server)}" }
             }
         }
@@ -291,6 +298,120 @@ fn ServerCard(index: usize, server: Server) -> Element {
                 }
             }
             div { class: "muted small-text", "Status: {status}" }
+        }
+    }
+}
+
+/// Binds this repository to Figma files pasted by URL. Figma no longer gives personal access
+/// tokens the projects:read scope, so files can't be picked from a project list.
+#[component]
+fn FigmaBinding() -> Element {
+    let mut st = use_context::<AppState>();
+    let binding = st.figma.read().clone().unwrap_or_default();
+    let mut token = use_signal(|| config::load_json::<Token>(figma::TOKEN_FILE).token);
+    let mut file_url = use_signal(String::new);
+    let mut note = use_signal(String::new);
+
+    let save_token = move |e: Event<FormData>| {
+        let value = e.value();
+        token.set(value.clone());
+        if let Err(e) = config::save_json(figma::TOKEN_FILE, &Token { token: value }) {
+            note.set(e);
+        }
+    };
+    let add_file = {
+        let binding = binding.clone();
+        move |_| {
+            let Some(key) = figma::file_key_from_url(&file_url.read()) else {
+                note.set("Paste a file URL such as https://www.figma.com/design/AbC123/Design-system".into());
+                return;
+            };
+            if binding.files.iter().any(|f| f.key == key) {
+                note.set("That file is already added".into());
+                return;
+            }
+            let mut binding = binding.clone();
+            note.set("Looking up the file…".into());
+            spawn(async move {
+                match figma::file(&token.peek(), &key).await {
+                    Ok(file) => {
+                        binding.files.push(file);
+                        file_url.set(String::new());
+                        note.set(String::new());
+                        st.set_figma(Some(binding));
+                    }
+                    Err(e) => note.set(e),
+                }
+            });
+        }
+    };
+    let pick_theme = {
+        let binding = binding.clone();
+        move |key: String| {
+            let mut b = binding.clone();
+            b.theme_file = if key.is_empty() { None } else { Some(key) };
+            st.set_figma(Some(b));
+        }
+    };
+
+    let file_choices: Vec<Choice> = std::iter::once(Choice::new("", "No theme file"))
+        .chain(binding.files.iter().map(|f| Choice::new(f.key.clone(), f.name.clone())))
+        .collect();
+
+    rsx! {
+        div { class: "rule",
+            strong { "Figma files for this repository" }
+            div { class: "muted small-text",
+                "Uses a Figma personal access token (Figma → Settings → Security) with File content: read. It is stored in your user config, never in the project, and handed to the Figma MCP server on each message. The files you add are saved in "
+                code { "{figma::FIGMA_FILE}" }
+                " (git-ignored, so file keys stay on this machine) and tell every agent which Figma files and theme file belong to this repository."
+            }
+            input {
+                r#type: "password",
+                placeholder: "Figma personal access token",
+                value: "{token}",
+                oninput: save_token,
+            }
+            div { class: "rule-head",
+                input {
+                    placeholder: "Figma file URL, e.g. https://www.figma.com/design/AbC123/Design-system",
+                    value: "{file_url}",
+                    oninput: move |e| file_url.set(e.value()),
+                }
+                button { class: "small", disabled: token.read().trim().is_empty(), onclick: add_file, "Add" }
+            }
+            for file in binding.files.clone() {
+                div { key: "{file.key}", class: "rule-head",
+                    a { class: "small-text", href: "{figma::file_url(&file.key)}", target: "_blank", "{file.name}" }
+                    button {
+                        class: "small",
+                        title: "Remove this file",
+                        onclick: {
+                            let binding = binding.clone();
+                            move |_| {
+                                let mut b = binding.clone();
+                                b.files.retain(|f| f.key != file.key);
+                                if b.theme_file.as_deref() == Some(file.key.as_str()) {
+                                    b.theme_file = None;
+                                }
+                                st.set_figma(if b.files.is_empty() { None } else { Some(b) });
+                            }
+                        },
+                        "✕"
+                    }
+                }
+            }
+            if !binding.files.is_empty() {
+                label { "Theme file (the design system with the colours, fonts and radii)" }
+                Dropdown {
+                    value: binding.theme_file.clone().unwrap_or_default(),
+                    choices: file_choices,
+                    onchange: pick_theme,
+                }
+            }
+            if !note.read().is_empty() {
+                span { class: "muted small-text", "{note}" }
+            }
         }
     }
 }

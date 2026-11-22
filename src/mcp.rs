@@ -10,16 +10,50 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-/// A remote MCP server Workbench knows, shown as a toggle with its logo in the MCP tab.
+/// An MCP server Workbench knows, shown as a toggle with its logo in the MCP tab.
 /// Turning it on adds it as a project server under its name.
 pub struct Preset {
     pub name: &'static str,
-    pub url: &'static str,
+    pub label: &'static str,
     pub logo: crate::logos::Logo,
+    pub transport: Transport,
+    /// The URL of a remote server, or the command of a local one.
+    pub target: &'static str,
+    /// Local servers only: the command's arguments.
+    pub args: &'static [&'static str],
 }
 
-pub const PRESETS: [Preset; 1] =
-    [Preset { name: "linear", url: "https://mcp.linear.app/mcp", logo: crate::logos::Logo::Linear }];
+impl Preset {
+    pub fn server(&self) -> Server {
+        let (url, command) = match self.transport {
+            Transport::Stdio => (String::new(), self.target.to_string()),
+            Transport::Http | Transport::Sse => (self.target.to_string(), String::new()),
+        };
+        let args = self.args.iter().map(|a| a.to_string()).collect();
+        Server { name: self.name.into(), enabled: true, transport: self.transport, url, command, args, ..Default::default() }
+    }
+}
+
+/// Figma runs the open-source Framelink server (figma-developer-mcp) on the Figma REST API with the
+/// user's personal access token, because Figma's own remote server refuses clients it hasn't approved.
+pub const PRESETS: [Preset; 2] = [
+    Preset {
+        name: "linear",
+        label: "Linear",
+        logo: crate::logos::Logo::Linear,
+        transport: Transport::Http,
+        target: "https://mcp.linear.app/mcp",
+        args: &[],
+    },
+    Preset {
+        name: crate::figma::SERVER_NAME,
+        label: "Figma",
+        logo: crate::logos::Logo::Figma,
+        transport: Transport::Stdio,
+        target: "npx",
+        args: &["-y", "figma-developer-mcp", "--stdio"],
+    },
+];
 
 /// The preset a server was added from: a project server with a preset's name.
 pub fn preset(server: &Server) -> Option<&'static Preset> {

@@ -1794,6 +1794,9 @@ fn NodePane() -> Element {
                     st.update_net(|g| if let Some(n) = g.node_mut(&id) { n.kind = v });
                 },
             }
+            if node.kind.trim() == crate::figma::FIGMA_KIND {
+                FigmaBox { links: node.links.clone() }
+            }
             if is_ref {
                 ReferenceBox { id: id.clone(), reference: reference.clone(), title: node.title.clone(), locked }
             } else {
@@ -2005,6 +2008,45 @@ fn NodePane() -> Element {
                 }
             }
         }
+    }
+}
+
+#[component]
+fn FigmaBox(links: Vec<String>) -> Element {
+    let mut st = use_context::<AppState>();
+    let Some(binding) = st.figma.read().clone() else {
+        return rsx! {
+            div { class: "muted small-text", "No Figma files are bound to this repository yet. Turn on Figma in Code → MCP and add a file." }
+        };
+    };
+    // The theme lives in the files of the nodes this node links to.
+    let theme_files: Vec<String> = {
+        let g = st.graph.read();
+        links.iter().filter_map(|l| g.node(l)).flat_map(|n| n.files.clone()).collect()
+    };
+    let theme = binding.theme().cloned();
+    let sync = {
+        let binding = binding.clone();
+        let theme_files = theme_files.clone();
+        move |_| {
+            let text = crate::figma::sync_theme_prompt(&binding, &theme_files);
+            st.chat_or_new().send(Cmd::Prompt { label: "Sync theme from Figma".into(), text });
+        }
+    };
+
+    rsx! {
+        label { "Figma" }
+        div { class: "small-text", "{binding.files.len()} Figma files" }
+        label { "Theme file" }
+        if let Some(f) = theme {
+            a { class: "small-text", href: "{crate::figma::file_url(&f.key)}", target: "_blank", "{f.name}" }
+        } else {
+            div { class: "muted small-text", "None picked; choose one in Code → MCP." }
+        }
+        div { class: "muted small-text",
+            if theme_files.is_empty() { "Link this node to the nodes that own the theme so Sync theme knows which files to update." } else { "Syncs into: {theme_files.join(\", \")}" }
+        }
+        button { class: "small", title: "Ask the agent to compare the Figma theme with the code and update the code", onclick: sync, "Sync theme" }
     }
 }
 

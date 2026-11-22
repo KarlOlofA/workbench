@@ -27,6 +27,7 @@ mod history;
 mod icons;
 mod logos;
 mod markdown;
+mod figma;
 mod mcp;
 mod mcp_manager;
 mod mcp_oauth;
