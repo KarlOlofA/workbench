@@ -1,7 +1,10 @@
 <div align="center">
 <img width="500" height="100" alt="workbench-lockup-transparent-light-3200" src="https://github.com/user-attachments/assets/31b548f2-74d4-4607-a2b2-a6e1c4d85af4" />
 </div>
-Workbench is a desktop app for shaping a codebase through an **architecture graph**, **project rules** and an **AI coding agent**. It is written in Rust with [Dioxus](https://dioxuslabs.com/) and runs as a native window on Linux, macOS and Windows.
+
+Workbench is a desktop app for shaping a codebase through an **architecture graph**, **project rules** and an **AI coding agent**. 
+
+It is written in Rust with [Dioxus](https://dioxuslabs.com/) and runs as a native window on Linux, macOS and Windows.
 
 You open a project folder, and Workbench shows how the code fits together as a graph of nodes (screens, services, stores, endpoints and so on). You talk to an agent in the chat. The agent edits the code and keeps the graph in step with it. You can also edit the graph yourself and ask the agent to make the code match.
 
