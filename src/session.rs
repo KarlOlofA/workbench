@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::agent::{self, AgentAdapter, TurnOptions};
 use crate::api_chat;
-use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, EXIT_PLAN_TOOL,PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
+use crate::claude::{ChatMode, ClaudeEvent, ClaudeProcess, DISCUSSION_DISALLOWED_TOOLS, EXIT_PLAN_TOOL, PermissionDecision, SpawnOptions, tool_file_path, tool_summary, tool_touches_files};
 use crate::history;
 use crate::projects::same_dir;
 use crate::{mcp, mcp_oauth, scope};
@@ -29,6 +29,8 @@ pub async fn run(mut st: AppState, mut chat: Chat, mut rx: tokio::sync::mpsc::Un
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, ClaudeEvent)>();
     let mut live: Option<Live> = None;
     let mut generation = 0u64;
+    // How many of the execution chat's items a discussion chat has been shown (PRO-248).
+    let mut digested = 0usize;
 
     loop {
         if !*chat.busy.peek() && !chat.queued.peek().is_empty() {
@@ -37,7 +39,7 @@ pub async fn run(mut st: AppState, mut chat: Chat, mut rx: tokio::sync::mpsc::Un
                 st.resume_job();
             }
             let text = msg.prompt.clone();
-            deliver(st, chat, &mut live, &mut generation, &ev_tx, ChatItem::User(msg), text).await;
+            deliver(st, chat, &mut live, &mut generation, &ev_tx, &mut digested, ChatItem::User(msg), text).await;
             continue;
         }
         tokio::select! {
@@ -140,7 +142,7 @@ pub async fn run(mut st: AppState, mut chat: Chat, mut rx: tokio::sync::mpsc::Un
                         let cwd = chat.dir.cloned();
                         let load_id = id.clone();
                         let items = tokio::task::spawn_blocking(move || history::load(&cwd, &load_id)).await.unwrap_or_default();
-                        st.save_transcript(&chat.agent_id.cloned(), Some(id.clone()));
+                        st.save_transcript(chat, Some(id.clone()));
                         chat.session_id.set(Some(id));
                         chat.last_cost.set(None);
                         chat.items.set(items);
@@ -166,14 +168,14 @@ pub async fn run(mut st: AppState, mut chat: Chat, mut rx: tokio::sync::mpsc::Un
                         finish(st, chat, false);
                         if !keep_session {
                             chat.session_id.set(None);
-                            st.save_transcript(&chat.agent_id.cloned(), None);
+                            st.save_transcript(chat, None);
                             chat.items.write().clear();
                             chat.last_cost.set(None);
                         }
                         continue;
                     }
                 };
-                deliver(st, chat, &mut live, &mut generation, &ev_tx, shown, text).await;
+                deliver(st, chat, &mut live, &mut generation, &ev_tx, &mut digested, shown, text).await;
             }
             Some((event_gen, ev)) = ev_rx.recv() => {
                 if event_gen != generation {
@@ -200,6 +202,19 @@ pub async fn run(mut st: AppState, mut chat: Chat, mut rx: tokio::sync::mpsc::Un
                         chat.busy.set(false);
                         finish(st, chat, false);
                     }
+                    continue;
+                }
+                // A discussion chat is read only: it never gets permission to act.
+                if let ClaudeEvent::Permission(req) = &ev
+                    && chat.is_discussion()
+                    && let Some(l) = live.as_mut()
+                {
+                    let decision = PermissionDecision::Deny { message: DISCUSSION_DENIAL.into(), interrupt: false };
+                    if let Err(e) = l.agent.respond_permission(&req.request_id, &decision).await {
+                        chat.items.write().push(ChatItem::Error(format!("could not deny the permission request: {e:#}")));
+                    }
+                    let cwd = chat.dir.cloned();
+                    chat.items.write().push(ChatItem::Info(format!("Denied {} (discussion chats are read only): {}", req.tool, tool_summary(&req.tool, &req.input, &cwd))));
                     continue;
                 }
                 if let ClaudeEvent::Permission(req) = &ev
@@ -229,9 +244,16 @@ async fn deliver(
     live: &mut Option<Live>,
     generation: &mut u64,
     ev_tx: &tokio::sync::mpsc::UnboundedSender<(u64, ClaudeEvent)>,
-    shown: ChatItem,
-    text: String,
+    digested: &mut usize,
+    mut shown: ChatItem,
+    mut text: String,
 ) {
+    if chat.is_discussion() {
+        text = discussion_prompt(st, chat, digested, &text);
+        if let ChatItem::User(msg) = &mut shown {
+            msg.prompt = text.clone();
+        }
+    }
     let rules_version = *st.rules_version.peek();
     let (provider, model) = st.agent_provider(chat);
     if provider != Provider::ClaudeCode {
@@ -259,6 +281,7 @@ async fn deliver(
             append_system_prompt: system_prompt(st, chat),
             mcp_config: mcp_config.clone(),
             model: model.clone(),
+            disallowed_tools: if chat.is_discussion() { DISCUSSION_DISALLOWED_TOOLS.to_vec() } else { Vec::new() },
         };
         match ClaudeProcess::spawn(&opts, *generation, ev_tx.clone()) {
             Ok(proc) => *live = Some(Live { agent: Box::new(proc), rules_version, mode, mcp_config, model }),
@@ -287,6 +310,12 @@ async fn deliver(
 /// A project-level agent gets the project's repositories instead, since it works above them.
 fn system_prompt(st: &AppState, chat: &Chat) -> Option<String> {
     let dir = chat.dir.cloned();
+    if chat.is_discussion() {
+        let base = st.with_refs(|refs| prompts::system_append(Some(&*st.graph.peek()), &st.rules.peek(), &st.related_repos.peek(), Some(refs)));
+        let base = prompts::with_project(base, st.chat_project(chat).as_ref(), &dir).unwrap_or_default();
+        let agent = st.execution_of(chat).and_then(|c| agent_name(st, &c)).unwrap_or_else(|| "the agent".into());
+        return Some(format!("{base}{}{}", prompts::focus_instructions(), prompts::discussion_instructions(&agent)));
+    }
     let project = st.chat_project(chat);
     let context = match (st.project_session_of(chat), project.as_ref()) {
         (Some(_), Some(p)) => prompts::project_agent_prompt(p, &dir),
@@ -363,7 +392,7 @@ fn here(st: &AppState, chat: &Chat) -> bool {
 
 /// Starts tracking the graph edits of this agent's turn when it works in the open folder.
 fn begin_turn(st: &mut AppState, chat: &Chat) {
-    if here(st, chat) {
+    if here(st, chat) && !chat.is_discussion() {
         st.begin_chat_turn(&chat.agent_id.cloned());
     }
 }
@@ -431,6 +460,98 @@ fn handover(items: &[ChatItem]) -> String {
     )
 }
 
+/// What a discussion chat's agent is told when it asks for permission to act.
+const DISCUSSION_DENIAL: &str = "This is a read-only discussion chat: you may read and search, but not change anything. \
+     Explain what you would do instead, so the user can tell the execution agent.";
+
+/// How many of the execution chat's latest items a discussion message carries at most.
+const DIGEST_ITEMS: usize = 40;
+/// Longest text of one item in a digest; longer replies and results are cut.
+const DIGEST_ITEM_CHARS: usize = 1500;
+
+/// The name of the agent a chat runs, as its session's tab shows it.
+fn agent_name(st: &AppState, chat: &Chat) -> Option<String> {
+    let id = chat.agent_id.cloned();
+    st.sessions.peek().iter().flat_map(|s| s.agents.iter()).find(|a| a.id == id).map(|a| a.name.clone())
+}
+
+/// The prompt a discussion chat sends for the user's `text`: what happened in the execution
+/// chat since the last discussion message, its current state, then the user's question.
+/// `digested` counts the execution items already sent, so each message only carries new ones.
+fn discussion_prompt(st: &AppState, chat: &Chat, digested: &mut usize, text: &str) -> String {
+    let Some(exec) = st.execution_of(chat) else { return text.to_string() };
+    let items = exec.items.peek();
+    // The execution chat was cleared or reloaded: start over.
+    if *digested > items.len() {
+        *digested = 0;
+    }
+    let digest = transcript_digest(&items[*digested..], DIGEST_ITEMS);
+    *digested = items.len();
+    let state = execution_state(&exec);
+    discussion_message(&digest, &state, text)
+}
+
+/// The execution chat's state, for a discussion message.
+fn execution_state(exec: &Chat) -> String {
+    if let Some(approval) = exec.plan_approval.peek().as_ref() {
+        return format!("Waiting for the user to approve this plan:\n{}", cut(&approval.plan, DIGEST_ITEM_CHARS * 2));
+    }
+    if let Some(req) = exec.permissions.peek().first() {
+        let summary = tool_summary(&req.tool, &req.input, &exec.dir.peek());
+        return format!("Waiting for the user's permission to use {}: {summary}", req.tool);
+    }
+    let mode = exec.chat_mode.peek().label();
+    match *exec.busy.peek() {
+        true => format!("Working (mode: {mode})"),
+        false => format!("Idle, waiting for the user's next message (mode: {mode})"),
+    }
+}
+
+fn discussion_message(digest: &str, state: &str, text: &str) -> String {
+    let digest = if digest.is_empty() { "(nothing new since your last message)" } else { digest };
+    format!(
+        "<execution_chat>\nNew in the execution chat since my last message:\n\n{digest}\n\nIts state now: {state}\n</execution_chat>\n\n{text}"
+    )
+}
+
+/// The latest `limit` items of a chat as plain text: messages, replies, tool calls with
+/// whether they failed, notes and errors. Long texts are cut.
+fn transcript_digest(items: &[ChatItem], limit: usize) -> String {
+    let lines: Vec<String> = items
+        .iter()
+        .filter_map(|i| match i {
+            ChatItem::User(m) => Some(format!("User: {}", cut(&m.text, DIGEST_ITEM_CHARS))),
+            ChatItem::Prompt { label, text } => Some(format!("Prompt ({label}): {}", cut(text, DIGEST_ITEM_CHARS))),
+            ChatItem::Assistant { text, .. } if !text.trim().is_empty() => Some(format!("Agent: {}", cut(text, DIGEST_ITEM_CHARS))),
+            ChatItem::Tool { name, summary, result, .. } => {
+                let outcome = match result {
+                    None => "running",
+                    Some((_, true)) => "failed",
+                    Some((_, false)) => "ok",
+                };
+                Some(format!("Tool {name} ({outcome}): {}", cut(summary, 200)))
+            }
+            ChatItem::Info(text) => Some(format!("Note: {}", cut(text, 300))),
+            ChatItem::Error(text) => Some(format!("Error: {}", cut(text, 600))),
+            _ => None,
+        })
+        .collect();
+    let skipped = lines.len().saturating_sub(limit);
+    let mut out = lines[skipped..].join("\n\n");
+    if skipped > 0 {
+        out = format!("({skipped} earlier items left out)\n\n{out}");
+    }
+    out
+}
+
+/// `text` cut to at most `max` characters, marked when cut.
+fn cut(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
 /// The file-system searches (Grep, Glob) the agent ran since the user's last message.
 fn file_searches(items: &[ChatItem]) -> usize {
     items
@@ -466,7 +587,7 @@ async fn start_turn(
     let servers = crate::figma::with_token(servers, &crate::figma::saved_token());
     let mcp_servers = mcp_oauth::with_tokens(&servers).await;
     let mut instructions = system_prompt(st, chat).unwrap_or_default();
-    if mode == ChatMode::Plan {
+    if mode == ChatMode::Plan && !chat.is_discussion() {
         instructions.push_str(prompts::plan_mode_instructions());
     }
     let opts = TurnOptions {
@@ -525,7 +646,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             st.mcp_status.set(mcp_servers);
             // Reopening the app loads Workbench transcripts, so only Workbench sessions are remembered.
             if st.agent_provider(chat).0 == Provider::ClaudeCode {
-                st.save_transcript(&chat.agent_id.cloned(), Some(session_id.clone()));
+                st.save_transcript(chat, Some(session_id.clone()));
             }
             chat.session_id.set(Some(session_id));
             chat.model.set(model);
@@ -634,7 +755,11 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
                 items.push(ChatItem::Focus(focus.clone()));
             }
             drop(items);
-            start_spawns(st, *chat, spawns);
+            // A discussion chat starts nothing and its replies are never plans to run.
+            let discussion = chat.is_discussion();
+            if !discussion {
+                start_spawns(st, *chat, spawns);
+            }
             // One match is shown right away; with several the user picks one in the chat.
             if let [only] = focus.as_slice()
                 && here(st, chat)
@@ -648,7 +773,7 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             }
             // Providers without a plan mode of their own: a plan-mode reply that doesn't ask
             // questions is the plan, so ask how to run it.
-            let plan_from_reply = st.agent_provider(chat).0 != Provider::ClaudeCode && *chat.chat_mode.peek() == ChatMode::Plan;
+            let plan_from_reply = !discussion && st.agent_provider(chat).0 != Provider::ClaudeCode && *chat.chat_mode.peek() == ChatMode::Plan;
             if plan_from_reply && !is_error && !asked {
                 let plan = chat.items.peek().iter().rev().find_map(|i| match i {
                     ChatItem::Assistant { text, .. } => Some(text.clone()),
@@ -658,12 +783,12 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
                     chat.plan_approval.set(Some(PlanApproval { plan, request: None }));
                 }
             }
-            if here(st, chat) {
+            if here(st, chat) && !discussion {
                 st.bump_repo();
                 st.reload_open_file_if_clean();
             }
         }
-        ClaudeEvent::Permission(req) if req.tool == EXIT_PLAN_TOOL => {
+        ClaudeEvent::Permission(req) if req.tool == EXIT_PLAN_TOOL && !chat.is_discussion() => {
             let plan = req.input.get("plan").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
             chat.plan_approval.set(Some(PlanApproval { plan, request: Some(req) }));
         }
@@ -680,5 +805,57 @@ fn handle_event(st: &mut AppState, chat: &mut Chat, ev: ClaudeEvent) {
             .write()
             .push(ChatItem::Error(format!("Claude Code output Workbench doesn't recognise: {what}. Some agent output may be missing."))),
         ClaudeEvent::ControlRequest { .. } | ClaudeEvent::Exited => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Message;
+
+    fn user(text: &str) -> ChatItem {
+        ChatItem::User(Message { text: text.into(), context: Vec::new(), prompt: format!("ctx {text}") })
+    }
+
+    #[test]
+    fn digest_shows_messages_replies_and_tool_outcomes() {
+        let items = vec![
+            user("add a login page"),
+            ChatItem::Assistant { text: "On it.".into(), streaming: false },
+            ChatItem::Tool { id: "1".into(), name: "Edit".into(), summary: "src/login.rs".into(), input: String::new(), result: Some((String::new(), false)) },
+            ChatItem::Tool { id: "2".into(), name: "Bash".into(), summary: "cargo test".into(), input: String::new(), result: Some((String::new(), true)) },
+            ChatItem::Tool { id: "3".into(), name: "Read".into(), summary: "src/app.rs".into(), input: String::new(), result: None },
+            ChatItem::Error("boom".into()),
+        ];
+        let digest = transcript_digest(&items, 40);
+        assert!(digest.contains("User: add a login page"), "{digest}");
+        assert!(!digest.contains("ctx add"), "the user's words, not the prompt sent: {digest}");
+        assert!(digest.contains("Agent: On it."));
+        assert!(digest.contains("Tool Edit (ok): src/login.rs"));
+        assert!(digest.contains("Tool Bash (failed): cargo test"));
+        assert!(digest.contains("Tool Read (running): src/app.rs"));
+        assert!(digest.contains("Error: boom"));
+    }
+
+    #[test]
+    fn digest_keeps_the_latest_items_and_says_how_many_it_left_out() {
+        let items: Vec<ChatItem> = (0..5).map(|i| user(&format!("m{i}"))).collect();
+        let digest = transcript_digest(&items, 2);
+        assert!(digest.starts_with("(3 earlier items left out)"), "{digest}");
+        assert!(digest.contains("m3") && digest.contains("m4") && !digest.contains("m2"));
+    }
+
+    #[test]
+    fn long_texts_are_cut_on_char_boundaries() {
+        assert_eq!(cut("åäö", 2), "åä…");
+        assert_eq!(cut("abc", 3), "abc");
+    }
+
+    #[test]
+    fn discussion_message_wraps_the_question() {
+        let msg = discussion_message("", "Working (mode: Auto)", "what is it doing?");
+        assert!(msg.contains("nothing new since your last message"));
+        assert!(msg.contains("Its state now: Working (mode: Auto)"));
+        assert!(msg.ends_with("</execution_chat>\n\nwhat is it doing?"));
     }
 }

@@ -9,7 +9,7 @@ use crate::icons::{Icon, IconSvg};
 use crate::logos::{Logo, LogoIcon};
 use crate::markdown;
 use crate::prompts;
-use crate::state::{AppState, Chat, ChatItem, ChatRequest, Cmd, PlanApproval};
+use crate::state::{AppState, Chat, ChatItem, ChatRequest, ChatView, Cmd, PlanApproval};
 
 /// Clicks on file references in replies (`a.file-ref`, see `markdown::to_html_with_files`)
 /// open the file in the editor at the line they name. One listener per window; a new one
@@ -39,16 +39,24 @@ fn use_file_ref_clicks(mut st: AppState) {
 
 #[component]
 pub fn ChatPane() -> Element {
-    let st = use_context::<AppState>();
+    let mut st = use_context::<AppState>();
     use_file_ref_clicks(st);
-    let chat = st.chat();
+    let chat = st.shown_chat();
     let items = chat.items.read();
+    let discussion = chat.is_discussion();
+    // In the discussion chat: what the execution chat waits for, so the user goes back to it.
+    let execution_waits = discussion && st.chat().waiting();
 
     rsx! {
-        div { class: "chat",
+        div { class: if discussion { "chat discussion" } else { "chat" },
             div { class: "chat-log",
                 div { class: "chat-log-inner",
-                    if items.is_empty() {
+                    if items.is_empty() && discussion {
+                        div { class: "empty",
+                            "Discuss the work without running anything. "
+                            "This chat reads the execution chat and the code, but never changes them."
+                        }
+                    } else if items.is_empty() {
                         div { class: "empty",
                             "Craft something with "
                             span { class: "accent", "Workbench" }
@@ -56,10 +64,11 @@ pub fn ChatPane() -> Element {
                             code { "{chat.dir.read().display()}" }
                         }
                     }
-                    for row in rows(&items) {
+                    for row in rows(&items, *chat.busy.read(), &chat.dir.cloned()) {
                         match row {
                             Row::One(idx, item) => rsx! { ChatEntry { key: "{idx}", item } },
                             Row::Tools(idx, tools) => rsx! { ToolGroup { key: "g{idx}", tools } },
+                            Row::Changes(idx, paths) => rsx! { ChangedFiles { key: "c{idx}", dir: chat.dir.cloned(), paths } },
                         }
                     }
                     if chat.plan_approval.read().is_some() {
@@ -72,6 +81,12 @@ pub fn ChatPane() -> Element {
                         }
                     }
                     QueuedMessages {}
+                    if execution_waits {
+                        div { class: "thinking discussion-hint",
+                            "The agent is waiting for your answer in the execution chat · "
+                            button { class: "small", onclick: move |_| st.set_chat_view(ChatView::Execution), "Go to Execute" }
+                        }
+                    }
                 }
             }
             if let Some(approval) = chat.plan_approval.read().clone() {
@@ -85,16 +100,28 @@ pub fn ChatPane() -> Element {
     }
 }
 
-/// A line in the chat log: one item, or a run of back-to-back tool calls shown as a group.
-/// Rows are keyed by the index of their first item, so a growing group keeps its state.
+/// A line in the chat log: one item, a run of back-to-back tool calls shown as a group, or the
+/// files a finished turn changed. Rows are keyed by the index of their first item, so a growing
+/// group keeps its state.
 enum Row {
     One(usize, ChatItem),
     Tools(usize, Vec<ChatItem>),
+    Changes(usize, Vec<String>),
 }
 
-fn rows(items: &[ChatItem]) -> Vec<Row> {
+/// A turn starts at a message to the agent. When it ends (at the next message, or when the agent
+/// is no longer busy), the files it changed get a `Row::Changes` after it.
+fn rows(items: &[ChatItem], busy: bool, dir: &std::path::Path) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
+    let mut turn_start = 0;
     for (idx, item) in items.iter().enumerate() {
+        if matches!(item, ChatItem::User(_) | ChatItem::Prompt { .. }) {
+            let paths = changed_files(&items[turn_start..idx], dir);
+            if !paths.is_empty() {
+                out.push(Row::Changes(turn_start, paths));
+            }
+            turn_start = idx;
+        }
         if matches!(item, ChatItem::Tool { .. }) {
             if let Some(Row::Tools(_, tools)) = out.last_mut() {
                 tools.push(item.clone());
@@ -105,7 +132,90 @@ fn rows(items: &[ChatItem]) -> Vec<Row> {
             out.push(Row::One(idx, item.clone()));
         }
     }
+    let paths = changed_files(&items[turn_start..], dir);
+    if !busy && !paths.is_empty() {
+        out.push(Row::Changes(turn_start, paths));
+    }
     out
+}
+
+/// The files that successful edit tool calls in `items` wrote, relative to `dir`, in the order
+/// they were first changed. Every provider reports its edits as Edit or Write (see `codex.rs`
+/// and `vibe.rs`); Codex lists several files under `changes`. Files outside `dir` are left out.
+fn changed_files(items: &[ChatItem], dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        let ChatItem::Tool { name, input, result: Some((_, false)), .. } = item else { continue };
+        if !matches!(name.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+            continue;
+        }
+        let input: Value = serde_json::from_str(input).unwrap_or_default();
+        let mut paths: Vec<&str> = ["file_path", "notebook_path", "path"]
+            .iter()
+            .filter_map(|k| input.get(k).and_then(Value::as_str))
+            .take(1)
+            .collect();
+        if let Some(changes) = input.get("changes").and_then(Value::as_array) {
+            paths = changes.iter().filter_map(|c| c.get("path").and_then(Value::as_str)).collect();
+        }
+        for p in paths {
+            let p = std::path::Path::new(p);
+            let rel = if p.is_absolute() { p.strip_prefix(dir).ok() } else { Some(p) };
+            let Some(rel) = rel.map(|r| r.display().to_string()) else { continue };
+            if !rel.is_empty() && !out.contains(&rel) {
+                out.push(rel);
+            }
+        }
+    }
+    out
+}
+
+/// The files a turn changed, folded under one button. Opened, it lists each file with its
+/// uncommitted diff against HEAD (from git, so it can include changes made before this turn);
+/// each file unfolds to show its hunks.
+#[component]
+fn ChangedFiles(dir: std::path::PathBuf, paths: Vec<String>) -> Element {
+    let st = use_context::<AppState>();
+    let mut open = use_signal(|| false);
+    let is_open = *open.read();
+    let n = paths.len();
+    let local = *st.cwd.read() == dir;
+
+    rsx! {
+        div { class: "changed-files",
+            button {
+                class: "tool-group-toggle",
+                title: if is_open { "Hide the changed files" } else { "Show the changed files and their diffs" },
+                onclick: move |_| open.set(!is_open),
+                span { class: if is_open { "tool-mark open" } else { "tool-mark" }, ">" }
+                span { if n == 1 { "1 changed file" } else { "{n} changed files" } }
+                span { class: "muted", "· changes in working tree" }
+            }
+            if is_open {
+                for path in paths {
+                    ChangedFile { key: "{path}", dir: dir.clone(), path, local }
+                }
+            }
+        }
+    }
+}
+
+/// One changed file's diff, read from git when it is shown, and again whenever the repo changes.
+#[component]
+fn ChangedFile(dir: std::path::PathBuf, path: String, local: bool) -> Element {
+    let st = use_context::<AppState>();
+    let label = path.clone();
+    let diff = use_resource(use_reactive!(|(dir, path)| async move {
+        let _ = st.repo_version.read();
+        crate::git::diff_file(&dir, &path)
+    }));
+
+    match &*diff.read() {
+        None => rsx! { div { class: "muted pad", "{label}…" } },
+        Some(Err(e)) => rsx! { div { class: "error pad", "{label}: {e}" } },
+        Some(Ok(None)) => rsx! { div { class: "muted pad", "{label}: no uncommitted changes" } },
+        Some(Ok(Some(file))) => rsx! { crate::code::FileDiffView { file: file.clone(), local, open: false } },
+    }
 }
 
 /// Back-to-back tool calls. Collapsed, only the latest call shows, under a button that lists
@@ -174,7 +284,7 @@ pub fn focus(e: MountedEvent) {
 #[component]
 fn PermissionPrompt(req: PermissionRequest, more: usize) -> Element {
     let st = use_context::<AppState>();
-    let chat = st.chat();
+    let chat = st.shown_chat();
     let mut cursor = use_signal(|| 0usize);
     let mut note = use_signal(|| None::<String>);
     let choices = permission_choices(&req);
@@ -436,7 +546,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[component]
 fn QueuedMessages() -> Element {
     let st = use_context::<AppState>();
-    let mut chat = st.chat();
+    let mut chat = st.shown_chat();
     let queued: Vec<(String, String, usize)> = chat.queued.read().iter().map(|m| (m.text.clone(), m.context.join(", "), m.context.len())).collect();
 
     rsx! {
@@ -471,7 +581,7 @@ fn QueuedMessages() -> Element {
 #[component]
 fn ModeToggle() -> Element {
     let st = use_context::<AppState>();
-    let mut chat = st.chat();
+    let mut chat = st.shown_chat();
     let provider = st.agent_provider(&chat).0;
     let current = *chat.chat_mode.read();
 
@@ -498,7 +608,7 @@ fn ModeToggle() -> Element {
 #[component]
 fn PlanPrompt(approval: PlanApproval) -> Element {
     let st = use_context::<AppState>();
-    let chat = st.chat();
+    let chat = st.shown_chat();
     let provider = st.agent_provider(&chat).0;
     // Only the run modes the current provider supports (API providers just answer).
     let run_modes: Vec<ChatMode> = ChatMode::RUN_PLAN.into_iter().filter(|m| provider.modes().contains(m)).collect();
@@ -550,7 +660,7 @@ fn PlanPrompt(approval: PlanApproval) -> Element {
 #[component]
 fn ChatInput() -> Element {
     let mut st = use_context::<AppState>();
-    let mut chat = st.chat();
+    let mut chat = st.shown_chat();
     let busy = *chat.busy.read();
 
     let mut send = move |now: bool| {
@@ -570,10 +680,12 @@ fn ChatInput() -> Element {
         n => format!("{n} nodes"),
     };
 
-    let placeholder = if busy {
-        "Workbench is working…  (Enter to queue, Ctrl+Enter to send now, Ctrl+C to stop)"
-    } else {
-        "Message Workbench…  (Enter to send, Shift+Enter for newline)"
+    let discussion = chat.is_discussion();
+    let placeholder = match (discussion, busy) {
+        (true, true) => "Thinking…  (Enter to queue, Ctrl+C to stop)",
+        (true, false) => "Ask about what the agent is doing…  (Enter to send, Shift+Enter for newline)",
+        (false, true) => "Workbench is working…  (Enter to queue, Ctrl+Enter to send now, Ctrl+C to stop)",
+        (false, false) => "Message Workbench…  (Enter to send, Shift+Enter for newline)",
     };
 
     let empty = chat.input.read().trim().is_empty();
@@ -597,7 +709,15 @@ fn ChatInput() -> Element {
                     },
                 }
                 div { class: "chat-toolbar",
-                    ModeToggle {}
+                    if discussion {
+                        span {
+                            class: "context-chip discussion-chip",
+                            title: "This chat only reads and answers. Each message carries what happened in the execution chat since your last one.",
+                            "Discussion · read only"
+                        }
+                    } else {
+                        ModeToggle {}
+                    }
                     if context.is_empty() {
                         span { class: "muted small-text", title: "Select nodes in the graph, or ghost nodes from other branches, to send them as context", "Context: project" }
                     } else {
@@ -775,5 +895,108 @@ fn ChatTab(chat: Chat, name: String) -> Element {
                 span { class: "agent-dot working", "●" }
             }
         }
+    }
+}
+
+/// Switches the chat between the active agent's execution chat, which runs the work, and its
+/// read-only discussion chat (PRO-248). Each side shows a dot while it works; Execute shows !
+/// while the agent waits for an answer.
+#[component]
+pub fn ChatViewToggle() -> Element {
+    let mut st = use_context::<AppState>();
+    let chat = st.chat();
+    let view = *st.chat_view.read();
+    let discussion = st.discussion(&chat);
+    let exec_busy = *chat.busy.read();
+    let exec_waiting = chat.waiting();
+    let discussion_busy = discussion.is_some_and(|d| *d.busy.read());
+    let class = |v: ChatView| if v == view { "mode-btn active" } else { "mode-btn" };
+    // Switching to another agent's tab in the Discuss view starts that agent's discussion chat.
+    // Doesn't write `chat_view`, which it reads, so it can't trigger itself.
+    use_effect(move || {
+        let active = *st.active_chat.read();
+        if *st.chat_view.read() == ChatView::Discussion
+            && let Some(chat) = active
+        {
+            let agent = chat.agent_id.cloned();
+            if !st.discussions.peek().contains_key(&agent) {
+                st.request_chat(ChatRequest::Discussion { agent });
+            }
+        }
+    });
+
+    rsx! {
+        div {
+            class: "mode-toggle chat-view-toggle",
+            onmousedown: move |e| e.stop_propagation(),
+            button {
+                class: class(ChatView::Execution),
+                title: "The agent's chat: it runs the work",
+                onclick: move |_| st.set_chat_view(ChatView::Execution),
+                "Execute"
+                if exec_waiting && view != ChatView::Execution {
+                    span { class: "chat-tab-flag", "!" }
+                } else if exec_busy && view != ChatView::Execution {
+                    span { class: "agent-dot working", "●" }
+                }
+            }
+            button {
+                class: class(ChatView::Discussion),
+                title: "A separate read-only chat to ask about and discuss what the agent is doing, without running anything",
+                onclick: move |_| st.set_chat_view(ChatView::Discussion),
+                "Discuss"
+                if discussion_busy && view != ChatView::Discussion {
+                    span { class: "agent-dot working", "●" }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Message;
+    use std::path::Path;
+
+    fn tool(name: &str, input: &str, failed: bool) -> ChatItem {
+        let result = Some((String::new(), failed));
+        ChatItem::Tool { id: String::new(), name: name.into(), summary: String::new(), input: input.into(), result }
+    }
+
+    fn user() -> ChatItem {
+        ChatItem::User(Message { text: "go".into(), context: vec![], prompt: String::new() })
+    }
+
+    #[test]
+    fn changed_files_lists_successful_edits_once_relative_to_the_folder() {
+        let items = vec![
+            tool("Edit", r#"{"file_path":"/repo/src/a.rs"}"#, false),
+            tool("Write", r#"{"file_path":"/repo/src/b.rs"}"#, false),
+            tool("Edit", r#"{"file_path":"/repo/src/a.rs"}"#, false),
+            tool("Edit", r#"{"file_path":"/repo/src/failed.rs"}"#, true),
+            tool("Read", r#"{"file_path":"/repo/src/read.rs"}"#, false),
+            tool("Edit", r#"{"file_path":"/elsewhere/c.rs"}"#, false),
+            tool("Edit", r#"{"file_path":"src/codex.rs","changes":[{"path":"src/d.rs"},{"path":"src/e.rs"}]}"#, false),
+        ];
+        assert_eq!(changed_files(&items, Path::new("/repo")), vec!["src/a.rs", "src/b.rs", "src/d.rs", "src/e.rs"]);
+    }
+
+    #[test]
+    fn rows_show_changed_files_after_each_finished_turn() {
+        let edit = tool("Edit", r#"{"file_path":"/repo/a.rs"}"#, false);
+        let items = vec![user(), edit.clone(), user(), edit];
+        let kinds = |busy| {
+            rows(&items, busy, Path::new("/repo"))
+                .iter()
+                .map(|r| match r {
+                    Row::One(..) => "one",
+                    Row::Tools(..) => "tools",
+                    Row::Changes(..) => "changes",
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(false), vec!["one", "tools", "changes", "one", "tools", "changes"]);
+        assert_eq!(kinds(true), vec!["one", "tools", "changes", "one", "tools"]);
     }
 }

@@ -54,7 +54,7 @@ pub fn ProvidersView() -> Element {
     rsx! {
         div { class: "rules",
             div { class: "rules-intro muted small-text",
-                "CLI providers (Workbench, Codex, Vibe) are agents: they edit files, run commands and use your MCP servers. "
+                "CLI providers (Claude Code, Codex, Vibe) are agents: they edit files, run commands and use your MCP servers. "
                 "API providers can call the tools of your MCP servers (see the MCP tab), but can't change the project themselves, so graph commits and other code changes need a CLI provider. "
                 "Settings and keys are stored in your user config, not in the project. An API key in the environment wins over one typed here."
             }

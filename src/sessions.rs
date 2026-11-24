@@ -21,6 +21,9 @@ pub struct SavedAgent {
     /// The provider's session id, so the conversation can be resumed after a restart.
     #[serde(default)]
     pub transcript: Option<String>,
+    /// The provider's session id of the agent's discussion chat (PRO-248), to resume it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discussion: Option<String>,
     /// The provider the agent was started on, when the chat asked for one. `None` uses the settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
@@ -53,4 +56,18 @@ pub fn save(sessions: &[SavedSession]) -> Result<(), String> {
 pub fn new_id(prefix: &str) -> String {
     let micros = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
     format!("{prefix}-{micros}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agents_saved_before_discussion_chats_still_load() {
+        let agent: SavedAgent = serde_json::from_str(r#"{"id":"agent-1","name":"Agent","transcript":"abc"}"#).unwrap();
+        assert_eq!(agent.transcript.as_deref(), Some("abc"));
+        assert_eq!(agent.discussion, None);
+        let json = serde_json::to_string(&agent).unwrap();
+        assert!(!json.contains("discussion"), "{json}");
+    }
 }

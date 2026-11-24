@@ -284,13 +284,19 @@ fn DiffView() -> Element {
 }
 
 /// One file's diff: a collapsible block of hunks. `actions` go in its header, next to the counts.
+/// It starts unfolded unless `open` is false.
 #[component]
-pub fn FileDiffView(file: FileDiff, #[props(default = true)] local: bool, actions: Option<Element>) -> Element {
+pub fn FileDiffView(
+    file: FileDiff,
+    #[props(default = true)] local: bool,
+    #[props(default = true)] open: bool,
+    actions: Option<Element>,
+) -> Element {
     let mut st = use_context::<AppState>();
     let path = file.path.clone();
 
     rsx! {
-        details { class: "file-diff", open: true,
+        details { class: "file-diff", open,
             summary {
                 span { class: "path", "{file.path}" }
                 span { class: "add", " +{file.added}" }

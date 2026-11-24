@@ -310,6 +310,19 @@ pub fn diff(cwd: &Path, base: &str) -> Result<Vec<FileDiff>, String> {
     Ok(parse_diff(&text))
 }
 
+/// The uncommitted change of one file against HEAD, or `None` when it has none. An untracked
+/// file is diffed against nothing, so all its lines show as added.
+pub fn diff_file(cwd: &Path, path: &str) -> Result<Option<FileDiff>, String> {
+    let untracked = !run_git(cwd, &["ls-files", "--others", "--exclude-standard", "--", path])?.trim().is_empty();
+    let text = if untracked {
+        run_git(cwd, &["diff", "--no-color", "--no-index", "--", "/dev/null", path])?
+    } else {
+        run_git(cwd, &["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path])
+            .or_else(|_| run_git(cwd, &["diff", "--no-color", "--no-ext-diff", "--", path]))?
+    };
+    Ok(parse_diff(&text).into_iter().next())
+}
+
 fn parse_range(s: &str) -> u32 {
     s.trim_start_matches(['-', '+'])
         .split(',')

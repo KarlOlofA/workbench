@@ -12,7 +12,7 @@ use dioxus::desktop::tao::window::{ResizeDirection, WindowId};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder, WindowEvent, use_wry_event_handler, window};
 use dioxus::prelude::*;
 
-use crate::chat::{ChatPane, ChatTabs, NoChat};
+use crate::chat::{ChatPane, ChatTabs, ChatViewToggle, NoChat};
 use crate::state::AppState;
 
 const LINUX: bool = cfg!(target_os = "linux");
@@ -127,7 +127,10 @@ fn DetachedChat() -> Element {
                 },
                 span { class: "chat-grip", "⠿" }
                 b { "Chat" }
-                if st.has_chat() { ChatTabs {} }
+                if st.has_chat() {
+                    ChatTabs {}
+                    ChatViewToggle {}
+                }
                 span { class: "cwd small-text", title: "{cwd}", "{cwd}" }
                 div { class: "spacer" }
                 button {

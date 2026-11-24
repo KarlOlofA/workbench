@@ -86,6 +86,53 @@ fn watch_activity(mut st: AppState) {
     });
 }
 
+/// How often the ledger watcher looks at `.workbench/ledger.ndjson`.
+const LEDGER_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The ledger file's size and modification time, or `None` when there is no ledger.
+fn ledger_signature(cwd: &std::path::Path) -> Result<Option<(u64, std::time::SystemTime)>, String> {
+    match std::fs::metadata(cwd.join(crate::ledger::LEDGER_FILE)) {
+        Ok(m) => Ok(Some((m.len(), m.modified().map_err(|e| e.to_string())?))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", crate::ledger::LEDGER_FILE)),
+    }
+}
+
+/// Adopts what others append to the open folder's ledger while the app runs (PRO-246): a
+/// CI agent's work order, a teammate's pull, another Workbench window. It polls the file's
+/// size and modification time, which also works on network mounts where file events don't
+/// arrive, and records each look in `AppState::ledger_watch`, so the UI can tell when it stops.
+fn watch_ledger(mut st: AppState) {
+    spawn(async move {
+        let mut seen: Option<(PathBuf, Option<(u64, std::time::SystemTime)>)> = None;
+        loop {
+            let cwd = st.cwd.peek().clone();
+            let look = cwd.clone();
+            let signature = tokio::task::spawn_blocking(move || ledger_signature(&look)).await.unwrap_or_else(|e| Err(e.to_string()));
+            match signature {
+                Ok(sig) => {
+                    // A newly opened folder is loaded by `load_workbench`; only later changes count.
+                    let changed = seen.as_ref().is_some_and(|(dir, old)| *dir == cwd && *old != sig);
+                    let busy = st.job.peek().is_some() || st.turn_start.peek().is_some();
+                    if changed && !busy {
+                        st.adopt_external_ledger();
+                    }
+                    // During an agent turn, look again once it has ended.
+                    if !(changed && busy) {
+                        seen = Some((cwd, sig));
+                    }
+                    st.ledger_watch.set(crate::state::LedgerWatch { checked: Some(std::time::Instant::now()), error: None });
+                }
+                Err(e) => {
+                    let checked = st.ledger_watch.peek().checked;
+                    st.ledger_watch.set(crate::state::LedgerWatch { checked, error: Some(e) });
+                }
+            }
+            tokio::time::sleep(LEDGER_POLL).await;
+        }
+    });
+}
+
 #[component]
 pub fn App() -> Element {
     let mut st = use_context_provider(|| AppState::new(initial_cwd()));
@@ -99,6 +146,7 @@ pub fn App() -> Element {
     use_hook(move || st.start_chats());
     use_effect(move || create_requested_chats(st));
     use_hook(move || watch_activity(st));
+    use_hook(move || watch_ledger(st));
     crate::chat_window::use_chat_window(st);
     // Pick up new or removed repositories, and worktrees made by git commands, straight away.
     use_effect(move || {
@@ -174,6 +222,9 @@ fn create_requested_chats(mut st: AppState) {
                     chat.chat_mode.set(ChatMode::FullAuto);
                 }
                 chat.send(Cmd::Prompt { label: "Task from another agent".into(), text: task });
+            }
+            ChatRequest::Discussion { agent } => {
+                st.start_discussion(&agent);
             }
         }
     }

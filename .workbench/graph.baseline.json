@@ -163,7 +163,8 @@
         "project-view",
         "claims",
         "work-orders",
-        "intent-query"
+        "intent-query",
+        "figma"
       ]
     },
     {
@@ -178,6 +179,12 @@
           "instead_of": "only a free-text description that mixes what and why",
           "source": "chat 2026-11-20",
           "date": "2026-11-20"
+        },
+        {
+          "decision": "Added figma to the known node kinds, with Figma's orange as its colour",
+          "why": "The user wants a Figma node as its own kind of node on the graph",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
         }
       ],
       "files": [
@@ -346,7 +353,8 @@
         "external-references",
         "history-pane",
         "theme",
-        "blast-radius"
+        "blast-radius",
+        "figma"
       ]
     },
     {
@@ -1078,6 +1086,74 @@
       "links": [
         "intent-query"
       ]
+    },
+    {
+      "id": "figma",
+      "title": "Figma files binding",
+      "kind": "service",
+      "description": "Binds the repository to one Figma project and, optionally, the file that holds its design system. The project is picked in the MCP tab from the Figma REST API with the user's personal access token, which is stored in figma-token.json in the user's config folder, never in the project. The binding, with the project's files as they were when it was picked, is saved in .workbench/figma.json and committed. Every agent is told which Figma project and theme file are this repository's, and the graph gets a node of kind figma whose Sync theme button asks the agent to bring the linked theme files in line with Figma.",
+      "decisions": [
+        {
+          "decision": "The project picker uses the Figma REST API with a personal access token",
+          "why": "No Figma MCP tool lists a team's projects, and the REST API has no endpoint that lists a user's teams, so the user pastes a team URL once",
+          "instead_of": "Picking the project through the Figma MCP connection",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "Theme tokens are read and compared by the agent through the Figma MCP tools (get_figma_data), not by Workbench code",
+          "why": "The REST variables endpoint only works on Figma Enterprise plans, and the project rule asks for as little code as possible",
+          "instead_of": "Diffing Figma variables against theme files in Rust",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "The binding stores the project's file list as it was when picked",
+          "why": "The prompt can name the files without a REST call on every turn",
+          "instead_of": "Fetching and caching the file list in AppState",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "The token is added to the Figma MCP server's environment on each message (with_token), never saved in .workbench/mcp.json",
+          "why": "mcp.json is committed with the project, and the token is a personal secret",
+          "instead_of": "A ${FIGMA_API_KEY} reference the user has to export themselves",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": "The repository is bound to Figma files pasted by URL, not to a project picked from a list",
+          "why": "Figma no longer gives personal access tokens the projects:read scope, so the projects endpoints returned 403 for the user's token even with every scope selected",
+          "instead_of": "Listing a team's projects and their files through the REST API (supersedes the earlier project-picker decision)",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        },
+        {
+          "decision": ".workbench/figma.json is git-ignored instead of committed",
+          "why": "The repository is public, and the user doesn't want the Figma file keys shared",
+          "instead_of": "Committing the binding with the project like mcp.json",
+          "source": "chat 2026-11-22",
+          "date": "2026-11-22"
+        }
+      ],
+      "invariants": [
+        "Figma file keys are never committed: .workbench/figma.json stays in .gitignore."
+      ],
+      "files": [
+        "src/figma.rs",
+        ".workbench/figma.json"
+      ],
+      "links": [
+        "app-state",
+        "workbench-files",
+        "graph-model"
+      ]
+    },
+    {
+      "id": "figma-2",
+      "title": "Figma",
+      "kind": "figma",
+      "description": "The repository's Figma files, the source of its designs and theme. Link it to the nodes that own the theme so Sync theme knows which files to update."
     }
   ],
   "flows": [
@@ -1313,6 +1389,15 @@
           "title": "MCP server model",
           "kind": "model",
           "description": "The Server type with its transport and scope (user or project), loading the user and project files into one list and saving each server back to its own file, and active(), the usable servers where a project server replaces a user server of the same name. claude_config turns the active servers into the mcpServers JSON for --mcp-config. KEY=value and Name: value lines become env and header objects, which the Codex and Vibe runners reuse for their own config formats. expand_env fills in ${VAR} references for the MCP manager. PRESETS lists the remote servers Workbench knows (name, URL and logo); a project server with a preset's name is shown as that preset's toggle.",
+          "decisions": [
+            {
+              "decision": "Figma is the open-source figma-developer-mcp server (Framelink) run locally with npx on the user's personal access token, and only reads from Figma",
+              "why": "Figma's remote MCP server returns 403 to Workbench's own OAuth sign-in because it only accepts clients Figma has approved; the user needs Figma's sign-in to go through Workbench's own auth, not through Claude Code, and only needs Figma → code for now",
+              "instead_of": "Figma's remote server (mcp.figma.com) and desktop-app server as presets",
+              "source": "chat 2026-11-22",
+              "date": "2026-11-22"
+            }
+          ],
           "files": [
             "src/mcp.rs"
           ],

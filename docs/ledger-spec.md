@@ -60,6 +60,7 @@ Writers do not emit ops directly. Workbench, agents and git keep writing `graph.
 - **Bootstrap:** a project with a `graph.json` and no ledger gets genesis entries (`node.add`, `ref.add`, `flow.put`, all `outside`) the first time Workbench opens it.
 - **Ledger without graph.json:** Workbench writes `graph.json` from the ledger.
 - **Disagreement:** if `graph.json` on disk disagrees with the ledger, `graph.json` wins and the difference is recorded as `outside` ops.
+- **External appends (PRO-246):** entries someone else appended since Workbench last read the ledger (a CI agent, a teammate's pull, another Workbench window) are adopted, never undone. Only what changed between the ledger Workbench last read and its graph is recorded, rebased onto the ledger on disk; `graph.json` is then rewritten from the result. When both sides changed the same field, the later entry wins as usual, and Workbench lists the conflict. The running app polls the ledger's size and modification time every 2 seconds (which also works on network mounts), waits while an agent turn or job runs, and shows a warning when the watcher stops checking. When a folder is first opened, `graph.json` still wins.
 
 ## Proposals (human-owned intent)
 

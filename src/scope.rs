@@ -221,7 +221,7 @@ mod tests {
         let mut api = node("api", &["src/api.rs"]);
         api.links = vec!["db".into()];
         let g = Graph { nodes: vec![api, node("db", &["src/db.rs"]), node("ui", &["src/ui.rs"])], ..Default::default() };
-        let known = ledger::record(&dir, &[], &g, ledger::Source::Person, Some("Anna"), 0).unwrap();
+        let known = ledger::record(&dir, &[], &g, ledger::Source::Person, Some("Anna"), 0).unwrap().entries;
 
         // The person selects `db` and asks the agent to work on it.
         let scope = start(&dir, &g, vec![(None, "db".into())]);
@@ -230,7 +230,7 @@ mod tests {
         std::fs::write(dir.join("src/db.rs"), "new\n").unwrap();
         std::fs::write(dir.join("src/ui.rs"), "new\n").unwrap();
 
-        let entries = ledger::record(&dir, &known, &after, ledger::Source::Agent, Some("Anna"), 0).unwrap();
+        let entries = ledger::record(&dir, &known, &after, ledger::Source::Agent, Some("Anna"), 0).unwrap().entries;
         assert_eq!(ledger::open_proposals(&entries).len(), 1);
         assert_eq!(ledger::materialize(&entries, &after).node("db").unwrap().description, g.node("db").unwrap().description);
 

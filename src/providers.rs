@@ -79,7 +79,7 @@ impl Provider {
 
     pub fn label(self) -> &'static str {
         match self {
-            Provider::ClaudeCode => "Workbench",
+            Provider::ClaudeCode => "Claude Code (CLI)",
             Provider::Codex => "Codex (CLI)",
             Provider::Vibe => "Mistral Vibe (CLI)",
             Provider::AnthropicApi => "Anthropic API",
@@ -92,7 +92,7 @@ impl Provider {
     /// A short name for chat messages, e.g. "codex exited".
     pub fn short_name(self) -> &'static str {
         match self {
-            Provider::ClaudeCode => "workbench",
+            Provider::ClaudeCode => "claude",
             Provider::Codex => "codex",
             Provider::Vibe => "vibe",
             Provider::AnthropicApi | Provider::OpenAiApi | Provider::MistralApi | Provider::OpenRouterApi => "the API call",

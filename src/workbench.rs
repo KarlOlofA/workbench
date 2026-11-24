@@ -529,6 +529,7 @@ fn Workbench() -> Element {
                     button { onclick: move |_| st.workbench_error.set(None), "✕" }
                 }
             }
+            LedgerBanner {}
             match (view, project_view) {
                 (WorkbenchView::Graph, _) if show_merge => rsx! {
                     IntentMergeView { on_resolved: move |_| reviewing.set(true), on_close: move |_| reviewing.set(false) }
@@ -635,8 +636,10 @@ pub fn ChatDock() -> Element {
         };
     };
     let focus = if chat.waiting() { ChatFocus::Active } else { *st.chat_focus.read() };
-    let peek = latest_reply(&chat.items.read());
-    let busy = *chat.busy.read();
+    // The faded chat peeks at the shown chat's latest reply: the execution or discussion chat.
+    let shown = st.shown_chat();
+    let peek = latest_reply(&shown.items.read());
+    let busy = *chat.busy.read() || *shown.busy.read();
     let dragging = *drag.read();
     if layout.chat_detached {
         return rsx! {
@@ -709,6 +712,7 @@ pub fn ChatDock() -> Element {
                 span { class: "chat-grip", "⠿" }
                 span { class: "muted small-text", "Chat" }
                 ChatTabs {}
+                chat::ChatViewToggle {}
                 div { class: "spacer" }
                 button {
                     class: "small",
@@ -776,5 +780,116 @@ mod tests {
         let d = ChatDrag { edges: 0, mx: 0.0, my: 0.0, start, view: (5120.0, 1440.0) };
         let r = dragged(d, 4_800.0, 0.0, d.view);
         assert_eq!(r.x, 4_900.0);
+    }
+}
+
+/// After this long without a look at the ledger, the watcher counts as stopped.
+const LEDGER_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// What others appended to the ledger while the app ran (PRO-246): who, which nodes, and the
+/// fields where the user's own edit overrode theirs. Changes from outside are applied, never
+/// hidden: they stay listed until dismissed. Also warns when the ledger watcher has stopped,
+/// so a stale graph doesn't pass for a current one.
+#[component]
+fn LedgerBanner() -> Element {
+    let mut st = use_context::<AppState>();
+    // Ticks on its own, so a watcher that stopped updating `ledger_watch` still shows up.
+    let mut now = use_signal(std::time::Instant::now);
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            now.set(std::time::Instant::now());
+        }
+    });
+    let watch = st.ledger_watch.read().clone();
+    let stale = watch.checked.is_some_and(|t| now.read().saturating_duration_since(t) > LEDGER_STALE_AFTER);
+    let news = st.ledger_news.read().clone();
+    let g = st.graph.read().clone();
+    let title = |scope: Option<&str>, subject: crate::graph::Subject, id: &str| -> String {
+        let found = match subject {
+            crate::graph::Subject::Module => g.module(id).map(|m| m.title.clone()),
+            crate::graph::Subject::Node => g.net(scope).and_then(|n| n.node(id)).map(|n| n.title.clone()),
+        };
+        found.unwrap_or_else(|| id.to_string())
+    };
+
+    let summary = news.as_ref().map(|news| {
+        let mut who: Vec<String> = Vec::new();
+        let mut nodes: Vec<String> = Vec::new();
+        for e in &news.entries {
+            let by = match (&e.author, e.source) {
+                (Some(a), s) => format!("{a} ({})", source_label(s)),
+                (None, s) => source_label(s).to_string(),
+            };
+            if !who.contains(&by) {
+                who.push(by);
+            }
+            if let Some((scope, subject, id)) = entry_target(&e.op) {
+                let t = title(scope, subject, id);
+                if !nodes.contains(&t) {
+                    nodes.push(t);
+                }
+            }
+        }
+        let proposals = news.entries.iter().filter(|e| e.proposed).count();
+        let conflicts: Vec<String> = news
+            .conflicts
+            .iter()
+            .map(|c| {
+                let by = c.theirs.author.clone().unwrap_or_else(|| source_label(c.theirs.source).to_string());
+                format!("{} · {}: you and {by} both changed it; your version was kept", title(c.scope.as_deref(), c.subject, &c.id), c.field)
+            })
+            .collect();
+        (news.entries.len(), who.join(", "), nodes.join(", "), proposals, conflicts)
+    });
+
+    rsx! {
+        if let Some(e) = watch.error.clone() {
+            div { class: "wb-error",
+                span { "The ledger can't be read, so changes from outside aren't coming in: {e}" }
+            }
+        } else if stale {
+            div { class: "wb-error",
+                span { "Changes to the ledger from outside stopped coming in: its watcher hasn't checked for a while. The graph may be out of date." }
+                button { title: "Check the ledger now", onclick: move |_| st.adopt_external_ledger(), "Check now" }
+            }
+        }
+        if let Some((count, who, nodes, proposals, conflicts)) = summary {
+            div { class: "ledger-news",
+                div { class: "ledger-news-text",
+                    span {
+                        b { "{count} ledger change(s) came in" }
+                        " from {who}"
+                        if !nodes.is_empty() { ": {nodes}" }
+                    }
+                    if proposals > 0 {
+                        span { class: "muted", "{proposals} of them are proposals waiting for your review under Changes." }
+                    }
+                    for c in conflicts {
+                        span { class: "ledger-conflict", "⚠ {c}" }
+                    }
+                }
+                button { title: "Dismiss", onclick: move |_| st.ledger_news.set(None), "✕" }
+            }
+        }
+    }
+}
+
+fn source_label(source: crate::ledger::Source) -> &'static str {
+    match source {
+        crate::ledger::Source::Person => "person",
+        crate::ledger::Source::Agent => "agent",
+        crate::ledger::Source::Outside => "outside Workbench",
+    }
+}
+
+/// The node or module an entry is about, when it is about one.
+fn entry_target(op: &crate::ledger::Op) -> Option<(Option<&str>, crate::graph::Subject, &str)> {
+    use crate::ledger::Op;
+    match op {
+        Op::NodeAdd { scope, subject, node } => Some((scope.as_deref(), *subject, node.id.as_str())),
+        Op::NodeMerge { scope, subject, id, .. } | Op::NodeRemove { scope, subject, id } => Some((scope.as_deref(), *subject, id.as_str())),
+        Op::RefAdd { scope, from, .. } => Some((scope.as_deref(), crate::graph::Subject::Node, from.as_str())),
+        _ => None,
     }
 }

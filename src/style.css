@@ -204,6 +204,9 @@ a.file-ref.missing { color: var(--muted); cursor: not-allowed; text-decoration: 
 .tool-group { display: flex; flex-direction: column; gap: 2px; }
 .tool-group-toggle { align-self: flex-start; display: flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 12px; background: transparent; color: var(--muted); }
 .tool-group-failed { color: var(--del); }
+.changed-files { display: flex; flex-direction: column; gap: 4px; }
+.changed-files .file-diff { margin: 0; }
+.changed-files .file-diff > summary .path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-name { font-weight: 600; color: var(--text); }
 .tool-summary { font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--hairline); max-height: 260px; overflow: auto; white-space: pre-wrap; }
@@ -322,6 +325,11 @@ button.toggle.on { border-color: var(--accent); color: var(--accent); }
 .wb-error { display: flex; gap: 8px; align-items: flex-start; padding: 6px 10px; color: var(--del); background: var(--del-bg); font-size: 12px; white-space: pre-wrap; }
 .wb-error span { flex: 1; }
 .wb-error button { padding: 0 6px; }
+/* PRO-246: ledger changes that came in from outside while the app ran. */
+.ledger-news { display: flex; gap: 8px; align-items: flex-start; padding: 6px 10px; background: var(--accent-soft); font-size: 12px; }
+.ledger-news-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.ledger-news button { padding: 0 6px; }
+.ledger-conflict { color: var(--warn); }
 
 .graph-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 /* The toolbar and breadcrumbs float over the top of the canvas in glass pills. */
@@ -439,6 +447,12 @@ button.toggle.on { border-color: var(--accent); color: var(--accent); }
 .mode-toggle { display: flex; padding: 2px; gap: 2px; background: var(--fill); border-radius: var(--radius); overflow: hidden; }
 .mode-btn { border-radius: var(--radius-sm); background: transparent; color: var(--muted); padding: 2px 10px; font-size: var(--font-size-small); }
 .mode-btn.active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 2px var(--shadow-sm); }
+/* PRO-248: the Execute | Discuss switch in the chat bar, and the read-only discussion chat. */
+.chat-view-toggle { flex: none; cursor: default; }
+.chat-view-toggle .mode-btn { display: inline-flex; align-items: center; gap: 4px; }
+.chat.discussion .chat-input .composer { border-color: var(--accent-soft); }
+.discussion-chip { padding: 1px 9px; }
+.discussion-hint { display: flex; align-items: center; gap: 6px; }
 .flow-draft { overflow-y: auto; }
 .inspector label { font-size: var(--label-size); font-weight: 500; color: var(--muted); margin-top: 8px; }
 .inspector input, .flow-draft input { width: 100%; }

@@ -162,8 +162,26 @@ pub fn append(cwd: &Path, entries: &[Entry]) -> Result<(), String> {
 /// do changes to decisions and invariants other than appending to them.
 /// While that proposal is open, the same text in a later edit is still the agent's, so it is
 /// not recorded as anyone else's change.
-pub fn record(cwd: &Path, known: &[Entry], g: &Graph, source: Source, author: Option<&str>, at: u64) -> Result<Vec<Entry>, String> {
+///
+/// Entries someone else appended since `known` was read (a CI agent, a teammate's pull,
+/// another Workbench window: PRO-246) are adopted, not undone: `g` was built from `known`,
+/// so only what changed between `known` and `g` is this writer's, and that is rebased onto
+/// the ledger on disk. `Recorded::graph` is then the graph with both, to show and save.
+/// When `known` is empty (a folder just opened) `g` is taken as is: graph.json wins.
+pub fn record(cwd: &Path, known: &[Entry], g: &Graph, source: Source, author: Option<&str>, at: u64) -> Result<Recorded, String> {
     let mut entries = load_checked(cwd, known)?;
+    let external = if known.is_empty() { Vec::new() } else { new_entries(known, &entries) };
+    let mut conflicts = Vec::new();
+    let target = if external.is_empty() {
+        g.clone()
+    } else {
+        let mine = ops_for(known, &materialize(known, g), g);
+        conflicts = conflicts_between(&external, &mine);
+        let mut rebased = entries.clone();
+        rebased.extend(stamp(mine, source, author, at));
+        materialize(&rebased, g)
+    };
+    let g = &target;
     let base = materialize(&entries, g);
     let (ops, intent) = split_intent(&base, ops_for(&entries, &base, g));
     let open: Vec<Op> = open_proposals(&entries).into_iter().map(|e| e.op.clone()).collect();
@@ -176,11 +194,80 @@ pub fn record(cwd: &Path, known: &[Entry], g: &Graph, source: Source, author: Op
     } else {
         new.extend(stamp(intent, source, author, at));
     }
+    let theirs = (!external.is_empty()).then(|| materialize(&entries, g));
     if !new.is_empty() {
         append(cwd, &new)?;
         entries.extend(new);
     }
-    Ok(entries)
+    let graph = theirs.as_ref().map(|_| materialize(&entries, g));
+    Ok(Recorded { entries, external, conflicts, graph, theirs })
+}
+
+/// What `record` did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recorded {
+    /// The whole ledger, including what was just appended.
+    pub entries: Vec<Entry>,
+    /// The entries someone else appended since the ledger was last read, now adopted.
+    pub external: Vec<Entry>,
+    /// Fields both this writer and an external entry changed. This writer's value won, since
+    /// its entries come later.
+    pub conflicts: Vec<Conflict>,
+    /// Set when `external` isn't empty: the graph with the external entries and this
+    /// writer's changes, positions kept. The caller shows and saves it.
+    pub graph: Option<Graph>,
+    /// Set with `graph`: the graph with only the external entries, before this writer's
+    /// changes, so each side's changes can be attributed to whoever made them.
+    pub theirs: Option<Graph>,
+}
+
+/// One field of a node or module that an external entry and this writer both changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conflict {
+    pub scope: Option<String>,
+    pub subject: Subject,
+    pub id: String,
+    /// The field, e.g. `description`; `node` when one side added or removed the whole node.
+    pub field: String,
+    /// The external entry whose value was overridden.
+    pub theirs: Entry,
+}
+
+/// The entries of `now` that aren't in `known`, in ledger order.
+pub fn new_entries(known: &[Entry], now: &[Entry]) -> Vec<Entry> {
+    let known: HashSet<&str> = known.iter().map(|e| e.id.as_str()).collect();
+    now.iter().filter(|e| !known.contains(e.id.as_str())).cloned().collect()
+}
+
+/// The node or module an op changes and the fields it sets (`node` for the whole node).
+fn touched(op: &Op) -> Option<(Option<&str>, Subject, &str, Vec<String>)> {
+    match op {
+        Op::NodeMerge { scope, subject, id, patch } => Some((scope.as_deref(), *subject, id, patch.keys().cloned().collect())),
+        Op::NodeAdd { scope, subject, node } => Some((scope.as_deref(), *subject, &node.id, vec!["node".into()])),
+        Op::NodeRemove { scope, subject, id } => Some((scope.as_deref(), *subject, id, vec!["node".into()])),
+        _ => None,
+    }
+}
+
+/// The fields that external entries (not proposals, which wait for a person anyway) and this
+/// writer's ops both change.
+fn conflicts_between(external: &[Entry], mine: &[Op]) -> Vec<Conflict> {
+    let mut out: Vec<Conflict> = Vec::new();
+    for theirs in external.iter().filter(|e| !e.proposed) {
+        let Some((scope, subject, id, fields)) = touched(&theirs.op) else { continue };
+        for op in mine {
+            let Some((s, sub, i, my_fields)) = touched(op) else { continue };
+            if (s, sub, i) != (scope, subject, id) {
+                continue;
+            }
+            for field in fields.iter().filter(|f| *f == "node" || my_fields.contains(f) || my_fields.iter().any(|m| m == "node")) {
+                if !out.iter().any(|c| c.scope.as_deref() == scope && c.subject == subject && c.id == id && c.field == *field) {
+                    out.push(Conflict { scope: scope.map(String::from), subject, id: id.to_string(), field: field.clone(), theirs: theirs.clone() });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Moves the intent part of every `node.merge` into its own `node.merge`: the description,
@@ -611,7 +698,7 @@ mod tests {
         let mut appended = g.clone();
         appended.nodes[1].decisions.push(decision("Use Postgres"));
         appended.nodes[1].invariants.push("Never drops rows".into());
-        let entries = record(&dir, &[], &appended, Source::Agent, None, 0).unwrap();
+        let entries = record(&dir, &[], &appended, Source::Agent, None, 0).unwrap().entries;
         let m = materialize(&entries, &appended);
         assert_eq!(m.nodes[1].decisions, vec![decision("Use Postgres")]);
         assert_eq!(m.nodes[1].invariants, vec!["Never drops rows".to_string()]);
@@ -619,7 +706,7 @@ mod tests {
 
         let mut rewritten = appended.clone();
         rewritten.nodes[1].decisions[0] = decision("Use SQLite");
-        let entries = record(&dir, &entries, &rewritten, Source::Agent, None, 0).unwrap();
+        let entries = record(&dir, &entries, &rewritten, Source::Agent, None, 0).unwrap().entries;
         assert_eq!(materialize(&entries, &rewritten).nodes[1].decisions, vec![decision("Use Postgres")]);
         assert_eq!(open_proposals(&entries).len(), 1);
     }
@@ -633,7 +720,7 @@ mod tests {
         let mut cur = g.clone();
         cur.nodes[1].description = "agent rewrote this".into();
         cur.nodes[1].title = "Database".into();
-        let entries = record(&dir, &[], &cur, Source::Agent, None, 0).unwrap();
+        let entries = record(&dir, &[], &cur, Source::Agent, None, 0).unwrap().entries;
         // The title is committed, the description only proposed.
         let m = materialize(&entries, &cur);
         assert_eq!(m.nodes[1].title, "Database");
@@ -641,7 +728,7 @@ mod tests {
         assert_eq!(open_proposals(&entries).len(), 1);
 
         // Seeing the same graph again, even from a person, records nothing new.
-        let again = record(&dir, &entries, &cur, Source::Person, None, 0).unwrap();
+        let again = record(&dir, &entries, &cur, Source::Person, None, 0).unwrap().entries;
         assert_eq!(again.len(), entries.len());
 
         let id = open_proposals(&again)[0].id.clone();
@@ -676,7 +763,7 @@ mod tests {
         let mut known: Vec<Entry> = Vec::new();
         let step = |g: &Graph, source: Source, known: &mut Vec<Entry>| {
             let before = file(&dir);
-            *known = record(&dir, known, g, source, None, 0).unwrap();
+            *known = record(&dir, known, g, source, None, 0).unwrap().entries;
             let after = file(&dir);
             assert!(after.starts_with(&before), "the ledger was rewritten instead of appended to");
             assert_eq!(parse(&after).unwrap(), *known);
@@ -767,14 +854,14 @@ mod tests {
         let dir = temp_dir("merge");
         git(&dir, &["init", "-q", "-b", "main"]);
         let g = sample();
-        let base = record(&dir, &[], &g, Source::Person, None, 0).unwrap();
+        let base = record(&dir, &[], &g, Source::Person, None, 0).unwrap().entries;
         commit(&dir, "base");
 
         let branch = |name: &str, extra: Node| {
             git(&dir, &["checkout", "-q", "-b", name, "main"]);
             let mut cur = g.clone();
             cur.nodes.push(extra);
-            let entries = record(&dir, &base, &cur, Source::Person, None, 0).unwrap();
+            let entries = record(&dir, &base, &cur, Source::Person, None, 0).unwrap().entries;
             commit(&dir, name);
             entries
         };
@@ -794,6 +881,75 @@ mod tests {
         assert_eq!(merged_graphs[0], merged_graphs[1]);
         assert!(merged_graphs[0].node("cache").is_some() && merged_graphs[0].node("queue").is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Another party appends to the ledger on disk without touching this writer's graph.
+    fn append_outside(dir: &Path, known: &[Entry], cur: &Graph, edit: impl FnOnce(&mut Graph)) {
+        let mut theirs = materialize(known, cur);
+        edit(&mut theirs);
+        let entries = load(dir).unwrap();
+        let ops = ops_for(&entries, &materialize(&entries, &theirs), &theirs);
+        append(dir, &stamp(ops, Source::Agent, Some("ci"), 0)).unwrap();
+    }
+
+    #[test]
+    fn external_appends_are_adopted_not_undone() {
+        let dir = temp_dir("external");
+        let g = sample();
+        let known = record(&dir, &[], &g, Source::Person, None, 0).unwrap().entries;
+        append_outside(&dir, &known, &g, |t| t.nodes[1].files = vec!["src/postgres.rs".into()]);
+
+        // This writer edits another node with a graph that predates the external entry.
+        let mut mine = g.clone();
+        mine.nodes[0].kind = "api".into();
+        let r = record(&dir, &known, &mine, Source::Person, None, 0).unwrap();
+        assert_eq!(r.external.len(), 1);
+        assert!(r.conflicts.is_empty());
+        let shown = r.graph.expect("the graph with both changes");
+        assert_eq!(shown.nodes[1].files, vec!["src/postgres.rs".to_string()], "the external change survives");
+        assert_eq!(shown.nodes[0].kind, "api", "and so does this writer's");
+        assert_eq!(shown.nodes[0].pos, Some([10.0, 20.0]), "positions are kept");
+        assert_eq!(materialize(&r.entries, &shown), shown);
+        // Nothing reverted the external entry.
+        assert!(!r.entries.iter().any(|e| matches!(&e.op, Op::NodeMerge { patch, .. } if patch.get("files") == Some(&serde_json::json!(["src/db.rs"])))));
+    }
+
+    #[test]
+    fn an_unchanged_graph_just_adopts_external_appends() {
+        let dir = temp_dir("adopt");
+        let g = sample();
+        let known = record(&dir, &[], &g, Source::Person, None, 0).unwrap().entries;
+        append_outside(&dir, &known, &g, |t| t.nodes.push(node("cache", &["db"])));
+        let r = record(&dir, &known, &g, Source::Outside, None, 0).unwrap();
+        assert_eq!(r.entries.len(), load(&dir).unwrap().len(), "nothing appended");
+        assert!(r.graph.unwrap().node("cache").is_some());
+    }
+
+    #[test]
+    fn both_sides_changing_a_field_is_a_conflict_this_writer_wins() {
+        let dir = temp_dir("conflict");
+        let g = sample();
+        let known = record(&dir, &[], &g, Source::Person, None, 0).unwrap().entries;
+        append_outside(&dir, &known, &g, |t| t.nodes[1].files = vec!["theirs.rs".into()]);
+        let mut mine = g.clone();
+        mine.nodes[1].files = vec!["mine.rs".into()];
+        let r = record(&dir, &known, &mine, Source::Person, None, 0).unwrap();
+        assert_eq!(r.conflicts.len(), 1);
+        assert_eq!((r.conflicts[0].id.as_str(), r.conflicts[0].field.as_str()), ("db", "files"));
+        assert_eq!(r.conflicts[0].theirs.author.as_deref(), Some("ci"));
+        assert_eq!(r.graph.unwrap().nodes[1].files, vec!["mine.rs".to_string()]);
+    }
+
+    #[test]
+    fn a_just_opened_folder_takes_graph_json_as_is() {
+        let dir = temp_dir("open");
+        let g = sample();
+        record(&dir, &[], &g, Source::Person, None, 0).unwrap();
+        let mut edited = g.clone();
+        edited.nodes[1].files = vec!["by-hand.rs".into()];
+        let r = record(&dir, &[], &edited, Source::Outside, None, 0).unwrap();
+        assert!(r.external.is_empty() && r.graph.is_none());
+        assert_eq!(materialize(&r.entries, &edited), edited);
     }
 
     #[test]

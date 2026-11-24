@@ -33,6 +33,7 @@ mod mcp_manager;
 mod mcp_oauth;
 mod mcp_view;
 mod merge_view;
+mod naming;
 mod node_history;
 mod platform;
 mod project_view;

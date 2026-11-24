@@ -221,6 +221,22 @@ pub fn plan_mode_instructions() -> &'static str {
      When everything is clear, reply with a step-by-step plan of the changes. The user approves the plan and picks how you run it; then you'll be asked to implement it.\n\n"
 }
 
+/// The instructions of a discussion chat (PRO-248): a read-only conversation next to the
+/// execution chat of the agent called `agent`, for questions about what it does.
+pub fn discussion_instructions(agent: &str) -> String {
+    format!(
+        "## Discussion chat\n\n\
+         You are the discussion chat next to the execution chat of the agent “{agent}”. The user talks to you to understand \
+         and discuss the work without starting anything. Each message from the user starts with an <execution_chat> block: \
+         what happened in the execution chat since the user's previous message here (its messages, the agent's replies and \
+         tool calls) and its current state. Use it, the graph and the code to explain what the agent did, is doing or plans \
+         and why, to answer questions about the implementation and to weigh options.\n\n\
+         You are read only: never edit files, run commands that change anything or start agents. When the user wants a \
+         change, say what to tell the execution agent; the user sends it there. Never put the user's question back into \
+         an <execution_chat> block, and don't repeat the block's contents unless asked.\n\n"
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugMode {
     Trace,
@@ -1053,8 +1069,10 @@ pub fn system_append(graph: Option<&Graph>, rules: &[Rule], related: &[String], 
              or the commit or ticket) and the `date`. When the user states a rule that must always hold for a part, add it to that node's `invariants`. \
              Appending is applied right away; rewriting or removing an existing decision or invariant only becomes a proposal, like a description.\n\
              - Follow the `decisions` and `invariants` of the nodes you work on. If a change has to break one, say so and why instead of doing it silently.\n\
+             - {naming}\n\
              - Keep existing `id`s and `pos` values, keep the file valid JSON, and list the graph changes you made, including the decisions you recorded, in your final summary.\n\
-             Never edit `{BASELINE_FILE}`.\n\n"
+             Never edit `{BASELINE_FILE}`.\n\n",
+            naming = crate::naming::prompt_rule()
         ));
         out.push_str(&format!("{KNOWLEDGE_GUIDE}\n\n{MODULES_GUIDE}\n\n"));
     }

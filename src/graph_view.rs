@@ -2930,6 +2930,7 @@ fn ChangesPane() -> Element {
     if changes.is_empty() {
         return rsx! {
             ProposalsList {}
+            NamingList {}
             div { class: "muted pad",
                 if has_nodes {
                     "The graph matches the code. Edit node descriptions, links or nodes and your changes will show up here."
@@ -2943,6 +2944,7 @@ fn ChangesPane() -> Element {
     rsx! {
         div { class: "changes",
             ProposalsList {}
+            NamingList {}
             if !has_baseline {
                 div { class: "hint-box",
                     "This graph hasn't been processed yet, so every node counts as new. If it already describes the code, choose "
@@ -3145,6 +3147,50 @@ fn ProposalsList() -> Element {
                                 button { class: "small", disabled: locked, onclick: move |_| st.decide_proposal(&reject_id, false), "Reject" }
                             }
                             {intent_list(facts, prose)}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Nodes that stand for the same thing under different names (PRO-245; see `naming`). Each
+/// row offers to give them the one name; renaming is the user's edit, recorded in the ledger.
+#[component]
+fn NamingList() -> Element {
+    let mut st = use_context::<AppState>();
+    let locked = st.graph_locked() || st.turn_start.read().is_some();
+    let found = crate::naming::divergences(&st.graph.read());
+    if found.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "hint-box claim-warning",
+            div { class: "claim-warning-head", b { "⚠ One thing, several names ({found.len()})" } }
+            div { class: "small-text",
+                "These nodes stand for the same module or reference but carry different titles, so queries and agents may treat them as different things. Ids stay the same when you rename."
+            }
+            for d in found {
+                {
+                    let fix = d.clone();
+                    let others = d.off.iter().map(|(_, _, t)| format!("“{t}”")).collect::<Vec<_>>().join(", ");
+                    rsx! {
+                        div { key: "{d.thing}", class: "proposal",
+                            div { class: "claim-warning-head",
+                                span { class: "change-title", "{d.canonical}" }
+                                span { class: "muted small-text", " · {d.thing} · also called {others}" }
+                                div { class: "spacer" }
+                                button {
+                                    class: "small",
+                                    disabled: locked,
+                                    title: "Rename these nodes to “{d.canonical}”",
+                                    onclick: move |_| st.update_graph(|g| {
+                                        crate::naming::apply(g, &fix);
+                                    }),
+                                    "Use “{d.canonical}”"
+                                }
+                            }
                         }
                     }
                 }

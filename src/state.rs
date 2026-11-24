@@ -113,16 +113,33 @@ pub struct Chat {
     pub chat_mode: Signal<ChatMode>,
     pub plan_approval: Signal<Option<PlanApproval>>,
     pub input: Signal<String>,
+    /// Set on a discussion chat (PRO-248): the id of the agent whose execution chat it
+    /// discusses. A discussion chat is read only and never owns the graph turn.
+    pub discussion_of: CopyValue<Option<String>>,
 }
 
 impl Chat {
     /// Creates the agent's chat and starts its session loop, both owned by the app's root
     /// component (like `AppState`), so they live as long as the app. Call from the main window only.
     pub fn launch(st: AppState, session: &SavedSession, agent: &SavedAgent) -> Chat {
+        Self::start(st, session, agent, false)
+    }
+
+    /// Creates the read-only discussion chat next to `agent`'s execution chat and starts its
+    /// session loop, resuming its saved conversation. Call from the main window only.
+    pub fn launch_discussion(st: AppState, session: &SavedSession, agent: &SavedAgent) -> Chat {
+        Self::start(st, session, agent, true)
+    }
+
+    fn start(st: AppState, session: &SavedSession, agent: &SavedAgent, discussion: bool) -> Chat {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let root = ScopeId::APP;
+        let (agent_id, transcript) = match discussion {
+            true => (discussion_id(&agent.id), &agent.discussion),
+            false => (agent.id.clone(), &agent.transcript),
+        };
         let chat = Chat {
-            agent_id: CopyValue::new_in_scope(agent.id.clone(), root),
+            agent_id: CopyValue::new_in_scope(agent_id, root),
             session: CopyValue::new_in_scope(session.id.clone(), root),
             dir: CopyValue::new_in_scope(session.dir.clone(), root),
             provider: CopyValue::new_in_scope(agent.provider, root),
@@ -138,12 +155,18 @@ impl Chat {
             chat_mode: Signal::new_in_scope(ChatMode::Plan, root),
             plan_approval: Signal::new_in_scope(None, root),
             input: Signal::new_in_scope(String::new(), root),
+            discussion_of: CopyValue::new_in_scope(discussion.then(|| agent.id.clone()), root),
         };
         dioxus::core::Runtime::current().spawn(root, crate::session::run(st, chat, rx));
-        if let Some(id) = &agent.transcript {
+        if let Some(id) = transcript {
             chat.send(Cmd::Resume { id: id.clone() });
         }
         chat
+    }
+
+    /// Whether this is a discussion chat (see `discussion_of`).
+    pub fn is_discussion(&self) -> bool {
+        self.discussion_of.peek().is_some()
     }
 
     pub fn send(&self, cmd: Cmd) {
@@ -158,6 +181,37 @@ impl Chat {
     pub fn waiting(&self) -> bool {
         !self.permissions.read().is_empty() || self.plan_approval.read().is_some()
     }
+}
+
+/// Ledger entries from outside that the running app adopted (PRO-246).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LedgerNews {
+    pub entries: Vec<ledger::Entry>,
+    /// Fields that both the user here and an external entry changed; the user's value won.
+    pub conflicts: Vec<ledger::Conflict>,
+}
+
+/// Whether the ledger watcher is alive: when it last looked at the ledger and the error
+/// that stopped its last look, if any.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LedgerWatch {
+    pub checked: Option<std::time::Instant>,
+    pub error: Option<String>,
+}
+
+/// The id of the discussion chat of the agent with id `agent_id`.
+fn discussion_id(agent_id: &str) -> String {
+    format!("{agent_id}-discussion")
+}
+
+/// Which of the active agent's two chats the chat window shows (PRO-248).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatView {
+    /// The agent's own chat, which runs the work.
+    #[default]
+    Execution,
+    /// The read-only discussion chat next to it.
+    Discussion,
 }
 
 /// The name of an agent added by hand; agents started by another agent get the name it gives.
@@ -176,6 +230,8 @@ pub enum ChatRequest {
     /// A new session in `dir` (a project repository) whose agent `name` gets `task` as its
     /// first prompt; asked for by an agent in another folder of the project.
     AgentInRepo { dir: PathBuf, name: String, task: String, provider: Option<Provider>, model: Option<String>, full_auto: bool },
+    /// The discussion chat of the agent with this id, started if it isn't running yet.
+    Discussion { agent: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,6 +442,11 @@ pub struct AppState {
     pub show_workbench_diffs: Signal<bool>,
     /// The intent ledger (`.workbench/ledger.ndjson`), as last read or written.
     pub ledger: Signal<Vec<ledger::Entry>>,
+    /// Ledger entries from outside that were adopted while the app ran, until the user
+    /// dismisses them (PRO-246).
+    pub ledger_news: Signal<Option<LedgerNews>>,
+    /// The health of the ledger watcher (`app::watch_ledger`).
+    pub ledger_watch: Signal<LedgerWatch>,
     pub me: Signal<Option<String>>,
     pub flow_draft: Signal<Option<Vec<String>>>,
     pub active_flow: Signal<Option<String>>,
@@ -398,6 +459,11 @@ pub struct AppState {
     pub chats: Signal<Vec<Chat>>,
     /// The chat shown in the chat window; always set once the app has started.
     pub active_chat: Signal<Option<Chat>>,
+    /// The running discussion chats, by the id of the agent they discuss. Started on first use
+    /// and kept out of `chats`, so they don't show up as agents of their session.
+    pub discussions: Signal<HashMap<String, Chat>>,
+    /// Whether the chat window shows the active agent's execution chat or its discussion chat.
+    pub chat_view: Signal<ChatView>,
     /// Sessions and agents to create. The main window's root creates them (`app::create_chats`)
     /// so their signals and loops belong to the main window, even when the chat window asks.
     pub chat_requests: Signal<Vec<ChatRequest>>,
@@ -464,6 +530,8 @@ impl AppState {
             chat_window: Signal::new(None),
             node_history: Signal::new(NodeHistory::default()),
             ledger: Signal::new(Vec::new()),
+            ledger_news: Signal::new(None),
+            ledger_watch: Signal::new(LedgerWatch::default()),
             run_scope: Signal::new(None),
             live_edits: Signal::new(Vec::new()),
             focus_target: Signal::new(None),
@@ -478,6 +546,8 @@ impl AppState {
             sessions: Signal::new(sessions::load()),
             chats: Signal::new(Vec::new()),
             active_chat: Signal::new(None),
+            discussions: Signal::new(HashMap::new()),
+            chat_view: Signal::new(ChatView::Execution),
             chat_requests: Signal::new(Vec::new()),
             turn_owner: Signal::new(None),
             tab: Signal::new(Tab::Files),
@@ -629,6 +699,7 @@ impl AppState {
         self.node_history.set(NodeHistory { known: node_history::load_snapshot(&cwd), entries });
         // A newly opened folder has its own ledger: nothing of it has been read yet.
         self.ledger.set(Vec::new());
+        self.ledger_news.set(None);
         // graph.json is a view of the ledger: rebuild it when only the ledger exists.
         let rebuilt = g.is_none().then(|| ledger::load(&cwd).ok().filter(|l| !l.is_empty())).flatten();
         let rebuilt = rebuilt.map(|l| ledger::materialize(&l, &Graph::default()));
@@ -879,6 +950,8 @@ impl AppState {
             self.workbench_error.set(Some("Wait until the agent has finished before deciding on its proposals.".into()));
             return;
         }
+        // Take in what others appended first, so the verdict's graph doesn't drop it.
+        self.adopt_external_ledger();
         let cwd = self.cwd.peek().clone();
         let me = self.me.peek().clone();
         let known = self.ledger.peek().clone();
@@ -905,7 +978,9 @@ impl AppState {
     }
 
     /// Records the graph's changes in the intent ledger as ops.
-    fn record_ledger(&mut self, g: &Graph, source: Source, me: Option<&str>) {
+    /// When the ledger had external entries, returns the graph with only theirs (see
+    /// `ledger::Recorded::theirs`) after updating the shown graph.
+    fn record_ledger(&mut self, g: &Graph, source: Source, me: Option<&str>) -> Option<Graph> {
         let cwd = self.cwd.peek().clone();
         let source = match source {
             Source::Person => ledger::Source::Person,
@@ -914,9 +989,35 @@ impl AppState {
         };
         let known = self.ledger.peek().clone();
         match ledger::record(&cwd, &known, g, source, me, node_history::now()) {
-            Ok(entries) => self.ledger.set(entries),
+            Ok(r) => {
+                self.ledger.set(r.entries);
+                // Someone else appended to the ledger (PRO-246): show the graph with their
+                // changes too, save it, and tell the user what arrived.
+                if let Some(merged) = r.graph {
+                    self.graph.set(merged);
+                    self.save_graph();
+                    let mut news = self.ledger_news.write();
+                    let news = news.get_or_insert_with(LedgerNews::default);
+                    news.entries.extend(r.external);
+                    news.conflicts.extend(r.conflicts);
+                    return r.theirs;
+                }
+            }
             Err(e) => self.workbench_error.set(Some(e)),
         }
+        None
+    }
+
+    /// Adopts entries that someone else appended to the ledger since it was last read (a CI
+    /// agent, a teammate's pull, another Workbench window), without a restart (PRO-246).
+    /// Waits while an agent turn or job runs, whose graph diffs must not include them; its
+    /// own recording adopts them anyway.
+    pub fn adopt_external_ledger(&mut self) {
+        if self.job.peek().is_some() || self.turn_start.peek().is_some() {
+            return;
+        }
+        self.save_typing();
+        self.record_history(Source::Outside);
     }
 
     /// Appends an entry to the shared node history for every node or module whose information
@@ -925,9 +1026,15 @@ impl AppState {
     pub fn record_history(&mut self, source: Source) {
         let g = self.graph.peek().clone();
         let me = self.me.peek().clone();
-        self.record_ledger(&g, source, me.as_deref());
+        let theirs = self.record_ledger(&g, source, me.as_deref());
         let before = self.node_history.peek().entries.len();
-        let changed = self.node_history.write().record(&g, source, me.as_deref(), node_history::now());
+        // External ledger entries are history from outside, then this writer's changes follow.
+        let mut changed = false;
+        if let Some(theirs) = &theirs {
+            changed |= self.node_history.write().record(theirs, Source::Outside, None, node_history::now());
+        }
+        let g = self.graph.peek().clone();
+        changed |= self.node_history.write().record(&g, source, me.as_deref(), node_history::now());
         if !changed {
             return;
         }
@@ -1644,6 +1751,66 @@ impl AppState {
         self.active_chat.read().is_some()
     }
 
+    /// The chat the chat window shows: the active agent's discussion chat when the Discuss
+    /// view is on and it is running, else the active agent's own chat.
+    pub fn shown_chat(&self) -> Chat {
+        let chat = self.chat();
+        match *self.chat_view.read() {
+            ChatView::Discussion => self.discussion(&chat).unwrap_or(chat),
+            ChatView::Execution => chat,
+        }
+    }
+
+    /// The running discussion chat of an agent's execution chat.
+    pub fn discussion(&self, chat: &Chat) -> Option<Chat> {
+        self.discussions.read().get(&*chat.agent_id.peek()).copied()
+    }
+
+    /// The execution chat a discussion chat discusses.
+    pub fn execution_of(&self, discussion: &Chat) -> Option<Chat> {
+        let agent_id = discussion.discussion_of.peek().clone()?;
+        self.chats.peek().iter().copied().find(|c| c.is(&agent_id))
+    }
+
+    /// Switches the chat window between the active agent's execution and discussion chats,
+    /// starting the discussion chat when it isn't running yet.
+    pub fn set_chat_view(&mut self, view: ChatView) {
+        let active = *self.active_chat.peek();
+        if view == ChatView::Discussion
+            && let Some(chat) = active
+        {
+            let agent = chat.agent_id.cloned();
+            if !self.discussions.peek().contains_key(&agent) {
+                self.request_chat(ChatRequest::Discussion { agent });
+            }
+        }
+        self.chat_view.set(view);
+    }
+
+    /// Starts the discussion chat of the agent with id `agent_id`, unless it runs already.
+    /// Call from the main window only (see `chat_requests`).
+    pub fn start_discussion(&mut self, agent_id: &str) -> Option<Chat> {
+        if let Some(chat) = self.discussions.peek().get(agent_id) {
+            return Some(*chat);
+        }
+        let sessions = self.sessions.peek();
+        let session = sessions.iter().find(|s| s.agents.iter().any(|a| a.id == agent_id))?.clone();
+        drop(sessions);
+        let agent = session.agents.iter().find(|a| a.id == agent_id)?;
+        let chat = Chat::launch_discussion(*self, &session, agent);
+        self.discussions.write().insert(agent_id.to_string(), chat);
+        Some(chat)
+    }
+
+    /// Stops the discussion chats of these agents.
+    fn close_discussions(&mut self, agents: &[Chat]) {
+        for agent in agents {
+            if let Some(discussion) = self.discussions.write().remove(&*agent.agent_id.peek()) {
+                discussion.send(Cmd::Close);
+            }
+        }
+    }
+
     /// Whether the chat shown is working. False when no chat is shown.
     pub fn chat_busy(&self) -> bool {
         self.active_chat.read().is_some_and(|c| *c.busy.read())
@@ -1719,6 +1886,7 @@ impl AppState {
         for chat in &closing {
             chat.send(Cmd::Close);
         }
+        self.close_discussions(&closing);
         self.chats.write().retain(|c| !closing.contains(c));
         self.sessions.write().retain(|s| s.id != session_id);
         self.save_sessions();
@@ -1739,6 +1907,7 @@ impl AppState {
             return;
         };
         chat.send(Cmd::Close);
+        self.close_discussions(&[chat]);
         self.chats.write().retain(|c| *c != chat);
         let agent_id = chat.agent_id.cloned();
         if let Some(session) = self.sessions.write().iter_mut().find(|s| s.id == session_id) {
@@ -1777,14 +1946,18 @@ impl AppState {
         }
     }
 
-    /// Remembers the provider session of an agent's conversation, to resume it after a restart.
-    pub fn save_transcript(&mut self, agent_id: &str, transcript: Option<String>) {
+    /// Remembers the provider session of a chat's conversation, to resume it after a restart.
+    /// A discussion chat's is saved on the agent it discusses.
+    pub fn save_transcript(&mut self, chat: &Chat, transcript: Option<String>) {
+        let discussion_of = chat.discussion_of.peek().clone();
+        let agent_id = discussion_of.clone().unwrap_or_else(|| chat.agent_id.cloned());
         let mut list = self.sessions.write();
         let Some(agent) = list.iter_mut().flat_map(|s| s.agents.iter_mut()).find(|a| a.id == agent_id) else { return };
-        if agent.transcript == transcript {
+        let saved = if discussion_of.is_some() { &mut agent.discussion } else { &mut agent.transcript };
+        if *saved == transcript {
             return;
         }
-        agent.transcript = transcript;
+        *saved = transcript;
         drop(list);
         self.save_sessions();
     }
@@ -1815,7 +1988,7 @@ impl AppState {
 
     /// Saves `session` with one new agent called `agent_name` and starts that agent.
     fn start_session(&mut self, mut session: SavedSession, agent_name: String, provider: Option<Provider>, model: Option<String>) -> Chat {
-        let agent = SavedAgent { id: sessions::new_id("agent"), name: agent_name, transcript: None, provider, model };
+        let agent = SavedAgent { id: sessions::new_id("agent"), name: agent_name, transcript: None, discussion: None, provider, model };
         session.agents = vec![agent.clone()];
         self.sessions.write().push(session.clone());
         self.save_sessions();
@@ -1829,7 +2002,7 @@ impl AppState {
     pub fn create_agent(&mut self, session_id: &str, name: Option<String>, provider: Option<Provider>, model: Option<String>) -> Option<Chat> {
         let session = self.sessions.peek().iter().find(|s| s.id == session_id).cloned()?;
         let name = name.unwrap_or_else(|| AGENT_NAME.into());
-        let agent = SavedAgent { id: sessions::new_id("agent"), name, transcript: None, provider, model };
+        let agent = SavedAgent { id: sessions::new_id("agent"), name, transcript: None, discussion: None, provider, model };
         self.sessions.write().iter_mut().find(|s| s.id == session_id)?.agents.push(agent.clone());
         self.save_sessions();
         let chat = Chat::launch(*self, &session, &agent);

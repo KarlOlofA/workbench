@@ -189,6 +189,11 @@ fn load_from(path: &Path, cwd: &Path) -> Vec<ChatItem> {
 }
 
 fn user_item(text: String) -> ChatItem {
+    // A discussion chat's message carries the execution chat's news first (PRO-248); show
+    // only what the user wrote.
+    if let Some(rest) = text.strip_prefix("<execution_chat>").and_then(|t| t.split_once("</execution_chat>")).map(|(_, rest)| rest.trim_start()) {
+        return ChatItem::User(Message { text: rest.to_string(), context: Vec::new(), prompt: text.clone() });
+    }
     if text.len() > LONG_PROMPT {
         ChatItem::Prompt { label: one_line(&text, 80), text }
     } else {

@@ -220,7 +220,13 @@ pub struct SpawnOptions {
     pub mcp_config: Option<String>,
     /// Empty means the CLI's own default model.
     pub model: String,
+    /// Tools the agent may not use, besides `AskUserQuestion`.
+    pub disallowed_tools: Vec<&'static str>,
 }
+
+/// The tools a discussion chat (PRO-248) may not use, on top of plan mode: it never
+/// changes files and never asks to leave plan mode.
+pub const DISCUSSION_DISALLOWED_TOOLS: [&str; 4] = [EXIT_PLAN_TOOL, "Edit", "Write", "NotebookEdit"];
 
 pub struct ClaudeProcess {
     child: Child,
@@ -255,10 +261,10 @@ impl ClaudeProcess {
             opts.mode.cli_arg(),
             "--permission-prompt-tool",
             "stdio",
-            // Workbench can't answer the agent's question form, so it asks questions in the reply.
-            "--disallowedTools",
-            "AskUserQuestion",
         ]);
+        // Workbench can't answer the agent's question form, so it asks questions in the reply.
+        let disallowed: Vec<&str> = std::iter::once("AskUserQuestion").chain(opts.disallowed_tools.iter().copied()).collect();
+        cmd.args(["--disallowedTools", &disallowed.join(",")]);
         if let Some(id) = &opts.resume {
             cmd.args(["--resume", id]);
         }

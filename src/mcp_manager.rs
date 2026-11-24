@@ -3,7 +3,7 @@
 //! It keeps one connection per active MCP server, shared by every chat, so a server is
 //! started once and stays connected across turns. A connection is opened the first time
 //! a turn asks for the tools, and reopened when the server's config or project changes.
-//! The agent CLIs (Workbench Code, Codex, Vibe) connect to the servers themselves instead.
+//! The agent CLIs (Claude Code, Codex, Vibe) connect to the servers themselves instead.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
