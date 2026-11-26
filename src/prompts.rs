@@ -280,7 +280,8 @@ const SCHEMA: &str = r#"{
       "files": ["repo/relative/path.ext"],
       "links": ["ids of nodes this one calls, renders, or depends on"],
       "module": "optional: id of a module this node stands for (the node is an attachment point of that module)",
-      "reference": "optional, only on `reference` nodes: { \"source\": \"local path, GitHub URL or owner/repo, website URL, or npm:/crate:/pypi:/go: package\", \"nodes\": [{ \"id\": \"node id in the referenced project's Workbench graph\", \"module\": \"optional module id there\" }] }"
+      "reference": "optional, only on `reference` nodes: { \"source\": \"local path, GitHub URL or owner/repo, website URL, or npm:/crate:/pypi:/go: package\", \"nodes\": [{ \"id\": \"id of an exported node in the referenced project's Workbench graph\", \"module\": \"optional module id there\", \"surface_hash\": \"set by Workbench, keep as is\" }] }",
+      "export": "optional, true when other projects may reference this node as part of this project's public surface (e.g. an `api` node)"
     }
   ],
   "flows": [
@@ -313,7 +314,8 @@ A module must never be attached, directly or through other modules, inside itsel
 const REFERENCES_GUIDE: &str = "External references: a node of kind `reference` with a `reference` field points at something outside this project: \
 a local folder or file, a GitHub repository (optionally a path and git ref), a website, or a package. It has no code in this project and exists to give you context. \
 A link to it means the linking node uses, follows or mirrors that external thing. When the referenced project also uses Workbench, `reference.nodes` lists the nodes \
-of its graph that matter here; their descriptions and files are the starting point for reading it. Read references only when you need them, never modify them, \
+of its graph that matter here; their descriptions and files are the starting point for reading it. Those are always nodes the other project exports \
+(`export: true`), never its internal nodes, and each keeps the `surface_hash` it was built against: leave it as it is. Read references only when you need them, never modify them, \
 and never create code for a reference node itself.";
 
 pub fn reference_context(title: &str, r: &Reference, refs: Option<&Refs>) -> String {
@@ -346,6 +348,9 @@ pub fn reference_context(title: &str, r: &Reference, refs: Option<&Refs>) -> Str
         match loaded.and_then(|g| reference::find(&g.graph, rn)) {
             Some(n) => {
                 p.push_str(&format!("- `{}` — {} ({}){place}\n", n.id, n.title, n.kind));
+                if let Some(warning) = loaded.and_then(|g| reference::drift(&g.graph, rn).warning()) {
+                    p.push_str(&format!("  ⚠ {warning} Check the code here that uses it before relying on it.\n"));
+                }
                 for line in n.description.trim().lines() {
                     p.push_str(&format!("  > {line}\n"));
                 }
@@ -698,6 +703,11 @@ pub fn process(graph: &Graph, orders: &[WorkOrder], rules: &[Rule], note: &str, 
                             None => p.push_str("No longer attaches a module: this place should stop using it.\n"),
                         },
                         Field::Reference => p.push_str("Its external reference changed (see the reference section below).\n"),
+                        Field::Export => p.push_str(if after.export {
+                            "Now an exported surface: other projects may reference it, so keep its behaviour stable.\n"
+                        } else {
+                            "No longer an exported surface.\n"
+                        }),
                         Field::Title => p.push_str(&format!("Renamed: \"{}\" → \"{}\" (rename the code too where the name is visible).\n", before.title, after.title)),
                         Field::Kind => p.push_str(&format!("Kind: {} → {}\n", before.kind, after.kind)),
                         Field::Description => {

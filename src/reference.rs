@@ -348,16 +348,50 @@ pub fn find<'a>(g: &'a Graph, r: &RefNode) -> Option<&'a Node> {
     g.net(r.module.as_deref())?.node(&r.id)
 }
 
+/// How a picked node compares with what the reference was built against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drift {
+    Current,
+    /// The node's surface hash differs from the one stored in the reference.
+    Changed,
+    /// The node is still there but no longer exported.
+    NotExported,
+    Missing,
+}
+
+impl Drift {
+    pub fn warning(self) -> Option<&'static str> {
+        match self {
+            Drift::Current => None,
+            Drift::Changed => Some("Its surface changed since this reference was built."),
+            Drift::NotExported => Some("It is no longer an exported surface of the other project."),
+            Drift::Missing => Some("Not found in the referenced graph any more."),
+        }
+    }
+}
+
+pub fn drift(g: &Graph, r: &RefNode) -> Drift {
+    match find(g, r) {
+        None => Drift::Missing,
+        Some(n) if !n.export => Drift::NotExported,
+        Some(n) if r.surface_hash.as_deref() != Some(graph::surface_hash(n).as_str()) => Drift::Changed,
+        Some(_) => Drift::Current,
+    }
+}
+
+/// The exported surfaces of a graph that a reference can point at, stamped with their
+/// current surface hash. Internal nodes are never offered, so upstream refactors behind
+/// a surface don't break downstream graphs.
 pub fn choices(g: &Graph) -> Vec<(RefNode, String)> {
     g.all_nodes()
         .into_iter()
-        .filter(|(_, n)| n.module.is_none())
+        .filter(|(_, n)| n.module.is_none() && n.export)
         .map(|(scope, n)| {
             let label = match scope {
                 Some(m) => format!("▣ {} › {}", g.module_title(m), n.title),
                 None => n.title.clone(),
             };
-            (RefNode { id: n.id.clone(), module: scope.map(String::from) }, label)
+            (RefNode { id: n.id.clone(), module: scope.map(String::from), surface_hash: Some(graph::surface_hash(n)) }, label)
         })
         .collect()
 }
@@ -420,7 +454,7 @@ mod tests {
         let nested = root.join("other/src/deep");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(root.join("other/.workbench")).unwrap();
-        std::fs::write(root.join("other").join(GRAPH_FILE), r#"{"nodes":[{"id":"x","title":"X"}],"modules":[{"id":"m","title":"M","nodes":[{"id":"y","title":"Y"}]}]}"#).unwrap();
+        std::fs::write(root.join("other").join(GRAPH_FILE), r#"{"nodes":[{"id":"x","title":"X","export":true},{"id":"internal","title":"I"}],"modules":[{"id":"m","title":"M","nodes":[{"id":"y","title":"Y","export":true}]}]}"#).unwrap();
         let found = load(&cwd(), &Source::Local(nested.clone())).unwrap().unwrap();
         assert_eq!(found.root, root.join("other").display().to_string());
         let picks = choices(&found.graph);
@@ -429,5 +463,21 @@ mod tests {
         assert_eq!(find(&found.graph, &picks[1].0).unwrap().title, "Y");
         assert!(load(&root.join("other"), &Source::Local(nested)).unwrap().is_none());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn drift_compares_the_stored_surface_hash() {
+        let mut g: Graph = serde_json::from_str(r#"{"nodes":[{"id":"api","title":"API","export":true}]}"#).unwrap();
+        let (picked, _) = choices(&g).remove(0);
+        assert_eq!(drift(&g, &picked), Drift::Current);
+        g.node_mut("api").unwrap().files.push("src/api.rs".into());
+        assert_eq!(drift(&g, &picked), Drift::Current);
+        g.node_mut("api").unwrap().description = "Returns XML now".into();
+        assert_eq!(drift(&g, &picked), Drift::Changed);
+        g.node_mut("api").unwrap().export = false;
+        assert_eq!(drift(&g, &picked), Drift::NotExported);
+        assert!(choices(&g).is_empty());
+        g.nodes.clear();
+        assert_eq!(drift(&g, &picked), Drift::Missing);
     }
 }

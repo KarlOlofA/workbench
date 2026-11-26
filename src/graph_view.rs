@@ -673,6 +673,8 @@ struct NodeMarks {
     invalid: HashMap<String, Vec<usize>>,
     modules: HashMap<String, (String, usize, bool)>,
     refs: HashMap<String, String>,
+    /// Reference nodes whose picked surfaces drifted, with one line per drifted node.
+    drifted: HashMap<String, String>,
 }
 
 fn node_marks(st: AppState) -> NodeMarks {
@@ -707,6 +709,7 @@ fn node_marks(st: AppState) -> NodeMarks {
             (m.clone(), (title, count, changed_modules.contains(m.as_str())))
         })
         .collect();
+    let mut drifted = HashMap::new();
     let refs = {
         let cwd = st.cwd.read();
         let loaded = st.refs.read();
@@ -716,13 +719,26 @@ fn node_marks(st: AppState) -> NodeMarks {
             .map(|n| {
                 let r = n.reference.clone().unwrap_or_default();
                 let label = reference::parse(&cwd, &r.source).map(|s| s.label()).unwrap_or_else(|| "no source".into());
-                let wb = matches!(loaded.get(&reference::key(&r.source)), Some(RefState::Ready(Some(_))));
+                let ext = match loaded.get(&reference::key(&r.source)) {
+                    Some(RefState::Ready(Some(ext))) => Some(&ext.graph),
+                    _ => None,
+                };
+                if let Some(ext) = ext {
+                    let lines: Vec<String> = r
+                        .nodes
+                        .iter()
+                        .filter_map(|rn| reference::drift(ext, rn).warning().map(|w| format!("{}: {w}", reference::label(Some(ext), rn))))
+                        .collect();
+                    if !lines.is_empty() {
+                        drifted.insert(n.id.clone(), lines.join("\n"));
+                    }
+                }
                 let picked = if r.nodes.is_empty() { String::new() } else { format!(" · {}", r.nodes.len()) };
-                (n.id.clone(), format!("↗ {label}{}{picked}", if wb { " ◆" } else { "" }))
+                (n.id.clone(), format!("↗ {label}{}{picked}", if ext.is_some() { " ◆" } else { "" }))
             })
             .collect()
     };
-    NodeMarks { status, stale, invalid, modules, refs }
+    NodeMarks { status, stale, invalid, modules, refs, drifted }
 }
 
 #[component]
@@ -1296,6 +1312,11 @@ fn GraphWorld(
             if module.is_some() {
                 tip.push_str("\n\nDouble-click to open the module");
             }
+            let drift = marks.drifted.get(&n.id);
+            if let Some(lines) = drift {
+                tip.push_str(&format!("\n\n⚠ The other side changed:\n{lines}"));
+            }
+            let drift_class = if drift.is_some() { "surface-drift" } else { "" };
             let sel = if selected.contains(&n.id) { "selected" } else { "" };
             let pulsing = if pulse_id.as_deref() == Some(n.id.as_str()) { "pulse" } else { "" };
             let editing = st.live_edits_of(scope.as_deref(), n);
@@ -1327,7 +1348,7 @@ fn GraphWorld(
                 x,
                 y,
                 title: n.title.clone(),
-                class: format!("gnode {status} {sel} {on} {mod_class} {dim} {ghost_class} {pulsing}"),
+                class: format!("gnode {status} {sel} {on} {mod_class} {dim} {ghost_class} {drift_class} {pulsing}"),
                 color: graph::kind_color(&n.kind),
                 mark_color: ghost_marks.first().map(|m| ghost::color(m.branch)).unwrap_or(""),
                 tip,
@@ -1712,6 +1733,7 @@ fn NodePane() -> Element {
     let n_history = st.node_history.read().count_for(scope.as_deref(), &id);
     let rev_scope = scope.clone();
     let id_mod = id.clone();
+    let id_export = id.clone();
 
     let id_title = id.clone();
     let id_kind = id.clone();
@@ -1815,6 +1837,20 @@ fn NodePane() -> Element {
                             }
                         });
                     },
+                }
+            }
+            if !is_ref {
+                label { class: "check", title: "Other projects' reference nodes can only point at exported surfaces, such as an api node",
+                    input {
+                        r#type: "checkbox",
+                        checked: node.export,
+                        disabled: locked,
+                        onchange: move |e: FormEvent| {
+                            let id = id_export.clone();
+                            st.update_net(|g| if let Some(n) = g.node_mut(&id) { n.export = e.checked() });
+                        },
+                    }
+                    " Exported surface (other projects may reference it)"
                 }
             }
             label { "What it does" }
@@ -2050,6 +2086,17 @@ fn FigmaBox(links: Vec<String>) -> Element {
     }
 }
 
+/// A node picked into a reference, as the reference inspector shows it.
+struct PickedRef {
+    i: usize,
+    label: String,
+    desc: String,
+    /// Why the other side no longer matches what this reference was built against.
+    warning: Option<&'static str>,
+    /// The other side's current surface hash, when the user can accept it.
+    accept: Option<String>,
+}
+
 #[component]
 fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -> Element {
     let mut st = use_context::<AppState>();
@@ -2062,25 +2109,23 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
         _ => None,
     };
     let ext_graph = ext.as_ref().map(|g| &g.graph);
-    let picked: Vec<(usize, String, String)> = reference
+    let picked: Vec<PickedRef> = reference
         .nodes
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let found = ext_graph.and_then(|g| reference::find(g, r));
-            let desc = match (found, ext_graph) {
-                (Some(n), _) => n.description.clone(),
-                (None, Some(_)) => "Not found in the referenced graph any more.".into(),
-                (None, None) => String::new(),
-            };
-            (i, reference::label(ext_graph, r), desc)
+            let desc = found.map(|n| n.description.clone()).unwrap_or_default();
+            let warning = ext_graph.and_then(|g| reference::drift(g, r).warning());
+            let accept = found.filter(|n| n.export && warning.is_some()).map(graph::surface_hash);
+            PickedRef { i, label: reference::label(ext_graph, r), desc, warning, accept }
         })
         .collect();
     let choices: Vec<(String, String)> = ext_graph
         .map(|g| {
             reference::choices(g)
                 .into_iter()
-                .filter(|(r, _)| !reference.nodes.contains(r))
+                .filter(|(r, _)| !reference.nodes.iter().any(|p| p.same_node(r)))
                 .filter_map(|(r, label)| serde_json::to_string(&r).ok().map(|v| (v, label)))
                 .collect()
         })
@@ -2163,11 +2208,11 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                 label { "Referenced nodes" }
                 if picked.is_empty() {
                     div { class: "muted small-text",
-                        "Pick the nodes of the other project that matter here. Their descriptions and files are sent to Workbench as context."
+                        "Pick the surfaces the other project exports that matter here. Their descriptions and files are sent to Workbench as context."
                     }
                 }
                 ul { class: "ref-nodes",
-                    for (i, label, desc) in picked {
+                    for PickedRef { i, label, desc, warning, accept } in picked {
                         li { key: "{i}:{label}",
                             div { class: "ref-node-head",
                                 b { "{label}" }
@@ -2195,6 +2240,30 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                             if !desc.is_empty() {
                                 div { class: "muted small-text", "{desc}" }
                             }
+                            if let Some(warning) = warning {
+                                div { class: "ref-node-head",
+                                    span { class: "warn small-text", "⚠ {warning}" }
+                                    div { class: "spacer" }
+                                    if let (Some(hash), false) = (accept, locked) {
+                                        button {
+                                            class: "small",
+                                            title: "Mark this reference as built against the other side's current surface",
+                                            onclick: {
+                                                let id = id.clone();
+                                                move |_| {
+                                                    let hash = hash.clone();
+                                                    edit_reference(st, &id, |n| {
+                                                        if let Some(r) = n.reference.as_mut().unwrap().nodes.get_mut(i) {
+                                                            r.surface_hash = Some(hash);
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            "Accept new surface"
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2208,7 +2277,7 @@ fn ReferenceBox(id: String, reference: Reference, title: String, locked: bool) -
                             let Ok(r) = serde_json::from_str::<RefNode>(&v) else { return };
                             edit_reference(st, &id_pick, |n| {
                                 let nodes = &mut n.reference.as_mut().unwrap().nodes;
-                                if !nodes.contains(&r) {
+                                if !nodes.iter().any(|p| p.same_node(&r)) {
                                     nodes.push(r);
                                 }
                             });

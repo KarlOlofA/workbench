@@ -11,6 +11,8 @@
 | `.workbench/graph.json` | The ledger materialized, plus node positions. **Shape unchanged** (Graph/Node/Module/Flow in `src/graph.rs`), so external readers such as `workbench check` keep working. |
 | `.workbench/.gitattributes` | Contains `ledger.ndjson merge=union`, so branches that both appended merge without conflicts. |
 
+Optional fields added to Node later travel through `node.add` and `node.merge` like any other field: `export` (an exported surface, PRO-197) and `surface_hash` on each `reference.nodes` entry. Readers that don't know them ignore them.
+
 `graph.baseline.json` and `node-history.jsonl` are unchanged in v1. Both could later be derived from the ledger.
 
 ## Entry

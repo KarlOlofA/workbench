@@ -609,7 +609,7 @@ label.check input { width: auto; padding: 0; }
 .chip.ghost-chip { color: var(--ghost); border: 1px dashed var(--ghost); padding: 0 6px; border-radius: var(--radius-lg); font-size: 11px; }
 .ghost-field { color: var(--text); white-space: pre-wrap; }
 .ghost-desc { line-height: 1.4; }
-.gnode.ghost-conflict { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--warn); }
+.gnode.ghost-conflict, .gnode.surface-drift { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--warn); }
 .claim-warning { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--warn); color: var(--text); }
 .claim-warning-head { display: flex; align-items: center; color: var(--warn); }
 .intent-flag { margin-left: 6px; padding: 0 4px; border: 1px solid var(--warn); border-radius: var(--radius-sm); color: var(--warn); font-size: 11px; }

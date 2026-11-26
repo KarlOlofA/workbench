@@ -23,6 +23,16 @@ pub struct RefNode {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// The referenced node's `surface_hash` when this reference was built against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_hash: Option<String>,
+}
+
+impl RefNode {
+    /// Whether both point at the same node, whatever surface hash they were built against.
+    pub fn same_node(&self, other: &RefNode) -> bool {
+        self.id == other.id && self.module == other.module
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -110,8 +120,33 @@ pub struct Node {
     pub module: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<Reference>,
+    /// An exported surface: other projects' reference nodes may point at this node.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub export: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos: Option<[f64; 2]>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// The version of the surface hash. Bump it when the hashed fields change, so references
+/// built against the old version show as changed instead of silently matching.
+const SURFACE_VERSION: &str = "v1";
+
+/// A stable fingerprint of what other projects rely on when they reference a node: its kind,
+/// title, description and invariants. Files, links, decisions and position are internal and
+/// left out, so refactoring behind a surface doesn't flag every consumer. FNV-1a is used
+/// because it is stored on disk and must give the same value on every build.
+pub fn surface_hash(n: &Node) -> String {
+    let surface = [n.kind.trim(), n.title.trim(), n.description.trim(), &n.invariants.join("\n")].join("\u{0}");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in surface.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{SURFACE_VERSION}:{hash:016x}")
 }
 
 impl Node {
@@ -186,6 +221,7 @@ pub enum Field {
     Files,
     Module,
     Reference,
+    Export,
 }
 
 impl Field {
@@ -205,6 +241,7 @@ impl Field {
             Field::Files => "files",
             Field::Module => "module",
             Field::Reference => "reference",
+            Field::Export => "export",
         }
     }
 }
@@ -787,6 +824,9 @@ fn diff_net(base: &Graph, cur: &Graph, scope: Option<&str>) -> Vec<Change> {
                 if before.reference != after.reference {
                     fields.push(Field::Reference);
                 }
+                if before.export != after.export {
+                    fields.push(Field::Export);
+                }
                 if !fields.is_empty() {
                     out.push(Change {
                         scope: scope.clone(),
@@ -1097,12 +1137,30 @@ mod tests {
         assert!(!serde_json::to_string(&node("x", &[])).unwrap().contains("reference"));
 
         let mut cur = base.clone();
-        let picked = RefNode { id: "auth".into(), module: Some("core".into()) };
+        let picked = RefNode { id: "auth".into(), module: Some("core".into()), surface_hash: Some("v1:00".into()) };
         cur.net_mut(Some("github")).unwrap().node_mut("shared").unwrap().reference.as_mut().unwrap().nodes.push(picked);
         let changes = diff(&base, &cur);
         assert_eq!(changes.len(), 1);
         assert!(matches!(&changes[0].kind, ChangeKind::Modified(f) if f == &vec![Field::Reference]));
         assert!(cur.net(Some("github")).unwrap().node("shared").unwrap().is_reference());
+        let back: Graph = serde_json::from_str(&serde_json::to_string(&cur).unwrap()).unwrap();
+        assert_eq!(back, cur);
+
+        let mut exported = base.clone();
+        exported.node_mut("app").unwrap().export = true;
+        assert!(matches!(&diff(&base, &exported)[0].kind, ChangeKind::Modified(f) if f == &vec![Field::Export]));
+        assert!(!serde_json::to_string(&node("x", &[])).unwrap().contains("export"));
+    }
+
+    #[test]
+    fn surface_hash_covers_the_surface_only() {
+        let n = node("api", &["db"]);
+        let h = surface_hash(&n);
+        assert!(h.starts_with("v1:"));
+        let internal = Node { files: vec!["src/new.rs".into()], links: vec![], pos: Some([1.0, 2.0]), ..n.clone() };
+        assert_eq!(surface_hash(&internal), h);
+        assert_ne!(surface_hash(&Node { description: "Now returns XML".into(), ..n.clone() }), h);
+        assert_ne!(surface_hash(&Node { invariants: vec!["Never paginates".into()], ..n }), h);
     }
 
     #[test]

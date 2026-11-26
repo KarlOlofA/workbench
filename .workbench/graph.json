@@ -74,6 +74,9 @@
       "title": "Workbench session loop",
       "kind": "service",
       "description": "One long-running loop per agent that receives that agent's Cmd values (Send, Prompt, Interrupt, Restart, Resume, Close; Close stops the agent and ends the loop) and owns its live agent, so agents in a session work at the same time. With Workbench it spawns the agent process lazily in the agent's folder, respawns it when the rules version changes, and resumes the agent's stored session id. A generation counter drops events from killed processes. Streamed events become the agent's chat items; when the agent works in the open folder, file-touching tool results bump repo_version and reload the open file, and Done settles its chat turn or graph job against the baseline. A reply that ends with focus blocks has them stripped and shown as node choices in the chat, and a single match is focused on the graph right away. Tool results of a scoped run are recorded as its live edits. A reply that ends with spawn-agent blocks starts those agents with their tasks: in the same session, or, when a block names a repository of the agent's project, in a new session in that repository. A project-level agent gets the project's repositories as its context instead of the open folder's graph. Changing a project's repositories or descriptions also restarts Workbench with the updated project context. When it spawns the agent it passes the enabled MCP connections as --mcp-config, and the MCP statuses from the agent's init event go to app-state. With any other provider every message starts a new turn through the agent layer, and only Workbench session ids are saved for resuming. Each agent runs on its own provider and model when it was started on one (AppState::agent_provider), otherwise on the ones in the settings; a spawn-agent block can name a provider and model for the new agent, and an unknown provider id is shown as an error instead of starting it. The provider and model of a turn come from agent_provider. A job's route wins over the agent's own provider. When a turn fails because the provider ran out of tokens and a fallback is set, the agent moves to the fallback and gets the recent conversation as its next prompt. After a successful turn the files it changed that no node owns are named in the chat. A discussion chat's loop runs read only in Plan with Edit, Write, NotebookEdit and ExitPlanMode disallowed, denies every permission request, prefixes each message with an <execution_chat> digest of its execution chat (new items since the last message plus its state), and skips turn tracking, spawn blocks and plan approval.",
+      "invariants": [
+        "A discussion chat never edits files, starts agents, asks for plan approval or owns the graph turn"
+      ],
       "files": [
         "src/session.rs",
         "src/history.rs"
@@ -86,9 +89,6 @@
         "chat-sessions",
         "blast-radius",
         "llm-providers"
-      ],
-      "invariants": [
-        "A discussion chat never edits files, starts agents, asks for plan approval or owns the graph turn"
       ]
     },
     {
@@ -188,6 +188,13 @@
           "why": "The user wants a Figma node as its own kind of node on the graph",
           "source": "chat 2026-11-22",
           "date": "2026-11-22"
+        },
+        {
+          "decision": "surface_hash covers kind, title, description and invariants, hashed with FNV-1a and prefixed with a version (`v1:`)",
+          "why": "Files, links and decisions are internal, so refactors behind a surface don't flag consumers; the hash is stored on disk so it must be stable across builds, and the version prefix makes a future change of the hashed fields show as changed instead of silently matching",
+          "instead_of": "std's DefaultHasher, whose output can change between Rust versions",
+          "source": "PRO-197",
+          "date": "2026-11-25"
         }
       ],
       "files": [
@@ -381,6 +388,9 @@
           "date": "2026-11-24"
         }
       ],
+      "invariants": [
+        "Workbench never renames nodes to a canonical name on its own; the user does, and the rename is recorded as an ordinary title change"
+      ],
       "files": [
         "src/graph_view.rs",
         "src/naming.rs"
@@ -393,9 +403,6 @@
         "intent-ledger",
         "code-pane",
         "node-history"
-      ],
-      "invariants": [
-        "Workbench never renames nodes to a canonical name on its own; the user does, and the rename is recorded as an ordinary title change"
       ]
     },
     {
@@ -611,6 +618,24 @@
       "title": "External references",
       "kind": "service",
       "description": "Nodes of kind `reference` point outside the project through `reference.source`: a local folder or file, a GitHub repository (URL, owner/repo or github:owner/repo@ref/path), a website, or an npm/crate/pypi/go package. Sources are parsed into a Source, and Workbench looks for the referenced project's .workbench/graph.json: locally by walking up from the path, on GitHub through gh at the path and its parents, or in node_modules and the cargo registry for packages. Loaded graphs are cached in AppState by source. The user can pick nodes of that graph into `reference.nodes`, and their descriptions and files are put into the system prompt, the selection context and process prompts as read-only context.",
+      "decisions": [
+        {
+          "decision": "References can only pick nodes the other project marks as exported surfaces, never its internal nodes",
+          "why": "Otherwise upstream refactors break every downstream graph and the graph stops being a stable abstraction",
+          "instead_of": "picking any node of the referenced graph",
+          "source": "PRO-197",
+          "date": "2026-11-25"
+        },
+        {
+          "decision": "Each picked node stores the surface hash it was built against, and a mismatch shows the same warning ring as branch conflicts",
+          "why": "Answers what this talks to and whether the other side changed, using the visual language users already know from ghost branches",
+          "source": "PRO-197",
+          "date": "2026-11-25"
+        }
+      ],
+      "invariants": [
+        "References only point at exported surfaces, never internal nodes"
+      ],
       "files": [
         "src/reference.rs",
         "src/graph.rs",
@@ -774,6 +799,15 @@
       "title": "LLM providers",
       "kind": "module",
       "description": "Lets the user switch the chat between Claude Code, Codex and Mistral Vibe (agent CLIs) and the Anthropic, OpenAI, Mistral and OpenRouter APIs, with a model per provider. The header uses it for the provider and model picker, the Code pane for the Providers tab, and the agent layer to run Codex, Vibe and API turns. The provider picked in the settings is only the default: an agent can be started on another provider and model from the chat through a spawn-agent block, and the chat tab, sidebar row and mode toggle show the agent's own provider. A fallback provider and model can be set for when a chat's provider runs out of tokens; the chat then continues there with the conversation so far.",
+      "decisions": [
+        {
+          "decision": "The Claude Code CLI provider is labelled “Claude Code (CLI)” (short name “claude”), like the other CLI providers",
+          "why": "The user pointed out that Workbench has no model of its own: this provider runs the Claude Code CLI, so calling it “Workbench” was misleading",
+          "instead_of": "“Workbench”",
+          "source": "chat 2026-11-24",
+          "date": "2026-11-24"
+        }
+      ],
       "files": [
         "src/providers.rs",
         "src/providers_view.rs",
@@ -787,16 +821,7 @@
         "app-state",
         "theme"
       ],
-      "module": "providers",
-      "decisions": [
-        {
-          "decision": "The Claude Code CLI provider is labelled “Claude Code (CLI)” (short name “claude”), like the other CLI providers",
-          "why": "The user pointed out that Workbench has no model of its own: this provider runs the Claude Code CLI, so calling it “Workbench” was misleading",
-          "instead_of": "“Workbench”",
-          "source": "chat 2026-11-24",
-          "date": "2026-11-24"
-        }
-      ]
+      "module": "providers"
     },
     {
       "id": "project-sidebar",
@@ -905,13 +930,6 @@
       "title": "Chat sessions & agents",
       "kind": "store",
       "description": "Chat sessions, each bound to one folder (a repository checkout or a worktree) and holding one or more agents. A new session is named after the folder's checked-out branch, like its worktree in the sidebar (or the folder name without one), and can be renamed. Agents added by hand are called Agent; agents started by another agent get the name it gives. Closing a session stops its agents and removes it; their transcripts stay on disk for the History menu. Each agent is its own conversation with its own agent process and session loop; its live state (messages, busy, queued messages, permissions, plan, mode, model, cost, input) is a Chat in app-state. Sessions, agent names and each agent's provider session id are saved in ~/.config/workbench/chat_sessions.json, so the conversations resume after a restart; a folder can have no session, and then the chat shows a New session button and actions that prompt the agent start one. Creating a worktree or a branch, or pressing New session, starts a new session, and agents are added with the chat's + tab or started by another agent. A project-level session belongs to a project instead of one folder: its agent works in the folder that holds the project's repositories, is listed under the project in the sidebar, and is shown in the chat while the project view is open (New project session starts one). An agent started from the chat on a named provider or model saves them with the agent, so it keeps running on them after a restart. Each agent can also have a discussion chat (PRO-248): a second, read-only Chat with its own session loop, started on first use, kept in AppState.discussions (not in the session's agents) and resumed from SavedAgent.discussion. chat_view says which of the two the chat window shows.",
-      "files": [
-        "src/sessions.rs",
-        "src/state.rs"
-      ],
-      "links": [
-        "session-loop"
-      ],
       "decisions": [
         {
           "decision": "Each agent gets one separate, read-only discussion chat next to its execution chat, toggled with Execute | Discuss in the chat bar; every discussion message carries a digest of what happened in the execution chat since the previous one",
@@ -923,6 +941,13 @@
       ],
       "invariants": [
         "A discussion chat is never listed as an agent of its session; it is stopped together with its agent"
+      ],
+      "files": [
+        "src/sessions.rs",
+        "src/state.rs"
+      ],
+      "links": [
+        "session-loop"
       ]
     },
     {

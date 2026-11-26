@@ -58,7 +58,7 @@ fn kinds(c: &Change) -> Vec<Kind> {
     let mut out = Vec::new();
     for f in fields {
         let k = match f {
-            Field::Title | Field::Kind | Field::Description | Field::Decisions | Field::Invariants | Field::Reference => Kind::Description,
+            Field::Title | Field::Kind | Field::Description | Field::Decisions | Field::Invariants | Field::Reference | Field::Export => Kind::Description,
             Field::Links | Field::Module => Kind::Link,
             Field::Files => Kind::Files,
         };
